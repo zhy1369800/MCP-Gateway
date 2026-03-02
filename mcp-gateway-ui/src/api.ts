@@ -4,6 +4,8 @@ import type {
   GatewayConfig,
   HealthData,
   JsonValue,
+  SkillConfirmation,
+  SkillSummary,
   ServerConfig,
   ToolListResult,
 } from "./types";
@@ -30,7 +32,8 @@ export class ApiClient {
   constructor(baseUrl: string, adminToken: string, apiPrefix: string = "/api/v2") {
     this.baseUrl = normalizeBaseUrl(baseUrl);
     this.adminToken = adminToken.trim();
-    this.apiPrefix = apiPrefix.startsWith('/') ? apiPrefix : `/${apiPrefix}`;
+    const normalizedPrefix = apiPrefix.startsWith('/') ? apiPrefix : `/${apiPrefix}`;
+    this.apiPrefix = normalizedPrefix.replace(/\/+$/, "");
   }
 
   setAdminToken(token: string) {
@@ -103,49 +106,71 @@ export class ApiClient {
   }
 
   async getHealth(): Promise<HealthData> {
-    return this.request<HealthData>("GET", "/api/v2/admin/health");
+    return this.request<HealthData>("GET", "/admin/health");
   }
 
   async getConfig(): Promise<GatewayConfig> {
-    return this.request<GatewayConfig>("GET", "/api/v2/admin/config");
+    return this.request<GatewayConfig>("GET", "/admin/config");
   }
 
   async updateConfig(config: GatewayConfig): Promise<GatewayConfig> {
-    return this.request<GatewayConfig>("PUT", "/api/v2/admin/config", toJsonValue(config));
+    return this.request<GatewayConfig>("PUT", "/admin/config", toJsonValue(config));
   }
 
   async getServers(): Promise<ServerConfig[]> {
-    return this.request<ServerConfig[]>("GET", "/api/v2/admin/servers");
+    return this.request<ServerConfig[]>("GET", "/admin/servers");
   }
 
   async addServer(server: ServerConfig): Promise<ServerConfig> {
-    return this.request<ServerConfig>("POST", "/api/v2/admin/servers", toJsonValue(server));
+    return this.request<ServerConfig>("POST", "/admin/servers", toJsonValue(server));
   }
 
   async updateServer(name: string, server: ServerConfig): Promise<ServerConfig> {
     return this.request<ServerConfig>(
       "PUT",
-      `/api/v2/admin/servers/${encodeURIComponent(name)}`,
+      `/admin/servers/${encodeURIComponent(name)}`,
       toJsonValue(server),
     );
   }
 
   async deleteServer(name: string): Promise<{ deleted: string }> {
-    return this.request<{ deleted: string }>("DELETE", `/api/v2/admin/servers/${encodeURIComponent(name)}`);
+    return this.request<{ deleted: string }>("DELETE", `/admin/servers/${encodeURIComponent(name)}`);
   }
 
   async testServer(name: string): Promise<JsonValue> {
-    return this.request<JsonValue>("POST", `/api/v2/admin/servers/${encodeURIComponent(name)}/test`);
+    return this.request<JsonValue>("POST", `/admin/servers/${encodeURIComponent(name)}/test`);
   }
 
   async getServerTools(name: string, refresh = true): Promise<ToolListResult> {
     return this.request<ToolListResult>(
       "GET",
-      `/api/v2/admin/servers/${encodeURIComponent(name)}/tools?refresh=${refresh}`,
+      `/admin/servers/${encodeURIComponent(name)}/tools?refresh=${refresh}`,
     );
   }
 
   async exportConfig(): Promise<ExportPayload> {
-    return this.request<ExportPayload>("GET", "/api/v2/admin/export/mcp-servers");
+    return this.request<ExportPayload>("GET", "/admin/export/mcp-servers");
+  }
+
+  async listSkills(): Promise<SkillSummary[]> {
+    return this.request<SkillSummary[]>("GET", "/admin/skills");
+  }
+
+  async listSkillConfirmations(): Promise<SkillConfirmation[]> {
+    return this.request<SkillConfirmation[]>("GET", "/admin/skills/confirmations");
+  }
+
+  async approveSkillConfirmation(id: string): Promise<SkillConfirmation> {
+    return this.request<SkillConfirmation>(
+      "POST",
+      `/admin/skills/confirmations/${encodeURIComponent(id)}/approve`,
+    );
+  }
+
+  async rejectSkillConfirmation(id: string): Promise<SkillConfirmation> {
+    return this.request<SkillConfirmation>(
+      "POST",
+      `/admin/skills/confirmations/${encodeURIComponent(id)}/reject`,
+    );
   }
 }

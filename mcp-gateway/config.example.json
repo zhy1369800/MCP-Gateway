@@ -29,6 +29,46 @@
     "maxRetries": 2,
     "maxResponseWaitIterations": 100
   },
+  "skills": {
+    "enabled": false,
+    "serverName": "__skills__",
+    "roots": [],
+    "policy": {
+      "defaultAction": "allow",
+      "rules": [
+        {
+          "id": "deny-rm-root",
+          "action": "deny",
+          "commandTree": ["rm"],
+          "contains": ["-rf", "/"],
+          "reason": "Potential root destructive deletion"
+        },
+        {
+          "id": "confirm-rm",
+          "action": "confirm",
+          "commandTree": ["rm"],
+          "contains": [],
+          "reason": "File deletion command requires confirmation"
+        },
+        {
+          "id": "confirm-remove-item",
+          "action": "confirm",
+          "commandTree": ["remove-item"],
+          "contains": [],
+          "reason": "PowerShell deletion command requires confirmation"
+        }
+      ],
+      "pathGuard": {
+        "enabled": false,
+        "whitelistDirs": [],
+        "onViolation": "confirm"
+      }
+    },
+    "execution": {
+      "timeoutMs": 30000,
+      "maxOutputBytes": 13107200
+    }
+  },
   "servers": [
     {
       "name": "filesystem",

@@ -5,12 +5,15 @@ use chrono::{DateTime, Utc};
 use gateway_core::{ConfigService, ProcessManager};
 use tokio::sync::{broadcast, RwLock};
 
+use crate::SkillsService;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config_service: ConfigService,
     pub process_manager: ProcessManager,
     pub started_at: DateTime<Utc>,
     pub sse_hub: SseHub,
+    pub skills: SkillsService,
 }
 
 #[derive(Clone)]

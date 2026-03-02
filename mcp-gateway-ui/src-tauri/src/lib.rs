@@ -1,5 +1,5 @@
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -7,7 +7,7 @@ use std::{fs, io};
 
 use chrono::Utc;
 use gateway_core::{load_config_from_path, ConfigService, ProcessManager};
-use gateway_http::{build_router, spawn_idle_reaper, AppState, SseHub};
+use gateway_http::{build_router, spawn_idle_reaper, AppState, SkillsService, SseHub};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::State;
@@ -49,6 +49,14 @@ struct GatewayProcessStatus {
     executable: Option<String>,
     config_path: Option<String>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDirectoryValidation {
+    exists: bool,
+    is_dir: bool,
+    has_skill_md: bool,
 }
 
 fn stopped_status(last_error: Option<String>) -> GatewayProcessStatus {
@@ -133,6 +141,7 @@ async fn start_embedded_gateway(config_path: PathBuf) -> Result<ManagedGateway, 
         process_manager: ProcessManager::new(),
         started_at: Utc::now(),
         sse_hub: SseHub::new(),
+        skills: SkillsService::new(),
     };
 
     let router = build_router(state.clone(), &cfg);
@@ -325,12 +334,87 @@ fn get_config_path() -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+fn has_skill_md_in_directory(root: &Path) -> Result<bool, String> {
+    let entries = fs::read_dir(root).map_err(io_error)?;
+    for entry in entries {
+        let entry = entry.map_err(io_error)?;
+        let file_type = entry.file_type().map_err(io_error)?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let is_skill_md = entry
+            .file_name()
+            .to_str()
+            .map(|name| name.eq_ignore_ascii_case("SKILL.md"))
+            .unwrap_or(false);
+        if is_skill_md {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[tauri::command]
+fn pick_folder_dialog(start_dir: Option<String>) -> Result<Option<String>, String> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(path) = start_dir {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            let dir = PathBuf::from(trimmed);
+            if dir.exists() {
+                dialog = dialog.set_directory(dir);
+            }
+        }
+    }
+
+    Ok(dialog
+        .pick_folder()
+        .map(|path| path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn validate_skill_directory(path: String) -> Result<SkillDirectoryValidation, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Ok(SkillDirectoryValidation {
+            exists: false,
+            is_dir: false,
+            has_skill_md: false,
+        });
+    }
+
+    let target = PathBuf::from(trimmed);
+    if !target.exists() {
+        return Ok(SkillDirectoryValidation {
+            exists: false,
+            is_dir: false,
+            has_skill_md: false,
+        });
+    }
+
+    if !target.is_dir() {
+        return Ok(SkillDirectoryValidation {
+            exists: true,
+            is_dir: false,
+            has_skill_md: false,
+        });
+    }
+
+    let has_skill_md = has_skill_md_in_directory(&target)?;
+    Ok(SkillDirectoryValidation {
+        exists: true,
+        is_dir: true,
+        has_skill_md,
+    })
+}
+
 fn default_local_config() -> Value {
     json!({
         "version": 2,
         "listen": "127.0.0.1:8765",
         "allowNonLoopback": false,
         "mode": "both",
+        "apiPrefix": "/api/v2",
         "security": {
             "mcp": {
                 "enabled": false,
@@ -356,12 +440,56 @@ fn default_local_config() -> Value {
             "maxRetries": 2,
             "maxResponseWaitIterations": 100
         },
+        "skills": {
+            "enabled": false,
+            "serverName": "__skills__",
+            "roots": default_skills_roots(),
+            "policy": {
+                "defaultAction": "allow",
+                "rules": [
+                    {
+                        "id": "deny-rm-root",
+                        "action": "deny",
+                        "commandTree": ["rm"],
+                        "contains": ["-rf", "/"],
+                        "reason": "Potential root destructive deletion"
+                    },
+                    {
+                        "id": "confirm-rm",
+                        "action": "confirm",
+                        "commandTree": ["rm"],
+                        "contains": [],
+                        "reason": "File deletion command requires confirmation"
+                    },
+                    {
+                        "id": "confirm-remove-item",
+                        "action": "confirm",
+                        "commandTree": ["remove-item"],
+                        "contains": [],
+                        "reason": "PowerShell deletion command requires confirmation"
+                    }
+                ],
+                "pathGuard": {
+                    "enabled": false,
+                    "whitelistDirs": [],
+                    "onViolation": "confirm"
+                }
+            },
+            "execution": {
+                "timeoutMs": 30000,
+                "maxOutputBytes": 13107200
+            }
+        },
         "servers": []
     })
 }
 
 fn io_error(error: io::Error) -> String {
     format!("文件操作失败：{error}")
+}
+
+fn default_skills_roots() -> Vec<String> {
+    Vec::new()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -375,7 +503,9 @@ pub fn run() {
             stop_gateway,
             load_local_config,
             save_local_config,
-            get_config_path
+            get_config_path,
+            pick_folder_dialog,
+            validate_skill_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

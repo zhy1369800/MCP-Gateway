@@ -73,6 +73,8 @@ pub struct GatewayConfig {
     pub defaults: DefaultsConfig,
     #[serde(default)]
     pub servers: Vec<ServerConfig>,
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 impl Default for GatewayConfig {
@@ -87,6 +89,124 @@ impl Default for GatewayConfig {
             transport: TransportConfig::default(),
             defaults: DefaultsConfig::default(),
             servers: Vec::new(),
+            skills: SkillsConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_skills_server_name")]
+    pub server_name: String,
+    #[serde(default = "default_skills_roots")]
+    pub roots: Vec<String>,
+    #[serde(default)]
+    pub policy: SkillsPolicyConfig,
+    #[serde(default)]
+    pub execution: SkillsExecutionConfig,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server_name: default_skills_server_name(),
+            roots: default_skills_roots(),
+            policy: SkillsPolicyConfig::default(),
+            execution: SkillsExecutionConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPolicyConfig {
+    #[serde(default)]
+    pub default_action: SkillPolicyAction,
+    #[serde(default = "default_skills_command_rules")]
+    pub rules: Vec<SkillCommandRule>,
+    #[serde(default)]
+    pub path_guard: SkillsPathGuardConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirm_keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_keywords: Vec<String>,
+}
+
+impl Default for SkillsPolicyConfig {
+    fn default() -> Self {
+        Self {
+            default_action: SkillPolicyAction::Allow,
+            rules: default_skills_command_rules(),
+            path_guard: SkillsPathGuardConfig::default(),
+            confirm_keywords: Vec::new(),
+            deny_keywords: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillPolicyAction {
+    #[default]
+    Allow,
+    Confirm,
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPathGuardConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub whitelist_dirs: Vec<String>,
+    #[serde(default = "default_path_guard_violation_action")]
+    pub on_violation: SkillPolicyAction,
+}
+
+impl Default for SkillsPathGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            whitelist_dirs: Vec::new(),
+            on_violation: default_path_guard_violation_action(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillCommandRule {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub action: SkillPolicyAction,
+    #[serde(default)]
+    pub command_tree: Vec<String>,
+    #[serde(default)]
+    pub contains: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsExecutionConfig {
+    #[serde(default = "default_skills_exec_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_skills_max_output_bytes")]
+    pub max_output_bytes: usize,
+}
+
+impl Default for SkillsExecutionConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: default_skills_exec_timeout_ms(),
+            max_output_bytes: default_skills_max_output_bytes(),
         }
     }
 }
@@ -262,6 +382,794 @@ fn default_server_enabled() -> bool {
     true
 }
 
+fn default_skills_server_name() -> String {
+    "__skills__".to_string()
+}
+
+fn default_skills_roots() -> Vec<String> {
+    Vec::new()
+}
+
+fn default_skills_command_rules() -> Vec<SkillCommandRule> {
+    vec![
+        SkillCommandRule {
+            id: "deny-rm-root".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["rm".to_string()],
+            contains: vec!["-rf".to_string(), "/".to_string()],
+            reason: "Potential root destructive deletion".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-remove-item-root".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["remove-item".to_string()],
+            contains: vec!["-recurse".to_string(), "c:\\".to_string()],
+            reason: "Potential recursive deletion on drive root".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-sudo".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["sudo".to_string()],
+            contains: Vec::new(),
+            reason: "Privilege escalation command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-su".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["su".to_string()],
+            contains: Vec::new(),
+            reason: "User switching command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-doas".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["doas".to_string()],
+            contains: Vec::new(),
+            reason: "Privilege escalation command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-chmod".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["chmod".to_string()],
+            contains: Vec::new(),
+            reason: "Permission modification command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-chown".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["chown".to_string()],
+            contains: Vec::new(),
+            reason: "Ownership modification command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-chgrp".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["chgrp".to_string()],
+            contains: Vec::new(),
+            reason: "Group ownership modification command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-takeown".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["takeown".to_string()],
+            contains: Vec::new(),
+            reason: "Windows ownership takeover command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-icacls".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["icacls".to_string()],
+            contains: Vec::new(),
+            reason: "Windows ACL modification command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-reg".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["reg".to_string()],
+            contains: Vec::new(),
+            reason: "Registry modification command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-bcdedit".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["bcdedit".to_string()],
+            contains: Vec::new(),
+            reason: "Boot configuration command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-netsh".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["netsh".to_string()],
+            contains: Vec::new(),
+            reason: "Network configuration command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-runas".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["runas".to_string()],
+            contains: Vec::new(),
+            reason: "Privilege escalation command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-taskkill".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["taskkill".to_string()],
+            contains: Vec::new(),
+            reason: "Process termination command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-diskpart".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["diskpart".to_string()],
+            contains: Vec::new(),
+            reason: "Disk partition command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-format".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["format".to_string()],
+            contains: Vec::new(),
+            reason: "Disk formatting command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-certutil".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["certutil".to_string()],
+            contains: Vec::new(),
+            reason: "Download or certificate manipulation command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-bitsadmin".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["bitsadmin".to_string()],
+            contains: Vec::new(),
+            reason: "Background transfer command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-msiexec".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["msiexec".to_string()],
+            contains: Vec::new(),
+            reason: "Installer execution command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-regsvr32".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["regsvr32".to_string()],
+            contains: Vec::new(),
+            reason: "Binary registration command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-rundll32".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["rundll32".to_string()],
+            contains: Vec::new(),
+            reason: "Dynamic library execution command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-schtasks".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["schtasks".to_string()],
+            contains: Vec::new(),
+            reason: "Task scheduler command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-sc".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["sc".to_string()],
+            contains: Vec::new(),
+            reason: "Service controller command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-systemctl".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["systemctl".to_string()],
+            contains: Vec::new(),
+            reason: "Service controller command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-service".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["service".to_string()],
+            contains: Vec::new(),
+            reason: "Service controller command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-pkexec".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["pkexec".to_string()],
+            contains: Vec::new(),
+            reason: "Privilege escalation command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-kill".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["kill".to_string()],
+            contains: Vec::new(),
+            reason: "Process termination command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-pkill".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["pkill".to_string()],
+            contains: Vec::new(),
+            reason: "Process termination command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-killall".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["killall".to_string()],
+            contains: Vec::new(),
+            reason: "Process termination command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-apt".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["apt".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-apt-get".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["apt-get".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-yum".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["yum".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-dnf".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["dnf".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-pacman".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["pacman".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-zypper".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["zypper".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-apk".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["apk".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-brew".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["brew".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-winget".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["winget".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-choco".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["choco".to_string()],
+            contains: Vec::new(),
+            reason: "Package manager command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-iptables".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["iptables".to_string()],
+            contains: Vec::new(),
+            reason: "Firewall command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-nft".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["nft".to_string()],
+            contains: Vec::new(),
+            reason: "Firewall command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-ufw".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["ufw".to_string()],
+            contains: Vec::new(),
+            reason: "Firewall command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-ip".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["ip".to_string()],
+            contains: Vec::new(),
+            reason: "Network configuration command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-ifconfig".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["ifconfig".to_string()],
+            contains: Vec::new(),
+            reason: "Network configuration command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-route".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["route".to_string()],
+            contains: Vec::new(),
+            reason: "Routing configuration command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-dd".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["dd".to_string()],
+            contains: Vec::new(),
+            reason: "Raw disk write command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-mkfs".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["mkfs".to_string()],
+            contains: Vec::new(),
+            reason: "Filesystem creation command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-fdisk".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["fdisk".to_string()],
+            contains: Vec::new(),
+            reason: "Disk partition command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-parted".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["parted".to_string()],
+            contains: Vec::new(),
+            reason: "Disk partition command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-mount".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["mount".to_string()],
+            contains: Vec::new(),
+            reason: "Mount command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-umount".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["umount".to_string()],
+            contains: Vec::new(),
+            reason: "Unmount command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-chattr".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["chattr".to_string()],
+            contains: Vec::new(),
+            reason: "File attribute modification command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-setfacl".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["setfacl".to_string()],
+            contains: Vec::new(),
+            reason: "ACL modification command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-useradd".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["useradd".to_string()],
+            contains: Vec::new(),
+            reason: "User management command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-usermod".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["usermod".to_string()],
+            contains: Vec::new(),
+            reason: "User management command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-userdel".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["userdel".to_string()],
+            contains: Vec::new(),
+            reason: "User management command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-groupadd".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["groupadd".to_string()],
+            contains: Vec::new(),
+            reason: "Group management command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-groupdel".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["groupdel".to_string()],
+            contains: Vec::new(),
+            reason: "Group management command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-launchctl".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["launchctl".to_string()],
+            contains: Vec::new(),
+            reason: "macOS service controller command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-defaults".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["defaults".to_string()],
+            contains: Vec::new(),
+            reason: "macOS preferences write command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-spctl".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["spctl".to_string()],
+            contains: Vec::new(),
+            reason: "macOS security policy command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-csrutil".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["csrutil".to_string()],
+            contains: Vec::new(),
+            reason: "macOS SIP command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-security".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["security".to_string()],
+            contains: Vec::new(),
+            reason: "macOS keychain command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-osascript".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["osascript".to_string()],
+            contains: Vec::new(),
+            reason: "AppleScript execution command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-diskutil".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["diskutil".to_string()],
+            contains: Vec::new(),
+            reason: "Disk utility command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-powershell".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["powershell".to_string()],
+            contains: Vec::new(),
+            reason: "Nested shell launch is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-pwsh".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["pwsh".to_string()],
+            contains: Vec::new(),
+            reason: "Nested shell launch is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-cmd".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["cmd".to_string()],
+            contains: Vec::new(),
+            reason: "Nested shell launch is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-bash-c".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["bash".to_string()],
+            contains: vec!["-c".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-bash-lc".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["bash".to_string()],
+            contains: vec!["-lc".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-sh-c".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["sh".to_string()],
+            contains: vec!["-c".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-sh-lc".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["sh".to_string()],
+            contains: vec!["-lc".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-zsh-c".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["zsh".to_string()],
+            contains: vec!["-c".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-zsh-lc".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["zsh".to_string()],
+            contains: vec!["-lc".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-dash-c".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["dash".to_string()],
+            contains: vec!["-c".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-dash-lc".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["dash".to_string()],
+            contains: vec!["-lc".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-ksh-c".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["ksh".to_string()],
+            contains: vec!["-c".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-ksh-lc".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["ksh".to_string()],
+            contains: vec!["-lc".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-fish-c".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["fish".to_string()],
+            contains: vec!["-c".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-tcsh-c".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["tcsh".to_string()],
+            contains: vec!["-c".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-csh-c".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["csh".to_string()],
+            contains: vec!["-c".to_string()],
+            reason: "Shell wrapper command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-invoke-expression".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["invoke-expression".to_string()],
+            contains: Vec::new(),
+            reason: "Dynamic command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-iex".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["iex".to_string()],
+            contains: Vec::new(),
+            reason: "Dynamic command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-invoke-command".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["invoke-command".to_string()],
+            contains: Vec::new(),
+            reason: "Remote command execution is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-curl".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["curl".to_string()],
+            contains: Vec::new(),
+            reason: "Network download command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-wget".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["wget".to_string()],
+            contains: Vec::new(),
+            reason: "Network download command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-invoke-webrequest".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["invoke-webrequest".to_string()],
+            contains: Vec::new(),
+            reason: "Network download command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-irm".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["irm".to_string()],
+            contains: Vec::new(),
+            reason: "Network download command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-set-content".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["set-content".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-add-content".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["add-content".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-clear-content".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["clear-content".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-out-file".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["out-file".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-tee".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["tee".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-sed".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["sed".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-awk".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["awk".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-perl".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["perl".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-ed".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["ed".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-ex".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["ex".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-vi".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["vi".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-vim".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["vim".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-nvim".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["nvim".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-nano".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["nano".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "deny-notepad".to_string(),
+            action: SkillPolicyAction::Deny,
+            command_tree: vec!["notepad".to_string()],
+            contains: Vec::new(),
+            reason: "Text editing command is blocked".to_string(),
+        },
+        SkillCommandRule {
+            id: "confirm-rm".to_string(),
+            action: SkillPolicyAction::Confirm,
+            command_tree: vec!["rm".to_string()],
+            contains: Vec::new(),
+            reason: "File deletion command requires confirmation".to_string(),
+        },
+        SkillCommandRule {
+            id: "confirm-del".to_string(),
+            action: SkillPolicyAction::Confirm,
+            command_tree: vec!["del".to_string()],
+            contains: Vec::new(),
+            reason: "File deletion command requires confirmation".to_string(),
+        },
+        SkillCommandRule {
+            id: "confirm-rmdir".to_string(),
+            action: SkillPolicyAction::Confirm,
+            command_tree: vec!["rmdir".to_string()],
+            contains: Vec::new(),
+            reason: "Directory deletion command requires confirmation".to_string(),
+        },
+        SkillCommandRule {
+            id: "confirm-remove-item".to_string(),
+            action: SkillPolicyAction::Confirm,
+            command_tree: vec!["remove-item".to_string()],
+            contains: Vec::new(),
+            reason: "PowerShell deletion command requires confirmation".to_string(),
+        },
+        SkillCommandRule {
+            id: "confirm-unlink".to_string(),
+            action: SkillPolicyAction::Confirm,
+            command_tree: vec!["unlink".to_string()],
+            contains: Vec::new(),
+            reason: "File unlink command requires confirmation".to_string(),
+        },
+    ]
+}
+
+fn default_path_guard_violation_action() -> SkillPolicyAction {
+    SkillPolicyAction::Confirm
+}
+
+fn default_skills_exec_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_skills_max_output_bytes() -> usize {
+    128 * 1024
+}
+
 pub fn generate_token() -> String {
     Alphanumeric.sample_string(&mut rand::rngs::OsRng, 40)
 }
@@ -382,6 +1290,98 @@ pub fn normalize_config_in_place(cfg: &mut GatewayConfig) {
             })
             .collect();
     }
+
+    cfg.skills.server_name = cfg.skills.server_name.trim().to_string();
+    if cfg.skills.server_name.is_empty() {
+        cfg.skills.server_name = default_skills_server_name();
+    }
+
+    cfg.skills.roots = cfg
+        .skills
+        .roots
+        .iter()
+        .map(|root| root.trim().to_string())
+        .filter(|root| !root.is_empty())
+        .collect();
+
+    cfg.skills.policy.rules = cfg
+        .skills
+        .policy
+        .rules
+        .iter()
+        .map(|rule| SkillCommandRule {
+            id: rule.id.trim().to_string(),
+            action: rule.action.clone(),
+            command_tree: rule
+                .command_tree
+                .iter()
+                .map(|node| node.trim().to_ascii_lowercase())
+                .filter(|node| !node.is_empty())
+                .collect(),
+            contains: rule
+                .contains
+                .iter()
+                .map(|token| token.trim().to_ascii_lowercase())
+                .filter(|token| !token.is_empty())
+                .collect(),
+            reason: rule.reason.trim().to_string(),
+        })
+        .filter(|rule| !rule.command_tree.is_empty() || !rule.contains.is_empty())
+        .collect();
+
+    cfg.skills.policy.path_guard.whitelist_dirs = cfg
+        .skills
+        .policy
+        .path_guard
+        .whitelist_dirs
+        .iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+
+    cfg.skills.policy.confirm_keywords = cfg
+        .skills
+        .policy
+        .confirm_keywords
+        .iter()
+        .map(|keyword| keyword.trim().to_ascii_lowercase())
+        .filter(|keyword| !keyword.is_empty())
+        .collect();
+
+    cfg.skills.policy.deny_keywords = cfg
+        .skills
+        .policy
+        .deny_keywords
+        .iter()
+        .map(|keyword| keyword.trim().to_ascii_lowercase())
+        .filter(|keyword| !keyword.is_empty())
+        .collect();
+
+    if !cfg.skills.policy.confirm_keywords.is_empty() {
+        for (idx, keyword) in cfg.skills.policy.confirm_keywords.iter().enumerate() {
+            cfg.skills.policy.rules.push(SkillCommandRule {
+                id: format!("legacy-confirm-{}", idx + 1),
+                action: SkillPolicyAction::Confirm,
+                command_tree: Vec::new(),
+                contains: vec![keyword.clone()],
+                reason: format!("Legacy confirm keyword: {keyword}"),
+            });
+        }
+    }
+    if !cfg.skills.policy.deny_keywords.is_empty() {
+        for (idx, keyword) in cfg.skills.policy.deny_keywords.iter().enumerate() {
+            cfg.skills.policy.rules.push(SkillCommandRule {
+                id: format!("legacy-deny-{}", idx + 1),
+                action: SkillPolicyAction::Deny,
+                command_tree: Vec::new(),
+                contains: vec![keyword.clone()],
+                reason: format!("Legacy deny keyword: {keyword}"),
+            });
+        }
+    }
+
+    cfg.skills.policy.confirm_keywords.clear();
+    cfg.skills.policy.deny_keywords.clear();
 }
 
 fn normalize_path(input: &str, fallback: &str) -> String {
@@ -418,5 +1418,28 @@ mod tests {
         normalize_config_in_place(&mut cfg);
         assert_eq!(cfg.transport.streamable_http.base_path, "/mcp");
         assert_eq!(cfg.version, 2);
+    }
+
+    #[test]
+    fn default_skills_rules_include_sensitive_and_editor_denies() {
+        let rules = default_skills_command_rules();
+        let check = |id: &str| {
+            let rule = rules
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("missing rule: {id}"));
+            assert_eq!(rule.action, SkillPolicyAction::Deny);
+        };
+
+        check("deny-sudo");
+        check("deny-runas");
+        check("deny-pkexec");
+        check("deny-launchctl");
+        check("deny-invoke-expression");
+        check("deny-curl");
+        check("deny-bash-lc");
+        check("deny-set-content");
+        check("deny-sed");
+        check("deny-vim");
     }
 }

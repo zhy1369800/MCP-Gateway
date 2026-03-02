@@ -12,6 +12,10 @@ const translations = {
     start: "启动",
     stop: "停止",
 
+    // Tab 标签
+    tabMcp: "MCP",
+    tabSkills: "SKILLS",
+
     // 网关设置
     gatewaySettings: "网关设置",
     listenAddress: "监听地址",
@@ -23,6 +27,49 @@ const translations = {
     adminToken: "Admin Token",
     mcpToken: "MCP Token",
     tokenPlaceholder: "留空则禁用",
+
+    // Skills
+    skillsConfig: "Skill MCP",
+    skillsEnable: "启用内置 Skill MCP",
+    skillsServerName: "Skill 服务名",
+    skillsRoots: "Skill 根目录",
+    skillsRootsHint: "仅检测该目录下是否存在 SKILL.md（不递归）",
+    skillsPathGuard: "路径守卫",
+    skillsPathGuardEnable: "启用路径白名单保护",
+    skillsWhitelistDirs: "白名单目录",
+    skillsWhitelistHint: "添加绝对目录；路径越界将触发策略",
+    addFolderPath: "添加目录",
+    browseFolder: "浏览",
+    folderPathPlaceholder: "输入目录路径或点击浏览",
+    skillDirIdle: "未检测",
+    skillDirChecking: "检测中",
+    skillDirValid: "检测成功",
+    skillDirInvalid: "未发现 SKILL.md",
+    skillDirError: "检测失败",
+    skillRootEnableBlocked: "仅检测成功后可启用",
+    skillsViolationAction: "越界动作",
+    skillsExecution: "执行配置",
+    skillsExecutionTimeout: "执行超时（毫秒）",
+    skillsExecutionTimeoutHint: "脚本执行超时时间，最小 1000ms",
+    skillsMaxOutputBytes: "最大输出（字节）",
+    skillsMaxOutputBytesHint: "脚本输出最大字节数，最小 1024",
+    skillsRules: "策略规则",
+    skillsRulesHint: "规则数组：id/action/commandTree/contains/reason",
+    skillsRulesJsonError: "命令规则 JSON 无效，请检查格式",
+    policyAllow: "允许",
+    policyConfirm: "确认",
+    policyDeny: "拒绝",
+    skillsPendingTitle: "待确认命令",
+    noSkillPending: "当前没有需要确认的命令。",
+    approve: "允许",
+    reject: "拒绝",
+    commandPreview: "命令",
+    confirmReason: "触发规则",
+    createdAt: "创建时间",
+    skillHttpEndpoint: "Skill HTTP",
+    skillSseEndpoint: "Skill SSE",
+    copySkillHttp: "复制 Skill HTTP JSON",
+    copySkillSse: "复制 Skill SSE JSON",
 
     // MCP Servers
     mcpServers: "MCP 服务列表",
@@ -43,8 +90,8 @@ const translations = {
     remove: "删除",
 
     // 端点链接
-    copySSE: "复制 SSE 链接",
-    copyHTTP: "复制 HTTP 链接",
+    copySSE: "复制 SSE JSON",
+    copyHTTP: "复制 HTTP JSON",
     noEnabledServers: "无启用服务 — 请添加服务后重启",
     endpointSSE: "SSE",
     endpointHTTP: "HTTP",
@@ -67,12 +114,16 @@ const translations = {
 
     // 保存配置
     saveConfig: "保存配置",
+    saveConfigUnsaved: "有未保存修改",
+    restartRequiredHint: "配置改动需重启网关后生效",
     saving: "保存中…",
     saveSuccess: "配置已保存",
 
     // 删除确认
     confirmDeleteTitle: "确认删除",
     confirmDeleteMsg: '确定要删除服务 "{name}" 吗？此操作无法撤销。',
+    confirmDeleteSkillRootMsg: "确定要删除这个 Skill 根目录吗？此操作无法撤销。",
+    confirmDeleteWhitelistDirMsg: "确定要删除这个白名单目录吗？此操作无法撤销。",
     cancel: "取消",
     confirmDelete: "删除",
 
@@ -96,6 +147,10 @@ const translations = {
     start: "Start",
     stop: "Stop",
 
+    // Tab labels
+    tabMcp: "MCP",
+    tabSkills: "SKILLS",
+
     // Gateway settings
     gatewaySettings: "Gateway Settings",
     listenAddress: "Listen Address",
@@ -107,6 +162,49 @@ const translations = {
     adminToken: "Admin Token",
     mcpToken: "MCP Token",
     tokenPlaceholder: "Leave empty to disable",
+
+    // Skills
+    skillsConfig: "Skill MCP",
+    skillsEnable: "Enable Built-in Skill MCP",
+    skillsServerName: "Skill Server Name",
+    skillsRoots: "Skill Roots",
+    skillsRootsHint: "Only check SKILL.md directly in this directory (non-recursive)",
+    skillsPathGuard: "Path Guard",
+    skillsPathGuardEnable: "Enable Path Whitelist Guard",
+    skillsWhitelistDirs: "Whitelist Directories",
+    skillsWhitelistHint: "Add absolute directories; out-of-scope paths trigger policy",
+    addFolderPath: "Add Directory",
+    browseFolder: "Browse",
+    folderPathPlaceholder: "Type directory path or click Browse",
+    skillDirIdle: "Not checked",
+    skillDirChecking: "Checking",
+    skillDirValid: "Valid",
+    skillDirInvalid: "No SKILL.md",
+    skillDirError: "Check failed",
+    skillRootEnableBlocked: "Can be enabled only after a valid check",
+    skillsViolationAction: "Violation Action",
+    skillsExecution: "Execution Settings",
+    skillsExecutionTimeout: "Execution Timeout (ms)",
+    skillsExecutionTimeoutHint: "Script execution timeout in milliseconds, minimum 1000ms",
+    skillsMaxOutputBytes: "Max Output (bytes)",
+    skillsMaxOutputBytesHint: "Maximum script output in bytes, minimum 1024",
+    skillsRules: "Policy Rules",
+    skillsRulesHint: "Rule array with id/action/commandTree/contains/reason",
+    skillsRulesJsonError: "Invalid command rules JSON",
+    policyAllow: "Allow",
+    policyConfirm: "Confirm",
+    policyDeny: "Deny",
+    skillsPendingTitle: "Pending Confirmations",
+    noSkillPending: "No pending command confirmations.",
+    approve: "Approve",
+    reject: "Reject",
+    commandPreview: "Command",
+    confirmReason: "Matched Rule",
+    createdAt: "Created At",
+    skillHttpEndpoint: "Skill HTTP",
+    skillSseEndpoint: "Skill SSE",
+    copySkillHttp: "Copy Skill HTTP JSON",
+    copySkillSse: "Copy Skill SSE JSON",
 
     // MCP Servers
     mcpServers: "MCP Servers",
@@ -127,8 +225,8 @@ const translations = {
     remove: "Remove",
 
     // Endpoint links
-    copySSE: "Copy SSE URL",
-    copyHTTP: "Copy HTTP URL",
+    copySSE: "Copy SSE JSON",
+    copyHTTP: "Copy HTTP JSON",
     noEnabledServers: "No enabled servers — add a server and restart",
     endpointSSE: "SSE",
     endpointHTTP: "HTTP",
@@ -151,12 +249,16 @@ const translations = {
 
     // Save config
     saveConfig: "Save",
+    saveConfigUnsaved: "Unsaved changes",
+    restartRequiredHint: "Configuration changes require gateway restart to apply",
     saving: "Saving…",
     saveSuccess: "Config saved",
 
     // Delete confirmation
     confirmDeleteTitle: "Confirm Delete",
     confirmDeleteMsg: 'Are you sure you want to delete server "{name}"? This cannot be undone.',
+    confirmDeleteSkillRootMsg: "Are you sure you want to delete this Skill root directory? This cannot be undone.",
+    confirmDeleteWhitelistDirMsg: "Are you sure you want to delete this whitelist directory? This cannot be undone.",
     cancel: "Cancel",
     confirmDelete: "Delete",
 

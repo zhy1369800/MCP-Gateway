@@ -1,8 +1,19 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Play, Square, Copy, Check, Code2, List, Languages, Save, FolderOpen } from "lucide-react";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
-import { loadLocalConfig, saveLocalConfig, getConfigPath } from "./localConfig";
-import type { GatewayConfig, ServerConfig } from "./types";
+import { loadLocalConfig, saveLocalConfig, getConfigPath, pickFolderDialog, validateSkillDirectory } from "./localConfig";
+import { ApiClient } from "./api";
+import { usePolling } from "./hooks/usePolling";
+import type {
+  GatewayConfig,
+  ServerConfig,
+  SkillCommandRule,
+  SkillConfirmation,
+  SkillDirectoryValidation,
+  SkillRootEntry,
+  SkillPolicyAction,
+  SkillsConfig,
+} from "./types";
 import { useT, type Lang } from "./i18n";
 import JsonEditor from "./components/JsonEditor";
 
@@ -45,10 +56,269 @@ function jsonToServers(obj: Record<string, unknown>): ServerConfig[] {
   });
 }
 
+function defaultSkillRules(): SkillCommandRule[] {
+  return [
+    {
+      id: "deny-rm-root",
+      action: "deny",
+      commandTree: ["rm"],
+      contains: ["-rf", "/"],
+      reason: "Potential root destructive deletion",
+    },
+    {
+      id: "deny-remove-item-root",
+      action: "deny",
+      commandTree: ["remove-item"],
+      contains: ["-recurse", "c:\\"],
+      reason: "Potential recursive deletion on drive root",
+    },
+    {
+      id: "confirm-rm",
+      action: "confirm",
+      commandTree: ["rm"],
+      contains: [],
+      reason: "File deletion command requires confirmation",
+    },
+    {
+      id: "confirm-remove-item",
+      action: "confirm",
+      commandTree: ["remove-item"],
+      contains: [],
+      reason: "PowerShell deletion command requires confirmation",
+    },
+  ];
+}
+
+function parseRulesJson(input: string): SkillCommandRule[] {
+  const parsed = JSON.parse(input) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("rules must be an array");
+  }
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(`rule ${index + 1} must be object`);
+    }
+    const row = entry as Record<string, unknown>;
+    const action = typeof row.action === "string" ? row.action : "allow";
+    if (action !== "allow" && action !== "confirm" && action !== "deny") {
+      throw new Error(`rule ${index + 1} action must be allow/confirm/deny`);
+    }
+
+    return {
+      id: typeof row.id === "string" ? row.id : `rule-${index + 1}`,
+      action: action as SkillPolicyAction,
+      commandTree: Array.isArray(row.commandTree) ? row.commandTree.map((item) => String(item)) : [],
+      contains: Array.isArray(row.contains) ? row.contains.map((item) => String(item)) : [],
+      reason: typeof row.reason === "string" ? row.reason : "",
+    };
+  });
+}
+
+function ensureSkillsConfig(raw: Partial<SkillsConfig> | undefined): SkillsConfig {
+  const legacyPolicy = (raw?.policy as unknown as {
+    confirmKeywords?: string[];
+    denyKeywords?: string[];
+  } | undefined);
+  const normalizedRoots = Array.isArray(raw?.roots)
+    ? raw.roots.map((item) => item.trim()).filter((item) => item.length > 0)
+    : [];
+  const parsedRootEntries = Array.isArray(raw?.rootEntries)
+    ? raw.rootEntries
+        .map((entry) => ({
+          path: (entry?.path ?? "").trim(),
+          enabled: entry?.enabled === true,
+        }))
+        .filter((entry) => entry.path.length > 0)
+    : [];
+  const rootEntries: SkillRootEntry[] = parsedRootEntries.length > 0
+    ? [...parsedRootEntries]
+    : normalizedRoots.map((path) => ({ path, enabled: true }));
+
+  const knownPaths = new Set(rootEntries.map((entry) => entry.path.toLowerCase()));
+  normalizedRoots.forEach((path) => {
+    if (!knownPaths.has(path.toLowerCase())) {
+      rootEntries.push({ path, enabled: true });
+      knownPaths.add(path.toLowerCase());
+    }
+  });
+
+  const hasLegacy = Array.isArray(legacyPolicy?.confirmKeywords) || Array.isArray(legacyPolicy?.denyKeywords);
+  let rules = Array.isArray(raw?.policy?.rules) && raw.policy.rules.length > 0
+    ? raw.policy.rules
+    : defaultSkillRules();
+
+  if ((!raw?.policy?.rules || raw.policy.rules.length === 0) && hasLegacy) {
+    const legacyConfirm = legacyPolicy?.confirmKeywords ?? [];
+    const legacyDeny = legacyPolicy?.denyKeywords ?? [];
+    const legacyRules: SkillCommandRule[] = [];
+    legacyDeny.forEach((item, index) => {
+      if (item.trim().length > 0) {
+        legacyRules.push({
+          id: `legacy-deny-${index + 1}`,
+          action: "deny",
+          commandTree: [],
+          contains: [item],
+          reason: `Legacy deny keyword: ${item}`,
+        });
+      }
+    });
+    legacyConfirm.forEach((item, index) => {
+      if (item.trim().length > 0) {
+        legacyRules.push({
+          id: `legacy-confirm-${index + 1}`,
+          action: "confirm",
+          commandTree: [],
+          contains: [item],
+          reason: `Legacy confirm keyword: ${item}`,
+        });
+      }
+    });
+    if (legacyRules.length > 0) {
+      rules = legacyRules;
+    }
+  }
+
+  return {
+    enabled: raw?.enabled ?? false,
+    serverName: raw?.serverName?.trim() || "__skills__",
+    roots: rootEntries.filter((entry) => entry.enabled).map((entry) => entry.path),
+    rootEntries,
+    policy: {
+      defaultAction: raw?.policy?.defaultAction ?? "allow",
+      rules: rules.map((rule) => ({
+        id: (rule.id ?? "").trim(),
+        action: rule.action ?? "allow",
+        commandTree: Array.isArray(rule.commandTree)
+          ? rule.commandTree.map((item) => item.trim()).filter((item) => item.length > 0)
+          : [],
+        contains: Array.isArray(rule.contains)
+          ? rule.contains.map((item) => item.trim()).filter((item) => item.length > 0)
+          : [],
+        reason: (rule.reason ?? "").trim(),
+      })),
+      pathGuard: {
+        enabled: raw?.policy?.pathGuard?.enabled ?? false,
+        whitelistDirs: Array.isArray(raw?.policy?.pathGuard?.whitelistDirs)
+          ? raw.policy.pathGuard.whitelistDirs.map((item) => item.trim()).filter((item) => item.length > 0)
+          : [],
+        onViolation: raw?.policy?.pathGuard?.onViolation ?? "confirm",
+      },
+    },
+    execution: {
+      timeoutMs: raw?.execution?.timeoutMs ?? 30000,
+      maxOutputBytes: raw?.execution?.maxOutputBytes ?? 13107200,
+    },
+  };
+}
+
+function formatTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString();
+}
+
+interface EditableConfigSnapshot {
+  servers: ServerConfig[];
+  listen: string;
+  apiPrefix: string;
+  transport: GatewayConfig["transport"];
+  security: GatewayConfig["security"];
+  skills: SkillsConfig;
+}
+
+type EndpointTransportType = "sse" | "streamable-http";
+
+function stableSortValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableSortValue(item));
+  }
+  if (value && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .forEach(([key, nested]) => {
+        sorted[key] = stableSortValue(nested);
+      });
+    return sorted;
+  }
+  return value;
+}
+
+function createEditableConfigSnapshot(input: {
+  servers: ServerConfig[];
+  listen: string;
+  apiPrefix: string;
+  ssePath: string;
+  httpPath: string;
+  adminToken: string;
+  mcpToken: string;
+  skills: SkillsConfig;
+}): EditableConfigSnapshot {
+  return {
+    servers: input.servers,
+    listen: input.listen,
+    apiPrefix: input.apiPrefix,
+    transport: {
+      sse: { basePath: input.ssePath },
+      streamableHttp: { basePath: input.httpPath },
+    },
+    security: {
+      admin: { enabled: input.adminToken !== "", token: input.adminToken },
+      mcp: { enabled: input.mcpToken !== "", token: input.mcpToken },
+    },
+    skills: input.skills,
+  };
+}
+
+function createEditableConfigFingerprint(snapshot: EditableConfigSnapshot): string {
+  return JSON.stringify(stableSortValue(snapshot));
+}
+
+function createMcpClientEntryJson(name: string, type: EndpointTransportType, url: string): string {
+  return JSON.stringify({
+    [name]: {
+      type,
+      url,
+    },
+  }, null, 2)
+    .split("\n")
+    .slice(1, -1)
+    .join("\n");
+}
+
+type SkillDirStatus = "idle" | "checking" | "valid" | "invalid" | "error";
+type SkillDirKind = "roots" | "whitelist";
+
+interface SkillDirectoryItem {
+  id: string;
+  path: string;
+  status: SkillDirStatus;
+  enabled: boolean;
+}
+
+function createSkillDirectoryItem(path = "", enabled = false): SkillDirectoryItem {
+  return {
+    id: `dir-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    path,
+    status: "idle",
+    enabled,
+  };
+}
+
+function skillDirectoryStatusFromResult(result: SkillDirectoryValidation): SkillDirStatus {
+  if (result.hasSkillMd) {
+    return "valid";
+  }
+  return "invalid";
+}
+
 // ── 删除确认弹窗组件 ──────────────────────────────────────────────
-function ConfirmDialog({ open, serverName, onCancel, onConfirm, t }: {
+function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: {
   open: boolean;
-  serverName: string;
+  title: string;
+  message: string;
   onCancel: () => void;
   onConfirm: () => void;
   t: ReturnType<typeof useT>;
@@ -57,15 +327,152 @@ function ConfirmDialog({ open, serverName, onCancel, onConfirm, t }: {
   return (
     <div className="modal-overlay" onClick={onCancel}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">{t("confirmDeleteTitle")}</div>
+        <div className="modal-header">{title}</div>
         <div className="modal-body">
-          {t("confirmDeleteMsg").replace("{name}", serverName)}
+          {message}
         </div>
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={onCancel}>{t("cancel")}</button>
           <button className="btn btn-danger" onClick={onConfirm}>{t("confirmDelete")}</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
+  pending: SkillConfirmation[];
+  busyIds: Set<string>;
+  onApprove: (id: string) => void;
+  onReject: (id: string) => void;
+  t: ReturnType<typeof useT>;
+}) {
+  if (pending.length === 0) {
+    return <div className="empty-hint">{t("noSkillPending")}</div>;
+  }
+
+  return (
+    <div className="skill-confirm-list">
+      {pending.map((item) => {
+        const busy = busyIds.has(item.id);
+        return (
+          <div className="skill-confirm-item" key={item.id}>
+            <div className="skill-confirm-head">
+              <div className="skill-confirm-meta">
+                <span className="skill-chip">{item.skill}</span>
+                <span className="skill-script">{item.script}</span>
+              </div>
+              <div className="skill-confirm-actions">
+                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => onReject(item.id)}>
+                  {t("reject")}
+                </button>
+                <button className="btn btn-start btn-sm" disabled={busy} onClick={() => onApprove(item.id)}>
+                  {t("approve")}
+                </button>
+              </div>
+            </div>
+            <div className="skill-confirm-row">
+              <span className="field-label">{t("commandPreview")}</span>
+              <code className="skill-command">{item.commandPreview}</code>
+            </div>
+            <div className="skill-confirm-row">
+              <span className="field-label">{t("confirmReason")}</span>
+              <span>{item.reason}</span>
+            </div>
+            <div className="skill-confirm-row">
+              <span className="field-label">{t("createdAt")}</span>
+              <span>{formatTime(item.createdAt)}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SkillDirectoryListEditor({
+  title,
+  hint,
+  items,
+  onAdd,
+  onRemove,
+  onPathChange,
+  onValidate,
+  onBrowse,
+  onToggleEnabled,
+  enableToggle = false,
+  showValidation = true,
+  t,
+}: {
+  title: string;
+  hint: string;
+  items: SkillDirectoryItem[];
+  onAdd: () => void;
+  onRemove: (id: string) => void;
+  onPathChange: (id: string, value: string) => void;
+  onValidate?: (id: string) => void;
+  onBrowse: (id: string) => void;
+  onToggleEnabled?: (id: string) => void;
+  enableToggle?: boolean;
+  showValidation?: boolean;
+  t: ReturnType<typeof useT>;
+}) {
+  const statusLabel = (status: SkillDirStatus): string => {
+    if (status === "checking") return t("skillDirChecking");
+    if (status === "valid") return t("skillDirValid");
+    if (status === "invalid") return t("skillDirInvalid");
+    if (status === "error") return t("skillDirError");
+    return t("skillDirIdle");
+  };
+
+  return (
+    <div className="skills-dir-panel">
+      <div className="skills-dir-panel-head">
+        <label className="field-label">{title}</label>
+        <button className="btn-add-dir" title={t("addFolderPath")} onClick={onAdd}>+</button>
+      </div>
+      <div className="skills-dir-list">
+        {items.map((item) => (
+          <div className={`skills-dir-row ${showValidation ? "" : "no-validation"} ${enableToggle ? "with-toggle" : ""}`} key={item.id}>
+            {enableToggle && (
+              <button
+                className={`toggle-btn skills-dir-toggle ${item.enabled ? "toggle-on" : "toggle-off"}`}
+                disabled={item.status !== "valid"}
+                onClick={() => onToggleEnabled?.(item.id)}
+                title={item.status === "valid"
+                  ? (item.enabled ? t("enabledClick") : t("disabledClick"))
+                  : t("skillRootEnableBlocked")}
+                aria-label={item.enabled ? t("enabledClick") : t("disabledClick")}
+              />
+            )}
+            <input
+              className="form-input skills-dir-input"
+              value={item.path}
+              placeholder={t("folderPathPlaceholder")}
+              onChange={(e) => onPathChange(item.id, e.target.value)}
+              onBlur={() => {
+                if (showValidation && onValidate) {
+                  onValidate(item.id);
+                }
+              }}
+            />
+            <button className="btn btn-secondary btn-sm skills-dir-browse" onClick={() => onBrowse(item.id)}>
+              <FolderOpen size={13} />
+              {t("browseFolder")}
+            </button>
+            {showValidation && (
+              <>
+                <span className={`skills-dir-dot ${item.status}`} aria-hidden />
+                <span className={`skills-dir-status ${item.status}`}>{statusLabel(item.status)}</span>
+              </>
+            )}
+            <button className="btn-icon btn-danger-icon skills-dir-remove" title={t("remove")} onClick={() => onRemove(item.id)}>
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+      <span className="json-hint">{hint}</span>
     </div>
   );
 }
@@ -80,7 +487,7 @@ function ServerRow({ server, onChange, onDelete, running, baseUrl, ssePath, http
   ssePath: string;
   httpPath: string;
   copied: string | null;
-  onCopy: (url: string, key: string) => void;
+  onCopy: (name: string, type: EndpointTransportType, url: string, key: string) => void;
   t: ReturnType<typeof useT>;
 }) {
   const sseUrl  = `${baseUrl}${ssePath}/${server.name}`;
@@ -184,7 +591,7 @@ function ServerRow({ server, onChange, onDelete, running, baseUrl, ssePath, http
             <span className="endpoint-label">{t("endpointSSE")}</span>
             <code className="endpoint-url">{sseUrl}</code>
             <button className="btn-icon" title={t("copySSE")}
-              onClick={() => onCopy(sseUrl, `${server.name}-sse`)}>
+              onClick={() => onCopy(server.name, "sse", sseUrl, `${server.name}-sse`)}>
               {copied === `${server.name}-sse`
                 ? <Check size={12} color="var(--accent-green)" />
                 : <Copy size={12} />}
@@ -194,7 +601,7 @@ function ServerRow({ server, onChange, onDelete, running, baseUrl, ssePath, http
             <span className="endpoint-label">{t("endpointHTTP")}</span>
             <code className="endpoint-url">{httpUrl}</code>
             <button className="btn-icon" title={t("copyHTTP")}
-              onClick={() => onCopy(httpUrl, `${server.name}-http`)}>
+              onClick={() => onCopy(server.name, "streamable-http", httpUrl, `${server.name}-http`)}>
               {copied === `${server.name}-http`
                 ? <Check size={12} color="var(--accent-green)" />
                 : <Copy size={12} />}
@@ -218,12 +625,23 @@ function App() {
     localStorage.setItem("mcp-lang", next);
   };
 
+  // ── Tab 状态 ──
+  const [activeTab, setActiveTab] = useState<"mcp" | "skills">("mcp");
+
   const [servers, setServers] = useState<ServerConfig[]>([]);
   const [listen, setListen] = useState("127.0.0.1:8765");
+  const [apiPrefix, setApiPrefix] = useState("/api/v2");
   const [ssePath, setSsePath] = useState("/api/v2/sse");
   const [httpPath, setHttpPath] = useState("/api/v2/mcp");
   const [adminToken, setAdminToken] = useState("");
   const [mcpToken, setMcpToken] = useState("");
+  const [skills, setSkills] = useState<SkillsConfig>(() => ensureSkillsConfig(undefined));
+  const [skillRootItems, setSkillRootItems] = useState<SkillDirectoryItem[]>([]);
+  const [skillWhitelistItems, setSkillWhitelistItems] = useState<SkillDirectoryItem[]>([]);
+  const [skillsRulesDraft, setSkillsRulesDraft] = useState("[]");
+  const [skillsRulesError, setSkillsRulesError] = useState<string | null>(null);
+  const [skillPending, setSkillPending] = useState<SkillConfirmation[]>([]);
+  const [skillActionBusy, setSkillActionBusy] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState<GatewayProcessStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -234,28 +652,170 @@ function App() {
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [savedConfigFingerprint, setSavedConfigFingerprint] = useState("");
   const [configPath, setConfigPath] = useState<string>("");
   // 删除确认弹窗状态
   const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; index: number; name: string }>({
     open: false, index: -1, name: ""
   });
+  const [skillDirDeleteConfirm, setSkillDirDeleteConfirm] = useState<{
+    open: boolean;
+    kind: SkillDirKind;
+    id: string;
+  }>({
+    open: false, kind: "roots", id: ""
+  });
+
+  const syncSkillRootsToConfig = useCallback((nextItems: SkillDirectoryItem[]) => {
+    const normalizedEntries = nextItems
+      .map((item) => ({
+        path: item.path.trim(),
+        enabled: item.enabled,
+        status: item.status,
+      }))
+      .filter((item) => item.path.length > 0);
+
+    setSkills((prev) => ({
+      ...prev,
+      roots: normalizedEntries
+        .filter((item) => item.enabled && item.status === "valid")
+        .map((item) => item.path),
+      rootEntries: normalizedEntries.map((item) => ({
+        path: item.path,
+        enabled: item.enabled,
+      })),
+    }));
+  }, []);
+
+  const setRootItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {
+    setSkillRootItems(nextItems);
+    syncSkillRootsToConfig(nextItems);
+  }, [syncSkillRootsToConfig]);
+
+  const setWhitelistItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {
+    setSkillWhitelistItems(nextItems);
+    setSkills((prev) => ({
+      ...prev,
+      policy: {
+        ...prev.policy,
+        pathGuard: {
+        ...prev.policy.pathGuard,
+          whitelistDirs: nextItems.map((item) => item.path.trim()).filter((item) => item.length > 0),
+        },
+      },
+    }));
+  }, []);
+
+  const updateItemStatus = useCallback((kind: "roots" | "whitelist", id: string, pathSnapshot: string, status: SkillDirStatus) => {
+    if (kind === "roots") {
+      setSkillRootItems((prev) => {
+        const next = prev.map((item) => {
+          if (item.id !== id) return item;
+          if (item.path.trim() !== pathSnapshot) return item;
+          return {
+            ...item,
+            status,
+            enabled: status === "valid" || status === "checking" ? item.enabled : false,
+          };
+        });
+        syncSkillRootsToConfig(next);
+        return next;
+      });
+      return;
+    }
+
+    setSkillWhitelistItems((prev) => prev.map((item) => {
+      if (item.id !== id) return item;
+      if (item.path.trim() !== pathSnapshot) return item;
+      return { ...item, status };
+    }));
+  }, [syncSkillRootsToConfig]);
+
+  const runItemValidation = useCallback(async (kind: "roots" | "whitelist", id: string, path: string) => {
+    const normalized = path.trim();
+    if (normalized.length === 0) {
+      updateItemStatus(kind, id, normalized, "idle");
+      return;
+    }
+
+    try {
+      const result = await validateSkillDirectory(normalized);
+      updateItemStatus(kind, id, normalized, skillDirectoryStatusFromResult(result));
+    } catch {
+      updateItemStatus(kind, id, normalized, "error");
+    }
+  }, [updateItemStatus]);
+
+  const triggerItemValidation = useCallback((kind: "roots" | "whitelist", id: string, path: string) => {
+    const normalized = path.trim();
+    if (normalized.length === 0) {
+      updateItemStatus(kind, id, normalized, "idle");
+      return;
+    }
+    updateItemStatus(kind, id, normalized, "checking");
+    void runItemValidation(kind, id, normalized);
+  }, [runItemValidation, updateItemStatus]);
 
   // ── 初始加载配置 ──
   useEffect(() => {
     loadLocalConfig().then((cfg) => {
-      setServers(cfg.servers ?? []);
-      if (cfg.listen) setListen(cfg.listen);
-      if (cfg.transport?.sse?.basePath) setSsePath(cfg.transport.sse.basePath);
-      if (cfg.transport?.streamableHttp?.basePath) setHttpPath(cfg.transport.streamableHttp.basePath);
+      const nextServers = cfg.servers ?? [];
+      const nextListen = cfg.listen || "127.0.0.1:8765";
+      const nextApiPrefix = cfg.apiPrefix || "/api/v2";
+      const nextSsePath = cfg.transport?.sse?.basePath || "/api/v2/sse";
+      const nextHttpPath = cfg.transport?.streamableHttp?.basePath || "/api/v2/mcp";
+      const nextAdminToken = cfg.security?.admin?.token ?? "";
+      const nextMcpToken = cfg.security?.mcp?.token ?? "";
+
+      setServers(nextServers);
+      setListen(nextListen);
+      setApiPrefix(nextApiPrefix);
+      setSsePath(nextSsePath);
+      setHttpPath(nextHttpPath);
       // 加载 Security 配置
-      if (cfg.security?.admin?.token) setAdminToken(cfg.security.admin.token);
-      if (cfg.security?.mcp?.token) setMcpToken(cfg.security.mcp.token);
-      setJsonText(JSON.stringify(serversToJson(cfg.servers ?? []), null, 2));
+      setAdminToken(nextAdminToken);
+      setMcpToken(nextMcpToken);
+      const nextSkills = ensureSkillsConfig(cfg.skills);
+      setSkills(nextSkills);
+      const rootEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
+        ? nextSkills.rootEntries
+        : nextSkills.roots.map((path) => ({ path, enabled: true }));
+      const nextRootItems = (rootEntries.length > 0 ? rootEntries : [{ path: "", enabled: false }]).map((entry) => ({
+        ...createSkillDirectoryItem(entry.path, entry.enabled),
+        status: entry.path.trim().length > 0 ? "checking" as const : "idle" as const,
+      }));
+      const nextWhitelistItems = (nextSkills.policy.pathGuard.whitelistDirs.length > 0
+        ? nextSkills.policy.pathGuard.whitelistDirs
+        : [""]
+      ).map((path) => ({
+        ...createSkillDirectoryItem(path, true),
+        status: "idle" as const,
+      }));
+      setSkillRootItems(nextRootItems);
+      setSkillWhitelistItems(nextWhitelistItems);
+      nextRootItems.forEach((item) => {
+        if (item.path.trim().length > 0) {
+          void runItemValidation("roots", item.id, item.path);
+        }
+      });
+      setSkillsRulesDraft(JSON.stringify(nextSkills.policy.rules, null, 2));
+      setSkillsRulesError(null);
+      setJsonText(JSON.stringify(serversToJson(nextServers), null, 2));
+      setSavedConfigFingerprint(createEditableConfigFingerprint(createEditableConfigSnapshot({
+        servers: nextServers,
+        listen: nextListen,
+        apiPrefix: nextApiPrefix,
+        ssePath: nextSsePath,
+        httpPath: nextHttpPath,
+        adminToken: nextAdminToken,
+        mcpToken: nextMcpToken,
+        skills: nextSkills,
+      })));
       setConfigLoaded(true);
     }).catch((e) => setError(String(e)));
     // 获取配置文件路径
     getConfigPath().then(setConfigPath).catch(() => {});
-  }, []);
+  }, [runItemValidation]);
 
   const switchToJson = () => {
     setJsonText(JSON.stringify(serversToJson(servers), null, 2));
@@ -285,6 +845,164 @@ function App() {
 
   const running = !!status?.running;
 
+  const fetchSkillPending = useCallback(async () => {
+    if (!running || !skills.enabled) {
+      setSkillPending([]);
+      return;
+    }
+    try {
+      const client = new ApiClient(listen, adminToken, apiPrefix);
+      const pending = await client.listSkillConfirmations();
+      setSkillPending(pending);
+    } catch (error) {
+      setError(String(error));
+    }
+  }, [adminToken, apiPrefix, listen, running, skills.enabled]);
+
+  usePolling(fetchSkillPending, 3000, running && skills.enabled);
+
+  const updateConfirmation = useCallback(async (id: string, action: "approve" | "reject") => {
+    setSkillActionBusy((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    try {
+      const client = new ApiClient(listen, adminToken, apiPrefix);
+      if (action === "approve") {
+        await client.approveSkillConfirmation(id);
+      } else {
+        await client.rejectSkillConfirmation(id);
+      }
+      await fetchSkillPending();
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setSkillActionBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  }, [adminToken, apiPrefix, fetchSkillPending, listen]);
+
+  const onRulesDraftChange = (value: string) => {
+    setSkillsRulesDraft(value);
+    try {
+      const parsed = parseRulesJson(value);
+      setSkills((prev) => ({
+        ...prev,
+        policy: {
+          ...prev.policy,
+          rules: parsed,
+        },
+      }));
+      setSkillsRulesError(null);
+    } catch {
+      setSkillsRulesError(t("skillsRulesJsonError"));
+    }
+  };
+
+  const addRootItem = () => {
+    setRootItemsAndSync([...skillRootItems, createSkillDirectoryItem("", false)]);
+  };
+
+  const addWhitelistItem = () => {
+    setWhitelistItemsAndSync([...skillWhitelistItems, createSkillDirectoryItem("", true)]);
+  };
+
+  const removeRootItem = (id: string) => {
+    const next = skillRootItems.filter((item) => item.id !== id);
+    setRootItemsAndSync(next.length > 0 ? next : [createSkillDirectoryItem("", false)]);
+  };
+
+  const removeWhitelistItem = (id: string) => {
+    const next = skillWhitelistItems.filter((item) => item.id !== id);
+    setWhitelistItemsAndSync(next.length > 0 ? next : [createSkillDirectoryItem("", true)]);
+  };
+
+  const requestRemoveRootItem = (id: string) => {
+    setSkillDirDeleteConfirm({ open: true, kind: "roots", id });
+  };
+
+  const requestRemoveWhitelistItem = (id: string) => {
+    setSkillDirDeleteConfirm({ open: true, kind: "whitelist", id });
+  };
+
+  const confirmSkillDirDelete = () => {
+    const { kind, id } = skillDirDeleteConfirm;
+    if (!id) {
+      setSkillDirDeleteConfirm({ open: false, kind: "roots", id: "" });
+      return;
+    }
+
+    if (kind === "roots") {
+      removeRootItem(id);
+    } else {
+      removeWhitelistItem(id);
+    }
+    setSkillDirDeleteConfirm({ open: false, kind: "roots", id: "" });
+  };
+
+  const cancelSkillDirDelete = () => {
+    setSkillDirDeleteConfirm({ open: false, kind: "roots", id: "" });
+  };
+
+  const updateRootItemPath = (id: string, path: string) => {
+    setRootItemsAndSync(skillRootItems.map((item) =>
+      item.id === id ? { ...item, path, status: "idle", enabled: false } : item
+    ));
+  };
+
+  const updateWhitelistItemPath = (id: string, path: string) => {
+    setWhitelistItemsAndSync(skillWhitelistItems.map((item) =>
+      item.id === id ? { ...item, path, status: "idle" } : item
+    ));
+  };
+
+  const validateRootItem = (id: string) => {
+    const target = skillRootItems.find((item) => item.id === id);
+    if (!target) return;
+    triggerItemValidation("roots", target.id, target.path);
+  };
+
+  const browseRootItem = async (id: string) => {
+    const target = skillRootItems.find((item) => item.id === id);
+    if (!target) return;
+    try {
+      const selected = await pickFolderDialog(target.path.trim() || undefined);
+      if (!selected) return;
+      setRootItemsAndSync(skillRootItems.map((item) =>
+        item.id === id ? { ...item, path: selected, status: "checking", enabled: false } : item
+      ));
+      void runItemValidation("roots", id, selected);
+    } catch (error) {
+      setError(String(error));
+    }
+  };
+
+  const toggleRootItemEnabled = (id: string) => {
+    setRootItemsAndSync(skillRootItems.map((item) => {
+      if (item.id !== id) return item;
+      if (item.status !== "valid") return { ...item, enabled: false };
+      return { ...item, enabled: !item.enabled };
+    }));
+  };
+
+  const browseWhitelistItem = async (id: string) => {
+    const target = skillWhitelistItems.find((item) => item.id === id);
+    if (!target) return;
+    try {
+      const selected = await pickFolderDialog(target.path.trim() || undefined);
+      if (!selected) return;
+      setWhitelistItemsAndSync(skillWhitelistItems.map((item) =>
+        item.id === id ? { ...item, path: selected, status: "idle" } : item
+      ));
+    } catch (error) {
+      setError(String(error));
+    }
+  };
+
   const resolveServers = (): ServerConfig[] | null => {
     let list: ServerConfig[];
     if (serversMode === "json") {
@@ -305,45 +1023,91 @@ function App() {
     return valid;
   };
 
+  const currentConfigFingerprint = useMemo(() => {
+    let compareServers = servers;
+    if (serversMode === "json") {
+      try {
+        compareServers = jsonToServers(JSON.parse(jsonText) as Record<string, unknown>);
+      } catch {
+        return null;
+      }
+    }
+
+    return createEditableConfigFingerprint(createEditableConfigSnapshot({
+      servers: compareServers,
+      listen,
+      apiPrefix,
+      ssePath,
+      httpPath,
+      adminToken,
+      mcpToken,
+      skills: ensureSkillsConfig(skills),
+    }));
+  }, [servers, serversMode, jsonText, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills]);
+
+  const isConfigDirty = configLoaded
+    && (currentConfigFingerprint === null || currentConfigFingerprint !== savedConfigFingerprint);
+  const showRestartRequiredHint = running && isConfigDirty;
+
   const persistConfig = async (nextServers: ServerConfig[]) => {
+    const snapshot = createEditableConfigSnapshot({
+      servers: nextServers,
+      listen,
+      apiPrefix,
+      ssePath,
+      httpPath,
+      adminToken,
+      mcpToken,
+      skills: ensureSkillsConfig(skills),
+    });
     const cfg: GatewayConfig = await loadLocalConfig();
-    cfg.servers = nextServers;
-    cfg.listen = listen;
-    cfg.transport = { sse: { basePath: ssePath }, streamableHttp: { basePath: httpPath } };
-    // 保存 Security 配置
-    cfg.security = {
-      admin: { enabled: adminToken !== "", token: adminToken },
-      mcp: { enabled: mcpToken !== "", token: mcpToken },
-    };
+    cfg.servers = snapshot.servers;
+    cfg.listen = snapshot.listen;
+    cfg.apiPrefix = snapshot.apiPrefix;
+    cfg.transport = snapshot.transport;
+    cfg.security = snapshot.security;
+    cfg.skills = snapshot.skills;
     await saveLocalConfig(cfg);
+    return createEditableConfigFingerprint(snapshot);
   };
 
   const handleStart = async () => {
+    if (skillsRulesError) {
+      setError(skillsRulesError);
+      return;
+    }
     const nextServers = resolveServers();
     if (nextServers === null) return;
     setError(null); setBusy(true);
     try {
-      await persistConfig(nextServers);
+      const latestFingerprint = await persistConfig(nextServers);
+      setSavedConfigFingerprint(latestFingerprint);
       await startGateway();
       await refreshStatus();
+      await fetchSkillPending();
     } catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
 
   const handleStop = async () => {
     setError(null); setBusy(true);
-    try { await stopGateway(); await refreshStatus(); }
+    try { await stopGateway(); await refreshStatus(); setSkillPending([]); }
     catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
 
   // ── 独立保存配置 ──
   const handleSave = async () => {
+    if (skillsRulesError) {
+      setError(skillsRulesError);
+      return;
+    }
     const nextServers = resolveServers();
     if (nextServers === null) return;
     setError(null); setSaving(true); setSaveSuccess(false);
     try {
-      await persistConfig(nextServers);
+      const latestFingerprint = await persistConfig(nextServers);
+      setSavedConfigFingerprint(latestFingerprint);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
     } catch (e) { setError(String(e)); }
@@ -363,9 +1127,12 @@ function App() {
   };
 
   const baseUrl = listen.startsWith("http") ? listen : `http://${listen}`;
+  const skillHttpUrl = `${baseUrl}${httpPath}/${skills.serverName}`;
+  const skillSseUrl = `${baseUrl}${ssePath}/${skills.serverName}`;
 
-  const handleCopy = async (url: string, key: string) => {
-    await navigator.clipboard.writeText(url);
+  const handleCopy = async (name: string, type: EndpointTransportType, url: string, key: string) => {
+    const snippet = createMcpClientEntryJson(name, type, url);
+    await navigator.clipboard.writeText(snippet);
     setCopied(key);
     setTimeout(() => setCopied(null), 2000);
   };
@@ -381,7 +1148,34 @@ function App() {
           <span className="topbar-subtitle">{running ? t("running") : t("stopped")}</span>
         </div>
         <div className="topbar-right">
-          {/* 语言切换按钮 */}
+          {showRestartRequiredHint && (
+            <span
+              className="topbar-restart-hint"
+              role="status"
+              aria-live="polite"
+              title={t("restartRequiredHint")}
+            >
+              {t("restartRequiredHint")}
+            </span>
+          )}
+          <button
+            className={`btn btn-secondary btn-sm ${isConfigDirty ? "btn-save-dirty" : ""}`}
+            onClick={handleSave}
+            disabled={saving || !configLoaded}
+            title={isConfigDirty ? t("saveConfigUnsaved") : t("saveConfig")}
+          >
+            <Save size={13} />
+            <span>{saving ? t("saving") : saveSuccess ? t("saveSuccess") : t("saveConfig")}</span>
+            {isConfigDirty && !saving && (
+              <span
+                className="save-dirty-indicator"
+                aria-label={t("saveConfigUnsaved")}
+                title={t("saveConfigUnsaved")}
+              >
+                !
+              </span>
+            )}
+          </button>
           <button className="btn-lang" onClick={toggleLang} title="Switch language">
             <Languages size={13} />
             <span>{t("langToggle")}</span>
@@ -398,6 +1192,25 @@ function App() {
         </div>
       </div>
 
+      {/* ── Tab 导航 ── */}
+      <div className="tab-nav">
+        <button
+          className={`tab-button ${activeTab === "mcp" ? "active" : ""}`}
+          onClick={() => setActiveTab("mcp")}
+        >
+          {t("tabMcp")}
+        </button>
+        <button
+          className={`tab-button ${activeTab === "skills" ? "active" : ""}`}
+          onClick={() => setActiveTab("skills")}
+        >
+          {t("tabSkills")}
+          {skillPending.length > 0 && (
+            <span className="tab-badge">{skillPending.length}</span>
+          )}
+        </button>
+      </div>
+
       {/* ── 错误提示 ── */}
       {error && (
         <div className="alert alert-error" style={{ margin: "10px 20px 0" }}>
@@ -408,124 +1221,330 @@ function App() {
 
       <div className="main-scroll">
 
-        {/* ── 网关设置 ── */}
-        <section className="config-section">
-          <div className="section-heading">{t("gatewaySettings")}</div>
-          <div className="gateway-fields">
-            <div className="gw-field">
-              <label className="field-label">{t("listenAddress")}</label>
-              <input className="form-input" placeholder="127.0.0.1:8765"
-                value={listen} onChange={(e) => setListen(e.target.value)} />
-            </div>
-            <div className="gw-field">
-              <label className="field-label">{t("ssePath")}</label>
-              <input className="form-input" placeholder="/api/v2/sse"
-                value={ssePath} onChange={(e) => setSsePath(e.target.value)} />
-            </div>
-            <div className="gw-field">
-              <label className="field-label">{t("httpStreamPath")}</label>
-              <input className="form-input" placeholder="/api/v2/mcp"
-                value={httpPath} onChange={(e) => setHttpPath(e.target.value)} />
-            </div>
-          </div>
-        </section>
-
-        {/* ── 安全配置 ── */}
-        <section className="config-section">
-          <div className="section-heading">{t("securityConfig")}</div>
-          <div className="security-fields">
-            <div className="gw-field">
-              <label className="field-label">{t("adminToken")}</label>
-              <input className="form-input" type="password" placeholder={t("tokenPlaceholder")}
-                value={adminToken} onChange={(e) => setAdminToken(e.target.value)} />
-            </div>
-            <div className="gw-field">
-              <label className="field-label">{t("mcpToken")}</label>
-              <input className="form-input" type="password" placeholder={t("tokenPlaceholder")}
-                value={mcpToken} onChange={(e) => setMcpToken(e.target.value)} />
-            </div>
-          </div>
-        </section>
-
-        {/* ── MCP Servers ── */}
-        <section className="config-section">
-          <div className="section-heading-row">
-            <span className="section-heading" style={{ marginBottom: 0 }}>{t("mcpServers")}</span>
-            <div className="section-heading-actions">
-              {/* 保存配置按钮 */}
-              <button className="btn btn-secondary btn-sm" onClick={handleSave} disabled={saving || !configLoaded} title={t("saveConfig")}>
-                <Save size={13} />
-                {saving ? t("saving") : saveSuccess ? t("saveSuccess") : t("saveConfig")}
-              </button>
-              <div className="mode-toggle">
-                <button className={`mode-btn ${serversMode === "visual" ? "active" : ""}`}
-                  onClick={switchToVisual} title={t("visual")}>
-                  <List size={13} /> {t("visual")}
-                </button>
-                <button className={`mode-btn ${serversMode === "json" ? "active" : ""}`}
-                  onClick={switchToJson} title={t("json")}>
-                  <Code2 size={13} /> {t("json")}
-                </button>
+        {/* ════════════════ MCP Tab ════════════════ */}
+        {activeTab === "mcp" && (
+          <>
+            {/* ── 网关设置 ── */}
+            <section className="config-section">
+              <div className="section-heading">{t("gatewaySettings")}</div>
+              <div className="gateway-fields">
+                <div className="gw-field">
+                  <label className="field-label">{t("listenAddress")}</label>
+                  <input className="form-input" placeholder="127.0.0.1:8765"
+                    value={listen} onChange={(e) => setListen(e.target.value)} />
+                </div>
+                <div className="gw-field">
+                  <label className="field-label">{t("ssePath")}</label>
+                  <input className="form-input" placeholder="/api/v2/sse"
+                    value={ssePath} onChange={(e) => setSsePath(e.target.value)} />
+                </div>
+                <div className="gw-field">
+                  <label className="field-label">{t("httpStreamPath")}</label>
+                  <input className="form-input" placeholder="/api/v2/mcp"
+                    value={httpPath} onChange={(e) => setHttpPath(e.target.value)} />
+                </div>
               </div>
-            </div>
-          </div>
+            </section>
 
-          {jsonError && (
-            <div className="alert alert-error" style={{ marginBottom: 10 }}>{jsonError}</div>
-          )}
+            {/* ── 安全配置 ── */}
+            <section className="config-section">
+              <div className="section-heading">{t("securityConfig")}</div>
+              <div className="security-fields">
+                <div className="gw-field">
+                  <label className="field-label">{t("adminToken")}</label>
+                  <input className="form-input" type="password" placeholder={t("tokenPlaceholder")}
+                    value={adminToken} onChange={(e) => setAdminToken(e.target.value)} />
+                </div>
+                <div className="gw-field">
+                  <label className="field-label">{t("mcpToken")}</label>
+                  <input className="form-input" type="password" placeholder={t("tokenPlaceholder")}
+                    value={mcpToken} onChange={(e) => setMcpToken(e.target.value)} />
+                </div>
+              </div>
+            </section>
 
-          {serversMode === "visual" ? (
-            <>
-              {servers.length === 0 ? (
-                <div className="empty-hint">{t("noServers")}</div>
-              ) : (
-                <div className="servers-list">
-                  {servers.map((s, i) => (
-                    <div className="server-block" key={i}>
-                      {/* 每个 MCP 服务器独立的表头 */}
-                      <div className="server-row-header">
-                        <span className="col-toggle" />
-                        <span>{t("name")}</span>
-                        <span>{t("command")}</span>
-                        <span>{t("args")}</span>
-                        <span />
-                      </div>
-                      <ServerRow server={s}
-                        running={running}
-                        baseUrl={baseUrl}
-                        ssePath={ssePath}
-                        httpPath={httpPath}
-                        copied={copied}
-                        onCopy={handleCopy}
-                        t={t}
-                        onChange={(u) => setServers((prev) => prev.map((x, xi) => xi === i ? u : x))}
-                        onDelete={() => requestDelete(i, s.name)}
-                      />
+            {/* ── MCP Servers ── */}
+            <section className="config-section">
+              <div className="section-heading-row">
+                <span className="section-heading" style={{ marginBottom: 0 }}>{t("mcpServers")}</span>
+                <div className="section-heading-actions">
+                  <div className="mode-toggle">
+                    <button className={`mode-btn ${serversMode === "visual" ? "active" : ""}`}
+                      onClick={switchToVisual} title={t("visual")}>
+                      <List size={13} /> {t("visual")}
+                    </button>
+                    <button className={`mode-btn ${serversMode === "json" ? "active" : ""}`}
+                      onClick={switchToJson} title={t("json")}>
+                      <Code2 size={13} /> {t("json")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {jsonError && (
+                <div className="alert alert-error" style={{ marginBottom: 10 }}>{jsonError}</div>
+              )}
+
+              {serversMode === "visual" ? (
+                <>
+                  {servers.length === 0 ? (
+                    <div className="empty-hint">{t("noServers")}</div>
+                  ) : (
+                    <div className="servers-list">
+                      {servers.map((s, i) => (
+                        <div className="server-block" key={i}>
+                          <div className="server-row-header">
+                            <span className="col-toggle" />
+                            <span>{t("name")}</span>
+                            <span>{t("command")}</span>
+                            <span>{t("args")}</span>
+                            <span />
+                          </div>
+                          <ServerRow server={s}
+                            running={running}
+                            baseUrl={baseUrl}
+                            ssePath={ssePath}
+                            httpPath={httpPath}
+                            copied={copied}
+                            onCopy={handleCopy}
+                            t={t}
+                            onChange={(u) => setServers((prev) => prev.map((x, xi) => xi === i ? u : x))}
+                            onDelete={() => requestDelete(i, s.name)}
+                          />
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
+                  <button className="btn btn-secondary btn-sm" style={{ marginTop: 10 }}
+                    onClick={() => setServers((prev) => [...prev, {
+                      name: "", command: "npx", args: ["-y", ""],
+                      description: "", cwd: "", env: {}, lifecycle: null, stdioProtocol: "auto", enabled: true,
+                    }])}>
+                    {t("addServer")}
+                  </button>
+                </>
+              ) : (
+                <div className="json-editor-wrap">
+                  <div className="json-hint">{t("jsonHint")}</div>
+                  <JsonEditor
+                    value={jsonText}
+                    onChange={(v) => { setJsonText(v); setJsonError(null); }}
+                    placeholder={t("jsonHint")}
+                    onFormatError={(msg) => setJsonError(msg)}
+                    formatBtnText={t("formatJson")}
+                  />
                 </div>
               )}
-              <button className="btn btn-secondary btn-sm" style={{ marginTop: 10 }}
-                onClick={() => setServers((prev) => [...prev, {
-                  name: "", command: "npx", args: ["-y", ""],
-                  description: "", cwd: "", env: {}, lifecycle: null, stdioProtocol: "auto", enabled: true,
-                }])}>
-                {t("addServer")}
-              </button>
-            </>
-          ) : (
-            <div className="json-editor-wrap">
-              <div className="json-hint">{t("jsonHint")}</div>
-              <JsonEditor
-                value={jsonText}
-                onChange={(v) => { setJsonText(v); setJsonError(null); }}
-                placeholder={t("jsonHint")}
-                onFormatError={(msg) => setJsonError(msg)}
-                formatBtnText={t("formatJson")}
+            </section>
+          </>
+        )}
+
+        {/* ════════════════ SKILLS Tab ════════════════ */}
+        {activeTab === "skills" && (
+          <>
+            {/* ── Skills 基础配置 ── */}
+            <section className="config-section skills-redesign-section">
+              <div className="section-heading">{t("skillsConfig")}</div>
+
+              <div className="skills-redesign">
+                <div className="skills-top-row">
+                  <div className="skills-switch-card">
+                    <label className="field-label" htmlFor="skills-enabled-toggle">{t("skillsEnable")}</label>
+                    <div className="skills-switch-track">
+                      <button
+                        id="skills-enabled-toggle"
+                        className={`toggle-btn ${skills.enabled ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                        aria-label={t("skillsEnable")}
+                        title={t("skillsEnable")}
+                      />
+                    </div>
+                  </div>
+                  <div className="skills-input-card">
+                    <label className="field-label" htmlFor="skills-server-name">{t("skillsServerName")}</label>
+                    <input
+                      id="skills-server-name"
+                      className="form-input"
+                      value={skills.serverName}
+                      onChange={(e) => setSkills((prev) => ({ ...prev, serverName: e.target.value }))}
+                      placeholder="__skills__"
+                    />
+                  </div>
+                </div>
+
+                <SkillDirectoryListEditor
+                  title={t("skillsRoots")}
+                  hint={t("skillsRootsHint")}
+                  items={skillRootItems}
+                  onAdd={addRootItem}
+                  onRemove={requestRemoveRootItem}
+                  onPathChange={updateRootItemPath}
+                  onValidate={validateRootItem}
+                  onBrowse={browseRootItem}
+                  onToggleEnabled={toggleRootItemEnabled}
+                  enableToggle
+                  t={t}
+                />
+                {running && skills.enabled && skills.serverName.trim() && (
+                  <div className="server-row-endpoints skills-endpoints">
+                    <div className="endpoint-item">
+                      <span className="endpoint-label">{t("skillSseEndpoint")}</span>
+                      <code className="endpoint-url">{skillSseUrl}</code>
+                      <button className="btn-icon" title={t("copySkillSse")} onClick={() => handleCopy(skills.serverName, "sse", skillSseUrl, "skills-sse")}>
+                        {copied === "skills-sse" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                      </button>
+                    </div>
+                    <div className="endpoint-item">
+                      <span className="endpoint-label">{t("skillHttpEndpoint")}</span>
+                      <code className="endpoint-url">{skillHttpUrl}</code>
+                      <button className="btn-icon" title={t("copySkillHttp")} onClick={() => handleCopy(skills.serverName, "streamable-http", skillHttpUrl, "skills-http")}>
+                        {copied === "skills-http" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* ── 路径守卫配置 ── */}
+            <section className="config-section skills-redesign-section">
+              <div className="section-heading">{t("skillsPathGuard")}</div>
+
+              <div className="skills-redesign">
+                <div className="skills-top-row">
+                  <div className="skills-switch-card">
+                    <label className="field-label" htmlFor="skills-pathguard-toggle">{t("skillsPathGuardEnable")}</label>
+                    <div className="skills-switch-track">
+                      <button
+                        id="skills-pathguard-toggle"
+                        className={`toggle-btn ${skills.policy.pathGuard.enabled ? "toggle-on" : "toggle-off"}`}
+                        onClick={() =>
+                          setSkills((prev) => ({
+                            ...prev,
+                            policy: { ...prev.policy, pathGuard: { ...prev.policy.pathGuard, enabled: !prev.policy.pathGuard.enabled } },
+                          }))
+                        }
+                        aria-label={t("skillsPathGuardEnable")}
+                        title={t("skillsPathGuardEnable")}
+                      />
+                    </div>
+                  </div>
+                  <div className="skills-input-card">
+                    <label className="field-label" htmlFor="skills-violation-action">{t("skillsViolationAction")}</label>
+                    <select
+                      id="skills-violation-action"
+                      className="form-input skills-action-select"
+                      value={skills.policy.pathGuard.onViolation}
+                      onChange={(e) =>
+                        setSkills((prev) => ({
+                          ...prev,
+                          policy: {
+                            ...prev.policy,
+                            pathGuard: { ...prev.policy.pathGuard, onViolation: e.target.value as SkillPolicyAction },
+                          },
+                        }))
+                      }
+                    >
+                      <option value="allow">{t("policyAllow")}</option>
+                      <option value="confirm">{t("policyConfirm")}</option>
+                      <option value="deny">{t("policyDeny")}</option>
+                    </select>
+                  </div>
+                </div>
+
+                <SkillDirectoryListEditor
+                  title={t("skillsWhitelistDirs")}
+                  hint={t("skillsWhitelistHint")}
+                  items={skillWhitelistItems}
+                  onAdd={addWhitelistItem}
+                  onRemove={requestRemoveWhitelistItem}
+                  onPathChange={updateWhitelistItemPath}
+                  onBrowse={browseWhitelistItem}
+                  showValidation={false}
+                  t={t}
+                />
+              </div>
+            </section>
+
+            {/* ── 执行配置 ── */}
+            <section className="config-section">
+              <div className="section-heading">{t("skillsExecution")}</div>
+              <div className="skills-execution-config">
+                <div className="gw-field">
+                  <label className="field-label">{t("skillsExecutionTimeout")}</label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    value={skills.execution.timeoutMs}
+                    min={1000}
+                    onChange={(e) =>
+                      {
+                        const val = parseInt(e.target.value, 10);
+                        if (!isNaN(val) && val >= 1000) {
+                          setSkills((prev) => ({
+                            ...prev,
+                            execution: { ...prev.execution, timeoutMs: val },
+                          }));
+                        }
+                      }
+                    }
+                    placeholder="30000"
+                  />
+                  <span className="json-hint">{t("skillsExecutionTimeoutHint")}</span>
+                </div>
+                <div className="gw-field">
+                  <label className="field-label">{t("skillsMaxOutputBytes")}</label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    value={skills.execution.maxOutputBytes}
+                    min={1024}
+                    onChange={(e) =>
+                      {
+                        const val = parseInt(e.target.value, 10);
+                        if (!isNaN(val) && val >= 1024) {
+                          setSkills((prev) => ({
+                            ...prev,
+                            execution: { ...prev.execution, maxOutputBytes: val },
+                          }));
+                        }
+                      }
+                    }
+                    placeholder="13107200"
+                  />
+                  <span className="json-hint">{t("skillsMaxOutputBytesHint")}</span>
+                </div>
+              </div>
+            </section>
+
+            {/* ── 策略规则 ── */}
+            <section className="config-section">
+              <div className="section-heading">{t("skillsRules")}</div>
+              <div className="gw-field">
+                <textarea
+                  className="form-textarea skills-rules-textarea"
+                  value={skillsRulesDraft}
+                  onChange={(e) => onRulesDraftChange(e.target.value)}
+                  placeholder={t("skillsRulesHint")}
+                />
+                <span className="json-hint">{t("skillsRulesHint")}</span>
+                {skillsRulesError && <span className="skills-rules-error">{skillsRulesError}</span>}
+              </div>
+            </section>
+
+            {/* ── 待确认命令 ── */}
+            <section className="config-section">
+              <div className="section-heading">{t("skillsPendingTitle")}</div>
+              <SkillConfirmations
+                pending={skillPending}
+                busyIds={skillActionBusy}
+                onApprove={(id) => { void updateConfirmation(id, "approve"); }}
+                onReject={(id) => { void updateConfirmation(id, "reject"); }}
+                t={t}
               />
-            </div>
-          )}
-        </section>
+            </section>
+          </>
+        )}
 
       </div>
 
@@ -541,9 +1560,20 @@ function App() {
       {/* ── 删除确认弹窗 ── */}
       <ConfirmDialog
         open={deleteConfirm.open}
-        serverName={deleteConfirm.name}
+        title={t("confirmDeleteTitle")}
+        message={t("confirmDeleteMsg").replace("{name}", deleteConfirm.name)}
         onCancel={cancelDelete}
         onConfirm={confirmDelete}
+        t={t}
+      />
+      <ConfirmDialog
+        open={skillDirDeleteConfirm.open}
+        title={t("confirmDeleteTitle")}
+        message={skillDirDeleteConfirm.kind === "roots"
+          ? t("confirmDeleteSkillRootMsg")
+          : t("confirmDeleteWhitelistDirMsg")}
+        onCancel={cancelSkillDirDelete}
+        onConfirm={confirmSkillDirDelete}
         t={t}
       />
     </div>
@@ -551,4 +1581,3 @@ function App() {
 }
 
 export default App;
-

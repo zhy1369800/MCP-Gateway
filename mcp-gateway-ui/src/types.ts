@@ -28,6 +28,47 @@ export interface DefaultsConfig {
   maxResponseWaitIterations: number;
 }
 
+export interface SkillsPolicyConfig {
+  defaultAction: SkillPolicyAction;
+  rules: SkillCommandRule[];
+  pathGuard: SkillsPathGuardConfig;
+}
+
+export interface SkillsExecutionConfig {
+  timeoutMs: number;
+  maxOutputBytes: number;
+}
+
+export type SkillPolicyAction = "allow" | "confirm" | "deny";
+
+export interface SkillsPathGuardConfig {
+  enabled: boolean;
+  whitelistDirs: string[];
+  onViolation: SkillPolicyAction;
+}
+
+export interface SkillCommandRule {
+  id: string;
+  action: SkillPolicyAction;
+  commandTree: string[];
+  contains: string[];
+  reason: string;
+}
+
+export interface SkillRootEntry {
+  path: string;
+  enabled: boolean;
+}
+
+export interface SkillsConfig {
+  enabled: boolean;
+  serverName: string;
+  roots: string[];
+  rootEntries?: SkillRootEntry[];
+  policy: SkillsPolicyConfig;
+  execution: SkillsExecutionConfig;
+}
+
 export interface ServerConfig {
   name: string;
   description: string;
@@ -45,10 +86,12 @@ export interface GatewayConfig {
   listen: string;
   allowNonLoopback: boolean;
   mode: "extension" | "general" | "both";
+  apiPrefix: string;
   security: SecurityConfig;
   transport: TransportConfig;
   defaults: DefaultsConfig;
   servers: ServerConfig[];
+  skills: SkillsConfig;
 }
 
 export interface HealthData {
@@ -80,4 +123,32 @@ export interface ToolListResult {
 
 export interface ExportPayload {
   mcpServers: Record<string, JsonValue>;
+}
+
+export type ConfirmationStatus = "pending" | "approved" | "rejected";
+
+export interface SkillConfirmation {
+  id: string;
+  status: ConfirmationStatus;
+  createdAt: string;
+  updatedAt: string;
+  skill: string;
+  script: string;
+  args: string[];
+  commandPreview: string;
+  reason: string;
+}
+
+export interface SkillSummary {
+  skill: string;
+  description: string;
+  root: string;
+  path: string;
+  hasScripts: boolean;
+}
+
+export interface SkillDirectoryValidation {
+  exists: boolean;
+  isDir: boolean;
+  hasSkillMd: boolean;
 }

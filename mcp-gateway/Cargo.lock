@@ -524,6 +524,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
+ "dirs",
  "futures-util",
  "gateway-core",
  "http",

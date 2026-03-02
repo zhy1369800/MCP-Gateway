@@ -65,3 +65,100 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
+
+## Built-in Skills MCP Usage
+
+When `skills.enabled=true`, gateway exposes an internal MCP server at:
+
+- `POST /api/v2/mcp/{skills.serverName}`
+- `GET|POST /api/v2/sse/{skills.serverName}`
+
+Default server name is `__skills__`.
+
+### Browser JSON-RPC Example
+
+```ts
+const gatewayBase = "http://127.0.0.1:8765";
+const mcpToken = "YOUR_MCP_TOKEN";
+const adminToken = "YOUR_ADMIN_TOKEN";
+const skillsServer = "__skills__";
+
+async function callSkillsMcp(payload: unknown) {
+  const resp = await fetch(`${gatewayBase}/api/v2/mcp/${skillsServer}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${mcpToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  return await resp.json();
+}
+
+// 1) list tools
+const tools = await callSkillsMcp({
+  jsonrpc: "2.0",
+  id: "1",
+  method: "tools/list",
+  params: {},
+});
+console.log(tools.result.tools);
+
+// 2) run a skill script
+let runResponse = await callSkillsMcp({
+  jsonrpc: "2.0",
+  id: "2",
+  method: "tools/call",
+  params: {
+    name: "skills_script_run",
+    arguments: {
+      skill: "ui-ux-pro-max",
+      script: "scripts/search.py",
+      args: ["--help"],
+    },
+  },
+});
+
+// 3) confirmation_required => admin approves
+const content = runResponse.result?.structuredContent ?? {};
+if (content.status === "confirmation_required") {
+  const confirmationId = content.confirmationId as string;
+
+  await fetch(
+    `${gatewayBase}/api/v2/admin/skills/confirmations/${confirmationId}/approve`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+    },
+  );
+
+  // 4) retry with confirmationId
+  runResponse = await callSkillsMcp({
+    jsonrpc: "2.0",
+    id: "3",
+    method: "tools/call",
+    params: {
+      name: "skills_script_run",
+      arguments: {
+        skill: "ui-ux-pro-max",
+        script: "scripts/search.py",
+        args: ["--help"],
+        confirmationId,
+      },
+    },
+  });
+}
+```
+
+### Policy Model
+
+`skills.policy` now supports:
+
+- command-tree rules (`rules`) with `allow|confirm|deny` actions
+- directory whitelist guard (`pathGuard.whitelistDirs`)
+- configurable violation behavior (`pathGuard.onViolation`)
+
+This replaces broad keyword matching and reduces false positives/negatives.

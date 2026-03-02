@@ -23,6 +23,7 @@ axum = { version = "0.7", features = [] }
 chrono = { version = "0.4", features = ["serde"] }
 gateway-core = { path = "../../mcp-gateway/crates/gateway-core" }
 gateway-http = { path = "../../mcp-gateway/crates/gateway-http" }
+rfd = "0.15"
 
 [profile.release]
 panic = "abort"

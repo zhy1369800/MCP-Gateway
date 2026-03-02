@@ -120,6 +120,7 @@ pub fn migrate_v1_to_v2_file(input: &Path, output: &Path) -> Result<GatewayConfi
                 enabled: item.enabled,
             })
             .collect(),
+        skills: super::model::SkillsConfig::default(),
     };
 
     normalize_config_in_place(&mut cfg);

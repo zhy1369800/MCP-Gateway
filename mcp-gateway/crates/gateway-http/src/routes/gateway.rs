@@ -53,6 +53,12 @@ pub async fn handle_mcp_http(
     Json(request): Json<Value>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     let cfg = state.config_service.get_config().await;
+
+    if state.skills.is_skills_server(&cfg, &server_name) {
+        let result = state.skills.handle_mcp_request(&cfg, request).await;
+        return Ok(Json(result));
+    }
+
     let server = cfg
         .servers
         .iter()
@@ -87,6 +93,15 @@ pub async fn handle_sse_post(
     Json(request): Json<Value>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     let cfg = state.config_service.get_config().await;
+
+    if state.skills.is_skills_server(&cfg, &server_name) {
+        let result = state.skills.handle_mcp_request(&cfg, request).await;
+        if let Ok(payload) = serde_json::to_string(&result) {
+            state.sse_hub.publish(&server_name, payload).await;
+        }
+        return Ok(Json(result));
+    }
+
     let server = cfg
         .servers
         .iter()
@@ -133,7 +148,8 @@ pub async fn handle_sse_subscribe(
     let server_exists = cfg
         .servers
         .iter()
-        .any(|item| item.name == server_name && item.enabled);
+        .any(|item| item.name == server_name && item.enabled)
+        || state.skills.is_skills_server(&cfg, &server_name);
     if !server_exists {
         return Err(response::err_response(AppError::NotFound(
             "server not found or disabled".to_string(),

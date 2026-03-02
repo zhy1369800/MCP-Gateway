@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::path::Path;
 
 use crate::error::AppError;
 
@@ -67,6 +68,71 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
             return Err(AppError::Validation(format!(
                 "server.command cannot be empty for {}",
                 server.name
+            )));
+        }
+    }
+
+    if cfg.skills.server_name.trim().is_empty() {
+        return Err(AppError::Validation(
+            "skills.serverName cannot be empty".to_string(),
+        ));
+    }
+    if cfg.skills.server_name.contains('/') || cfg.skills.server_name.contains('\\') {
+        return Err(AppError::Validation(
+            "skills.serverName cannot contain path separators".to_string(),
+        ));
+    }
+    if cfg
+        .servers
+        .iter()
+        .any(|server| server.name == cfg.skills.server_name)
+    {
+        return Err(AppError::Validation(format!(
+            "skills.serverName conflicts with existing server: {}",
+            cfg.skills.server_name
+        )));
+    }
+    if cfg.skills.execution.timeout_ms < 1000 {
+        return Err(AppError::Validation(
+            "skills.execution.timeoutMs must be >= 1000".to_string(),
+        ));
+    }
+    if cfg.skills.execution.max_output_bytes < 1024 {
+        return Err(AppError::Validation(
+            "skills.execution.maxOutputBytes must be >= 1024".to_string(),
+        ));
+    }
+    if cfg.skills.policy.path_guard.enabled
+        && cfg.skills.policy.path_guard.whitelist_dirs.is_empty()
+    {
+        return Err(AppError::Validation(
+            "skills.policy.pathGuard.enabled=true requires non-empty whitelistDirs".to_string(),
+        ));
+    }
+    for dir in &cfg.skills.policy.path_guard.whitelist_dirs {
+        if !Path::new(dir).is_absolute() {
+            return Err(AppError::Validation(format!(
+                "skills.policy.pathGuard.whitelistDirs must be absolute paths: {dir}"
+            )));
+        }
+    }
+
+    let mut rule_ids = HashSet::new();
+    for (idx, rule) in cfg.skills.policy.rules.iter().enumerate() {
+        if rule.id.trim().is_empty() {
+            return Err(AppError::Validation(format!(
+                "skills.policy.rules[{idx}].id cannot be empty"
+            )));
+        }
+        if !rule_ids.insert(rule.id.clone()) {
+            return Err(AppError::Validation(format!(
+                "duplicate skills.policy.rules id: {}",
+                rule.id
+            )));
+        }
+        if rule.command_tree.is_empty() && rule.contains.is_empty() {
+            return Err(AppError::Validation(format!(
+                "skills.policy.rules[{idx}] must have commandTree or contains"
             )));
         }
     }

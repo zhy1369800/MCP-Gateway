@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::response::{self, ApiResult};
 use crate::state::AppState;
+use crate::{SkillConfirmation, SkillSummary};
 
 pub fn router(state: AppState, api_prefix: &str) -> Router {
     let prefix = api_prefix.trim_end_matches('/');
@@ -37,6 +38,25 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
         .route(
             &format!("{}/admin/export/mcp-servers", prefix),
             get(export_mcp_servers_payload),
+        )
+        .route(&format!("{}/admin/skills", prefix), get(get_skills))
+        .route(
+            &format!("{}/admin/skills/confirmations", prefix),
+            get(get_pending_skill_confirmations),
+        )
+        .route(
+            &format!(
+                "{}/admin/skills/confirmations/:confirmation_id/approve",
+                prefix
+            ),
+            post(approve_skill_confirmation),
+        )
+        .route(
+            &format!(
+                "{}/admin/skills/confirmations/:confirmation_id/reject",
+                prefix
+            ),
+            post(reject_skill_confirmation),
         )
         .with_state(state)
 }
@@ -310,9 +330,108 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
         mcp_servers.insert(server.name.clone(), Value::Object(entry));
     }
 
+    if cfg.skills.enabled {
+        let url = format!(
+            "{}{}{}",
+            base_url,
+            cfg.transport
+                .streamable_http
+                .base_path
+                .trim_end_matches('/'),
+            format_args!("/{}", cfg.skills.server_name)
+        );
+
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "name".to_string(),
+            Value::String("Built-in Skills MCP".to_string()),
+        );
+        entry.insert(
+            "type".to_string(),
+            Value::String("streamable-http".to_string()),
+        );
+        entry.insert("url".to_string(), Value::String(url));
+
+        if cfg.security.mcp.enabled {
+            entry.insert(
+                "headers".to_string(),
+                json!({"Authorization": format!("Bearer {}", cfg.security.mcp.token)}),
+            );
+        }
+
+        mcp_servers.insert(cfg.skills.server_name.clone(), Value::Object(entry));
+    }
+
     Ok(response::ok(
         json!({"mcpServers": Value::Object(mcp_servers)}),
     ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/admin/skills",
+    responses((status = 200, description = "Discovered skills"))
+)]
+pub async fn get_skills(State(state): State<AppState>) -> ApiResult<Vec<SkillSummary>> {
+    let cfg = state.config_service.get_config().await;
+    if !cfg.skills.enabled {
+        return Ok(response::ok(Vec::new()));
+    }
+
+    let skills = state
+        .skills
+        .list_skills_for_admin(&cfg)
+        .await
+        .map_err(response::err_response)?;
+    Ok(response::ok(skills))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/admin/skills/confirmations",
+    responses((status = 200, description = "Pending skill confirmations"))
+)]
+pub async fn get_pending_skill_confirmations(
+    State(state): State<AppState>,
+) -> ApiResult<Vec<SkillConfirmation>> {
+    let list = state.skills.list_pending_confirmations().await;
+    Ok(response::ok(list))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/admin/skills/confirmations/{confirmation_id}/approve",
+    params(("confirmation_id" = String, Path, description = "Confirmation id")),
+    responses((status = 200, description = "Approved confirmation"))
+)]
+pub async fn approve_skill_confirmation(
+    State(state): State<AppState>,
+    Path(confirmation_id): Path<String>,
+) -> ApiResult<SkillConfirmation> {
+    let updated = state
+        .skills
+        .approve_confirmation(&confirmation_id)
+        .await
+        .map_err(response::err_response)?;
+    Ok(response::ok(updated))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/admin/skills/confirmations/{confirmation_id}/reject",
+    params(("confirmation_id" = String, Path, description = "Confirmation id")),
+    responses((status = 200, description = "Rejected confirmation"))
+)]
+pub async fn reject_skill_confirmation(
+    State(state): State<AppState>,
+    Path(confirmation_id): Path<String>,
+) -> ApiResult<SkillConfirmation> {
+    let updated = state
+        .skills
+        .reject_confirmation(&confirmation_id)
+        .await
+        .map_err(response::err_response)?;
+    Ok(response::ok(updated))
 }
 
 fn gateway_base_url(listen: &str) -> Result<String, AppError> {

@@ -18,12 +18,23 @@ use crate::routes;
         routes::admin::test_server,
         routes::admin::get_server_tools,
         routes::admin::export_mcp_servers_payload,
+        routes::admin::get_skills,
+        routes::admin::get_pending_skill_confirmations,
+        routes::admin::approve_skill_confirmation,
+        routes::admin::reject_skill_confirmation,
         routes::gateway::handle_mcp_http,
         routes::gateway::handle_sse_post,
         routes::gateway::handle_sse_subscribe,
     ),
     components(
-        schemas(ApiErrorBody, gateway_core::GatewayConfig, gateway_core::ServerConfig)
+        schemas(
+            ApiErrorBody,
+            gateway_core::GatewayConfig,
+            gateway_core::ServerConfig,
+            crate::SkillSummary,
+            crate::SkillConfirmation,
+            crate::ConfirmationStatus
+        )
     ),
     tags((name = "mcp-gateway", description = "MCP Gateway V2 API"))
 )]
