@@ -39,23 +39,1015 @@
         {
           "id": "deny-rm-root",
           "action": "deny",
-          "commandTree": ["rm"],
-          "contains": ["-rf", "/"],
+          "commandTree": [
+            "rm"
+          ],
+          "contains": [
+            "-rf",
+            "/"
+          ],
           "reason": "Potential root destructive deletion"
+        },
+        {
+          "id": "deny-remove-item-root",
+          "action": "deny",
+          "commandTree": [
+            "remove-item"
+          ],
+          "contains": [
+            "-recurse",
+            "c:\\"
+          ],
+          "reason": "Potential recursive deletion on drive root"
+        },
+        {
+          "id": "deny-sudo",
+          "action": "deny",
+          "commandTree": [
+            "sudo"
+          ],
+          "contains": [],
+          "reason": "Privilege escalation command is blocked"
+        },
+        {
+          "id": "deny-su",
+          "action": "deny",
+          "commandTree": [
+            "su"
+          ],
+          "contains": [],
+          "reason": "User switching command is blocked"
+        },
+        {
+          "id": "deny-doas",
+          "action": "deny",
+          "commandTree": [
+            "doas"
+          ],
+          "contains": [],
+          "reason": "Privilege escalation command is blocked"
+        },
+        {
+          "id": "deny-chmod",
+          "action": "deny",
+          "commandTree": [
+            "chmod"
+          ],
+          "contains": [],
+          "reason": "Permission modification command is blocked"
+        },
+        {
+          "id": "deny-chown",
+          "action": "deny",
+          "commandTree": [
+            "chown"
+          ],
+          "contains": [],
+          "reason": "Ownership modification command is blocked"
+        },
+        {
+          "id": "deny-chgrp",
+          "action": "deny",
+          "commandTree": [
+            "chgrp"
+          ],
+          "contains": [],
+          "reason": "Group ownership modification command is blocked"
+        },
+        {
+          "id": "deny-takeown",
+          "action": "deny",
+          "commandTree": [
+            "takeown"
+          ],
+          "contains": [],
+          "reason": "Windows ownership takeover command is blocked"
+        },
+        {
+          "id": "deny-icacls",
+          "action": "deny",
+          "commandTree": [
+            "icacls"
+          ],
+          "contains": [],
+          "reason": "Windows ACL modification command is blocked"
+        },
+        {
+          "id": "deny-reg",
+          "action": "deny",
+          "commandTree": [
+            "reg"
+          ],
+          "contains": [],
+          "reason": "Registry modification command is blocked"
+        },
+        {
+          "id": "deny-bcdedit",
+          "action": "deny",
+          "commandTree": [
+            "bcdedit"
+          ],
+          "contains": [],
+          "reason": "Boot configuration command is blocked"
+        },
+        {
+          "id": "deny-netsh",
+          "action": "deny",
+          "commandTree": [
+            "netsh"
+          ],
+          "contains": [],
+          "reason": "Network configuration command is blocked"
+        },
+        {
+          "id": "deny-runas",
+          "action": "deny",
+          "commandTree": [
+            "runas"
+          ],
+          "contains": [],
+          "reason": "Privilege escalation command is blocked"
+        },
+        {
+          "id": "deny-taskkill",
+          "action": "deny",
+          "commandTree": [
+            "taskkill"
+          ],
+          "contains": [],
+          "reason": "Process termination command is blocked"
+        },
+        {
+          "id": "deny-diskpart",
+          "action": "deny",
+          "commandTree": [
+            "diskpart"
+          ],
+          "contains": [],
+          "reason": "Disk partition command is blocked"
+        },
+        {
+          "id": "deny-format",
+          "action": "deny",
+          "commandTree": [
+            "format"
+          ],
+          "contains": [],
+          "reason": "Disk formatting command is blocked"
+        },
+        {
+          "id": "deny-certutil",
+          "action": "deny",
+          "commandTree": [
+            "certutil"
+          ],
+          "contains": [],
+          "reason": "Download or certificate manipulation command is blocked"
+        },
+        {
+          "id": "deny-bitsadmin",
+          "action": "deny",
+          "commandTree": [
+            "bitsadmin"
+          ],
+          "contains": [],
+          "reason": "Background transfer command is blocked"
+        },
+        {
+          "id": "deny-msiexec",
+          "action": "deny",
+          "commandTree": [
+            "msiexec"
+          ],
+          "contains": [],
+          "reason": "Installer execution command is blocked"
+        },
+        {
+          "id": "deny-regsvr32",
+          "action": "deny",
+          "commandTree": [
+            "regsvr32"
+          ],
+          "contains": [],
+          "reason": "Binary registration command is blocked"
+        },
+        {
+          "id": "deny-rundll32",
+          "action": "deny",
+          "commandTree": [
+            "rundll32"
+          ],
+          "contains": [],
+          "reason": "Dynamic library execution command is blocked"
+        },
+        {
+          "id": "deny-schtasks",
+          "action": "deny",
+          "commandTree": [
+            "schtasks"
+          ],
+          "contains": [],
+          "reason": "Task scheduler command is blocked"
+        },
+        {
+          "id": "deny-sc",
+          "action": "deny",
+          "commandTree": [
+            "sc"
+          ],
+          "contains": [],
+          "reason": "Service controller command is blocked"
+        },
+        {
+          "id": "deny-systemctl",
+          "action": "deny",
+          "commandTree": [
+            "systemctl"
+          ],
+          "contains": [],
+          "reason": "Service controller command is blocked"
+        },
+        {
+          "id": "deny-service",
+          "action": "deny",
+          "commandTree": [
+            "service"
+          ],
+          "contains": [],
+          "reason": "Service controller command is blocked"
+        },
+        {
+          "id": "deny-pkexec",
+          "action": "deny",
+          "commandTree": [
+            "pkexec"
+          ],
+          "contains": [],
+          "reason": "Privilege escalation command is blocked"
+        },
+        {
+          "id": "deny-kill",
+          "action": "deny",
+          "commandTree": [
+            "kill"
+          ],
+          "contains": [],
+          "reason": "Process termination command is blocked"
+        },
+        {
+          "id": "deny-pkill",
+          "action": "deny",
+          "commandTree": [
+            "pkill"
+          ],
+          "contains": [],
+          "reason": "Process termination command is blocked"
+        },
+        {
+          "id": "deny-killall",
+          "action": "deny",
+          "commandTree": [
+            "killall"
+          ],
+          "contains": [],
+          "reason": "Process termination command is blocked"
+        },
+        {
+          "id": "deny-apt",
+          "action": "deny",
+          "commandTree": [
+            "apt"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-apt-get",
+          "action": "deny",
+          "commandTree": [
+            "apt-get"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-yum",
+          "action": "deny",
+          "commandTree": [
+            "yum"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-dnf",
+          "action": "deny",
+          "commandTree": [
+            "dnf"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-pacman",
+          "action": "deny",
+          "commandTree": [
+            "pacman"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-zypper",
+          "action": "deny",
+          "commandTree": [
+            "zypper"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-apk",
+          "action": "deny",
+          "commandTree": [
+            "apk"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-brew",
+          "action": "deny",
+          "commandTree": [
+            "brew"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-winget",
+          "action": "deny",
+          "commandTree": [
+            "winget"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-choco",
+          "action": "deny",
+          "commandTree": [
+            "choco"
+          ],
+          "contains": [],
+          "reason": "Package manager command is blocked"
+        },
+        {
+          "id": "deny-iptables",
+          "action": "deny",
+          "commandTree": [
+            "iptables"
+          ],
+          "contains": [],
+          "reason": "Firewall command is blocked"
+        },
+        {
+          "id": "deny-nft",
+          "action": "deny",
+          "commandTree": [
+            "nft"
+          ],
+          "contains": [],
+          "reason": "Firewall command is blocked"
+        },
+        {
+          "id": "deny-ufw",
+          "action": "deny",
+          "commandTree": [
+            "ufw"
+          ],
+          "contains": [],
+          "reason": "Firewall command is blocked"
+        },
+        {
+          "id": "deny-ip",
+          "action": "deny",
+          "commandTree": [
+            "ip"
+          ],
+          "contains": [],
+          "reason": "Network configuration command is blocked"
+        },
+        {
+          "id": "deny-ifconfig",
+          "action": "deny",
+          "commandTree": [
+            "ifconfig"
+          ],
+          "contains": [],
+          "reason": "Network configuration command is blocked"
+        },
+        {
+          "id": "deny-route",
+          "action": "deny",
+          "commandTree": [
+            "route"
+          ],
+          "contains": [],
+          "reason": "Routing configuration command is blocked"
+        },
+        {
+          "id": "deny-dd",
+          "action": "deny",
+          "commandTree": [
+            "dd"
+          ],
+          "contains": [],
+          "reason": "Raw disk write command is blocked"
+        },
+        {
+          "id": "deny-mkfs",
+          "action": "deny",
+          "commandTree": [
+            "mkfs"
+          ],
+          "contains": [],
+          "reason": "Filesystem creation command is blocked"
+        },
+        {
+          "id": "deny-fdisk",
+          "action": "deny",
+          "commandTree": [
+            "fdisk"
+          ],
+          "contains": [],
+          "reason": "Disk partition command is blocked"
+        },
+        {
+          "id": "deny-parted",
+          "action": "deny",
+          "commandTree": [
+            "parted"
+          ],
+          "contains": [],
+          "reason": "Disk partition command is blocked"
+        },
+        {
+          "id": "deny-mount",
+          "action": "deny",
+          "commandTree": [
+            "mount"
+          ],
+          "contains": [],
+          "reason": "Mount command is blocked"
+        },
+        {
+          "id": "deny-umount",
+          "action": "deny",
+          "commandTree": [
+            "umount"
+          ],
+          "contains": [],
+          "reason": "Unmount command is blocked"
+        },
+        {
+          "id": "deny-chattr",
+          "action": "deny",
+          "commandTree": [
+            "chattr"
+          ],
+          "contains": [],
+          "reason": "File attribute modification command is blocked"
+        },
+        {
+          "id": "deny-setfacl",
+          "action": "deny",
+          "commandTree": [
+            "setfacl"
+          ],
+          "contains": [],
+          "reason": "ACL modification command is blocked"
+        },
+        {
+          "id": "deny-useradd",
+          "action": "deny",
+          "commandTree": [
+            "useradd"
+          ],
+          "contains": [],
+          "reason": "User management command is blocked"
+        },
+        {
+          "id": "deny-usermod",
+          "action": "deny",
+          "commandTree": [
+            "usermod"
+          ],
+          "contains": [],
+          "reason": "User management command is blocked"
+        },
+        {
+          "id": "deny-userdel",
+          "action": "deny",
+          "commandTree": [
+            "userdel"
+          ],
+          "contains": [],
+          "reason": "User management command is blocked"
+        },
+        {
+          "id": "deny-groupadd",
+          "action": "deny",
+          "commandTree": [
+            "groupadd"
+          ],
+          "contains": [],
+          "reason": "Group management command is blocked"
+        },
+        {
+          "id": "deny-groupdel",
+          "action": "deny",
+          "commandTree": [
+            "groupdel"
+          ],
+          "contains": [],
+          "reason": "Group management command is blocked"
+        },
+        {
+          "id": "deny-launchctl",
+          "action": "deny",
+          "commandTree": [
+            "launchctl"
+          ],
+          "contains": [],
+          "reason": "macOS service controller command is blocked"
+        },
+        {
+          "id": "deny-defaults",
+          "action": "deny",
+          "commandTree": [
+            "defaults"
+          ],
+          "contains": [],
+          "reason": "macOS preferences write command is blocked"
+        },
+        {
+          "id": "deny-spctl",
+          "action": "deny",
+          "commandTree": [
+            "spctl"
+          ],
+          "contains": [],
+          "reason": "macOS security policy command is blocked"
+        },
+        {
+          "id": "deny-csrutil",
+          "action": "deny",
+          "commandTree": [
+            "csrutil"
+          ],
+          "contains": [],
+          "reason": "macOS SIP command is blocked"
+        },
+        {
+          "id": "deny-security",
+          "action": "deny",
+          "commandTree": [
+            "security"
+          ],
+          "contains": [],
+          "reason": "macOS keychain command is blocked"
+        },
+        {
+          "id": "deny-osascript",
+          "action": "deny",
+          "commandTree": [
+            "osascript"
+          ],
+          "contains": [],
+          "reason": "AppleScript execution command is blocked"
+        },
+        {
+          "id": "deny-diskutil",
+          "action": "deny",
+          "commandTree": [
+            "diskutil"
+          ],
+          "contains": [],
+          "reason": "Disk utility command is blocked"
+        },
+        {
+          "id": "deny-powershell",
+          "action": "deny",
+          "commandTree": [
+            "powershell"
+          ],
+          "contains": [],
+          "reason": "Nested shell launch is blocked"
+        },
+        {
+          "id": "deny-pwsh",
+          "action": "deny",
+          "commandTree": [
+            "pwsh"
+          ],
+          "contains": [],
+          "reason": "Nested shell launch is blocked"
+        },
+        {
+          "id": "deny-cmd",
+          "action": "deny",
+          "commandTree": [
+            "cmd"
+          ],
+          "contains": [],
+          "reason": "Nested shell launch is blocked"
+        },
+        {
+          "id": "deny-bash-c",
+          "action": "deny",
+          "commandTree": [
+            "bash"
+          ],
+          "contains": [
+            "-c"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-bash-lc",
+          "action": "deny",
+          "commandTree": [
+            "bash"
+          ],
+          "contains": [
+            "-lc"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-sh-c",
+          "action": "deny",
+          "commandTree": [
+            "sh"
+          ],
+          "contains": [
+            "-c"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-sh-lc",
+          "action": "deny",
+          "commandTree": [
+            "sh"
+          ],
+          "contains": [
+            "-lc"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-zsh-c",
+          "action": "deny",
+          "commandTree": [
+            "zsh"
+          ],
+          "contains": [
+            "-c"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-zsh-lc",
+          "action": "deny",
+          "commandTree": [
+            "zsh"
+          ],
+          "contains": [
+            "-lc"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-dash-c",
+          "action": "deny",
+          "commandTree": [
+            "dash"
+          ],
+          "contains": [
+            "-c"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-dash-lc",
+          "action": "deny",
+          "commandTree": [
+            "dash"
+          ],
+          "contains": [
+            "-lc"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-ksh-c",
+          "action": "deny",
+          "commandTree": [
+            "ksh"
+          ],
+          "contains": [
+            "-c"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-ksh-lc",
+          "action": "deny",
+          "commandTree": [
+            "ksh"
+          ],
+          "contains": [
+            "-lc"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-fish-c",
+          "action": "deny",
+          "commandTree": [
+            "fish"
+          ],
+          "contains": [
+            "-c"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-tcsh-c",
+          "action": "deny",
+          "commandTree": [
+            "tcsh"
+          ],
+          "contains": [
+            "-c"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-csh-c",
+          "action": "deny",
+          "commandTree": [
+            "csh"
+          ],
+          "contains": [
+            "-c"
+          ],
+          "reason": "Shell wrapper command execution is blocked"
+        },
+        {
+          "id": "deny-invoke-expression",
+          "action": "deny",
+          "commandTree": [
+            "invoke-expression"
+          ],
+          "contains": [],
+          "reason": "Dynamic command execution is blocked"
+        },
+        {
+          "id": "deny-iex",
+          "action": "deny",
+          "commandTree": [
+            "iex"
+          ],
+          "contains": [],
+          "reason": "Dynamic command execution is blocked"
+        },
+        {
+          "id": "deny-invoke-command",
+          "action": "deny",
+          "commandTree": [
+            "invoke-command"
+          ],
+          "contains": [],
+          "reason": "Remote command execution is blocked"
+        },
+        {
+          "id": "deny-curl",
+          "action": "deny",
+          "commandTree": [
+            "curl"
+          ],
+          "contains": [],
+          "reason": "Network download command is blocked"
+        },
+        {
+          "id": "deny-wget",
+          "action": "deny",
+          "commandTree": [
+            "wget"
+          ],
+          "contains": [],
+          "reason": "Network download command is blocked"
+        },
+        {
+          "id": "deny-invoke-webrequest",
+          "action": "deny",
+          "commandTree": [
+            "invoke-webrequest"
+          ],
+          "contains": [],
+          "reason": "Network download command is blocked"
+        },
+        {
+          "id": "deny-irm",
+          "action": "deny",
+          "commandTree": [
+            "irm"
+          ],
+          "contains": [],
+          "reason": "Network download command is blocked"
+        },
+        {
+          "id": "deny-set-content",
+          "action": "deny",
+          "commandTree": [
+            "set-content"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-add-content",
+          "action": "deny",
+          "commandTree": [
+            "add-content"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-clear-content",
+          "action": "deny",
+          "commandTree": [
+            "clear-content"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-out-file",
+          "action": "deny",
+          "commandTree": [
+            "out-file"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-tee",
+          "action": "deny",
+          "commandTree": [
+            "tee"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-sed",
+          "action": "deny",
+          "commandTree": [
+            "sed"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-awk",
+          "action": "deny",
+          "commandTree": [
+            "awk"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-perl",
+          "action": "deny",
+          "commandTree": [
+            "perl"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-ed",
+          "action": "deny",
+          "commandTree": [
+            "ed"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-ex",
+          "action": "deny",
+          "commandTree": [
+            "ex"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-vi",
+          "action": "deny",
+          "commandTree": [
+            "vi"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-vim",
+          "action": "deny",
+          "commandTree": [
+            "vim"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-nvim",
+          "action": "deny",
+          "commandTree": [
+            "nvim"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-nano",
+          "action": "deny",
+          "commandTree": [
+            "nano"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
+        },
+        {
+          "id": "deny-notepad",
+          "action": "deny",
+          "commandTree": [
+            "notepad"
+          ],
+          "contains": [],
+          "reason": "Text editing command is blocked"
         },
         {
           "id": "confirm-rm",
           "action": "confirm",
-          "commandTree": ["rm"],
+          "commandTree": [
+            "rm"
+          ],
           "contains": [],
           "reason": "File deletion command requires confirmation"
         },
         {
+          "id": "confirm-del",
+          "action": "confirm",
+          "commandTree": [
+            "del"
+          ],
+          "contains": [],
+          "reason": "File deletion command requires confirmation"
+        },
+        {
+          "id": "confirm-rmdir",
+          "action": "confirm",
+          "commandTree": [
+            "rmdir"
+          ],
+          "contains": [],
+          "reason": "Directory deletion command requires confirmation"
+        },
+        {
           "id": "confirm-remove-item",
           "action": "confirm",
-          "commandTree": ["remove-item"],
+          "commandTree": [
+            "remove-item"
+          ],
           "contains": [],
           "reason": "PowerShell deletion command requires confirmation"
+        },
+        {
+          "id": "confirm-unlink",
+          "action": "confirm",
+          "commandTree": [
+            "unlink"
+          ],
+          "contains": [],
+          "reason": "File unlink command requires confirmation"
         }
       ],
       "pathGuard": {
@@ -66,7 +1058,7 @@
     },
     "execution": {
       "timeoutMs": 30000,
-      "maxOutputBytes": 13107200
+      "maxOutputBytes": 131072
     }
   },
   "servers": [

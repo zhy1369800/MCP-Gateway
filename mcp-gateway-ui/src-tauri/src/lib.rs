@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -6,11 +7,13 @@ use std::time::Duration;
 use std::{fs, io};
 
 use chrono::Utc;
-use gateway_core::{load_config_from_path, ConfigService, ProcessManager};
+use gateway_core::{
+    load_config_from_path, ConfigService, GatewayConfig, ProcessManager, SkillCommandRule,
+};
 use gateway_http::{build_router, spawn_idle_reaper, AppState, SkillsService, SseHub};
 use serde::Serialize;
-use serde_json::{json, Value};
-use tauri::State;
+use serde_json::Value;
+use tauri::{Manager, State};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -311,8 +314,13 @@ fn load_local_config() -> Result<Value, String> {
     }
 
     let content = fs::read_to_string(&path).map_err(io_error)?;
-    let parsed: Value =
+    let mut parsed: Value =
         serde_json::from_str(&content).map_err(|error| format!("解析配置文件失败：{error}"))?;
+    if upgrade_legacy_skill_rules_in_place(&mut parsed) {
+        let normalized = serde_json::to_string_pretty(&parsed)
+            .map_err(|error| format!("序列化配置失败：{error}"))?;
+        fs::write(&path, normalized).map_err(io_error)?;
+    }
     Ok(parsed)
 }
 
@@ -332,6 +340,18 @@ fn save_local_config(config: Value) -> Result<(), String> {
 fn get_config_path() -> Result<String, String> {
     let path = resolve_default_config_path()?;
     Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn focus_main_window_for_skill_confirmation(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+    Ok(())
 }
 
 fn has_skill_md_in_directory(root: &Path) -> Result<bool, String> {
@@ -409,87 +429,133 @@ fn validate_skill_directory(path: String) -> Result<SkillDirectoryValidation, St
 }
 
 fn default_local_config() -> Value {
-    json!({
-        "version": 2,
-        "listen": "127.0.0.1:8765",
-        "allowNonLoopback": false,
-        "mode": "both",
-        "apiPrefix": "/api/v2",
-        "security": {
-            "mcp": {
-                "enabled": false,
-                "token": ""
-            },
-            "admin": {
-                "enabled": false,
-                "token": ""
-            }
-        },
-        "transport": {
-            "streamableHttp": {
-                "basePath": "/api/v2/mcp"
-            },
-            "sse": {
-                "basePath": "/api/v2/sse"
-            }
-        },
-        "defaults": {
-            "lifecycle": "pooled",
-            "idleTtlMs": 300000,
-            "requestTimeoutMs": 60000,
-            "maxRetries": 2,
-            "maxResponseWaitIterations": 100
-        },
-        "skills": {
-            "enabled": false,
-            "serverName": "__skills__",
-            "roots": default_skills_roots(),
-            "policy": {
-                "defaultAction": "allow",
-                "rules": [
-                    {
-                        "id": "deny-rm-root",
-                        "action": "deny",
-                        "commandTree": ["rm"],
-                        "contains": ["-rf", "/"],
-                        "reason": "Potential root destructive deletion"
-                    },
-                    {
-                        "id": "confirm-rm",
-                        "action": "confirm",
-                        "commandTree": ["rm"],
-                        "contains": [],
-                        "reason": "File deletion command requires confirmation"
-                    },
-                    {
-                        "id": "confirm-remove-item",
-                        "action": "confirm",
-                        "commandTree": ["remove-item"],
-                        "contains": [],
-                        "reason": "PowerShell deletion command requires confirmation"
-                    }
-                ],
-                "pathGuard": {
-                    "enabled": false,
-                    "whitelistDirs": [],
-                    "onViolation": "confirm"
-                }
-            },
-            "execution": {
-                "timeoutMs": 30000,
-                "maxOutputBytes": 13107200
-            }
-        },
-        "servers": []
-    })
+    let mut cfg = GatewayConfig::default();
+    cfg.security.mcp.enabled = false;
+    cfg.security.mcp.token.clear();
+    cfg.security.admin.enabled = false;
+    cfg.security.admin.token.clear();
+    cfg.servers.clear();
+    serde_json::to_value(cfg).expect("default local config should serialize")
 }
 
 fn io_error(error: io::Error) -> String {
     format!("文件操作失败：{error}")
 }
 
-fn default_skills_roots() -> Vec<String> {
-    Vec::new()
+#[tauri::command]
+fn get_default_skill_rules() -> Vec<SkillCommandRule> {
+    GatewayConfig::default().skills.policy.rules
+}
+
+fn upgrade_legacy_skill_rules_in_place(config: &mut Value) -> bool {
+    let Some(rules) = config
+        .pointer("/skills/policy/rules")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+
+    let mut ids = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let Some(id) = rule.get("id").and_then(Value::as_str) else {
+            return false;
+        };
+        ids.push(id.to_ascii_lowercase());
+    }
+
+    let legacy_three = ["deny-rm-root", "confirm-rm", "confirm-remove-item"];
+    let legacy_four = [
+        "deny-rm-root",
+        "deny-remove-item-root",
+        "confirm-rm",
+        "confirm-remove-item",
+    ];
+    let is_legacy_pack =
+        matches_rule_id_set(&ids, &legacy_three) || matches_rule_id_set(&ids, &legacy_four);
+    if !is_legacy_pack {
+        return false;
+    }
+
+    let default_cfg = GatewayConfig::default();
+    let default_rules = serde_json::to_value(default_cfg.skills.policy.rules)
+        .expect("default skill rules should serialize");
+    if let Some(slot) = config.pointer_mut("/skills/policy/rules") {
+        *slot = default_rules;
+    }
+
+    // Keep old files consistent with gateway-core default execution limit.
+    if let Some(slot) = config.pointer_mut("/skills/execution/maxOutputBytes") {
+        if slot.as_u64() == Some(13_107_200) {
+            *slot = Value::from(default_cfg.skills.execution.max_output_bytes as u64);
+        }
+    }
+    true
+}
+
+fn matches_rule_id_set(ids: &[String], expected: &[&str]) -> bool {
+    if ids.len() != expected.len() {
+        return false;
+    }
+    let actual_set: HashSet<&str> = ids.iter().map(|item| item.as_str()).collect();
+    let expected_set: HashSet<&str> = expected.iter().copied().collect();
+    actual_set == expected_set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upgrade_legacy_skill_rules_in_place;
+    use serde_json::json;
+
+    #[test]
+    fn upgrades_legacy_three_rule_pack() {
+        let mut cfg = json!({
+            "skills": {
+                "policy": {
+                    "rules": [
+                        { "id": "deny-rm-root" },
+                        { "id": "confirm-rm" },
+                        { "id": "confirm-remove-item" }
+                    ]
+                },
+                "execution": {
+                    "maxOutputBytes": 13107200
+                }
+            }
+        });
+
+        let changed = upgrade_legacy_skill_rules_in_place(&mut cfg);
+        assert!(changed);
+        let rules = cfg["skills"]["policy"]["rules"]
+            .as_array()
+            .expect("rules should be array");
+        assert!(rules.len() > 10);
+        assert_eq!(cfg["skills"]["execution"]["maxOutputBytes"], 131072);
+    }
+
+    #[test]
+    fn keeps_custom_rules_untouched() {
+        let mut cfg = json!({
+            "skills": {
+                "policy": {
+                    "rules": [
+                        { "id": "deny-rm-root" },
+                        { "id": "custom-confirm-delete" }
+                    ]
+                },
+                "execution": {
+                    "maxOutputBytes": 13107200
+                }
+            }
+        });
+
+        let changed = upgrade_legacy_skill_rules_in_place(&mut cfg);
+        assert!(!changed);
+        let rules = cfg["skills"]["policy"]["rules"]
+            .as_array()
+            .expect("rules should be array");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(cfg["skills"]["execution"]["maxOutputBytes"], 13107200);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -504,6 +570,8 @@ pub fn run() {
             load_local_config,
             save_local_config,
             get_config_path,
+            get_default_skill_rules,
+            focus_main_window_for_skill_confirmation,
             pick_folder_dialog,
             validate_skill_directory
         ])

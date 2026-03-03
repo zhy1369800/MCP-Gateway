@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use gateway_core::{
@@ -11,7 +11,7 @@ use gateway_core::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -22,8 +22,11 @@ pub struct SkillsService {
 
 #[derive(Debug, Clone)]
 struct ConfirmationEntry {
-    request_fingerprint: String,
+    /// 命令指纹：skill|command_preview，用于去重
+    fingerprint: String,
     record: SkillConfirmation,
+    notify: Arc<Notify>,
+    timed_out: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ToSchema)]
@@ -63,6 +66,8 @@ struct DiscoveredSkill {
     skill: String,
     frontmatter_name: String,
     description: String,
+    frontmatter_metadata: String,
+    frontmatter_block: String,
     root: PathBuf,
     path: PathBuf,
     has_scripts: bool,
@@ -103,23 +108,36 @@ struct CommandInvocation {
 }
 
 #[derive(Debug)]
-enum ConfirmationCheck {
-    Missing,
+enum ConfirmationWaitOutcome {
     Approved,
-    Pending,
     Rejected,
+    TimedOut,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SkillFrontmatter {
-    #[serde(default)]
+/// `create_confirmation` 的三种结果：
+/// - `Created(record)`  — 新建了一条 Pending 确认，需要等用户决定
+/// - `Reused(record)`   — 同指纹已有 Pending 条目，复用它，继续等待
+/// - `AlreadyTimedOut(id)` — 同指纹的上一次请求刚超时，直接拒绝，不再弹窗
+#[derive(Debug)]
+enum CreateConfirmationResult {
+    Created(SkillConfirmation),
+    Reused(SkillConfirmation),
+    AlreadyTimedOut(String),
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParsedFrontmatter {
     name: String,
-    #[serde(default)]
     description: String,
+    metadata: String,
+    block: String,
 }
 
 impl SkillsService {
+    const CONFIRMATION_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
+    const CONFIRMATION_STALE_PENDING_WINDOW: Duration = Duration::from_secs(75);
+    const CONFIRMATION_RESOLVED_RETENTION_WINDOW: Duration = Duration::from_secs(120);
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -175,7 +193,7 @@ impl SkillsService {
                 jsonrpc_result(
                     id,
                     json!({
-                        "tools": tool_definitions(&discovered, &config.skills.roots),
+                        "tools": tool_definitions(&discovered),
                         "skills": summaries
                     }),
                 )
@@ -217,39 +235,87 @@ impl SkillsService {
     }
 
     pub async fn list_pending_confirmations(&self) -> Vec<SkillConfirmation> {
-        let guard = self.confirmations.read().await;
+        let now = Utc::now();
+        let mut guard = self.confirmations.write().await;
+        Self::prune_confirmations_locked(&mut guard, now);
         let mut list = guard
             .values()
             .filter(|entry| entry.record.status == ConfirmationStatus::Pending)
             .map(|entry| entry.record.clone())
             .collect::<Vec<_>>();
-        list.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         list
     }
 
     pub async fn approve_confirmation(&self, id: &str) -> Result<SkillConfirmation, AppError> {
+        let now = Utc::now();
         let mut guard = self.confirmations.write().await;
+        Self::prune_confirmations_locked(&mut guard, now);
         let Some(entry) = guard.get_mut(id) else {
             return Err(AppError::NotFound("confirmation not found".to_string()));
         };
-        if entry.record.status == ConfirmationStatus::Rejected {
-            return Err(AppError::Conflict(
-                "confirmation already rejected".to_string(),
-            ));
+        let notify = entry.notify.clone();
+        match entry.record.status {
+            ConfirmationStatus::Pending => {}
+            ConfirmationStatus::Approved => {
+                return Err(AppError::Conflict(
+                    "confirmation already approved".to_string(),
+                ));
+            }
+            ConfirmationStatus::Rejected => {
+                return Err(AppError::Conflict(
+                    "confirmation already rejected".to_string(),
+                ));
+            }
         }
         entry.record.status = ConfirmationStatus::Approved;
-        entry.record.updated_at = Utc::now();
-        Ok(entry.record.clone())
+        entry.record.updated_at = now;
+        entry.timed_out = false;
+        let updated = entry.record.clone();
+        notify.notify_one();
+        Ok(updated)
     }
 
     pub async fn reject_confirmation(&self, id: &str) -> Result<SkillConfirmation, AppError> {
+        let now = Utc::now();
         let mut guard = self.confirmations.write().await;
-        let Some(entry) = guard.get_mut(id) else {
+        Self::prune_confirmations_locked(&mut guard, now);
+        let Some(target) = guard.get(id).map(|entry| entry.record.clone()) else {
             return Err(AppError::NotFound("confirmation not found".to_string()));
         };
-        entry.record.status = ConfirmationStatus::Rejected;
-        entry.record.updated_at = Utc::now();
-        Ok(entry.record.clone())
+        match target.status {
+            ConfirmationStatus::Pending => {}
+            ConfirmationStatus::Approved => {
+                return Err(AppError::Conflict(
+                    "confirmation already approved".to_string(),
+                ));
+            }
+            ConfirmationStatus::Rejected => {
+                return Err(AppError::Conflict(
+                    "confirmation already rejected".to_string(),
+                ));
+            }
+        }
+        let mut notifies = Vec::new();
+        for entry in guard.values_mut() {
+            if entry.record.status != ConfirmationStatus::Pending {
+                continue;
+            }
+            if Self::is_same_confirmation_signature(&entry.record, &target) {
+                entry.record.status = ConfirmationStatus::Rejected;
+                entry.record.updated_at = now;
+                entry.timed_out = false;
+                notifies.push(entry.notify.clone());
+            }
+        }
+        for notify in notifies {
+            notify.notify_one();
+        }
+
+        guard
+            .get(id)
+            .map(|entry| entry.record.clone())
+            .ok_or_else(|| AppError::NotFound("confirmation not found".to_string()))
     }
 
     pub async fn list_skills_for_admin(
@@ -308,10 +374,10 @@ impl SkillsService {
             &config.skills,
             &program,
             &command_args,
+            &command_preview,
             &skill_md_path,
             None,
         );
-        let fingerprint = confirmation_fingerprint_for_command(&skill.skill, &command_preview);
         match policy {
             PolicyDecision::Deny(reason) => {
                 let reason_text = reason.clone();
@@ -325,36 +391,45 @@ impl SkillsService {
                 ));
             }
             PolicyDecision::Confirm(reason) => {
-                let outcome = self.consume_confirmation_by_fingerprint(&fingerprint).await;
-                match outcome {
-                    ConfirmationCheck::Missing | ConfirmationCheck::Pending => {
-                        let confirmation = self
-                            .create_confirmation(
-                                &fingerprint,
-                                &skill.skill,
-                                &command_preview,
-                                &tokens,
-                                &command_preview,
-                                &reason,
-                            )
-                            .await;
-                        let reason_text = confirmation.reason.clone();
-                        return Ok(tool_error(
-                            format!("command requires user confirmation: {reason_text}"),
-                            json!({
-                                "status": "confirmation_required",
-                                "confirmationId": confirmation.id,
-                                "reason": confirmation.reason,
-                                "command": confirmation.command_preview
-                            }),
-                        ));
+                let (confirmation_id, already_decided) = match self
+                    .create_confirmation(
+                        &skill.skill,
+                        &command_preview,
+                        &tokens,
+                        &command_preview,
+                        &reason,
+                    )
+                    .await
+                {
+                    // 全新确认 → 正常走等待流程
+                    CreateConfirmationResult::Created(c) => (c.id, None),
+                    // 同指纹已有 Pending → 复用同一个 id，继续等待
+                    CreateConfirmationResult::Reused(c) => (c.id, None),
+                    // 同指纹刚超时 → 直接拒绝，不再弹窗
+                    CreateConfirmationResult::AlreadyTimedOut(id) => {
+                        (id.clone(), Some(ConfirmationWaitOutcome::TimedOut))
                     }
-                    ConfirmationCheck::Approved => {}
-                    ConfirmationCheck::Rejected => {
-                        return Ok(tool_error(
-                            "user rejected confirmation request".to_string(),
-                            json!({"status": "rejected"}),
-                        ));
+                };
+
+                let outcome = match already_decided {
+                    Some(decided) => decided,
+                    None => {
+                        self.wait_for_confirmation_decision(
+                            &confirmation_id,
+                            Self::CONFIRMATION_DECISION_TIMEOUT,
+                            Duration::from_millis(250),
+                        )
+                        .await
+                    }
+                };
+
+                match outcome {
+                    ConfirmationWaitOutcome::Approved => {}
+                    ConfirmationWaitOutcome::Rejected => {
+                        return Ok(confirmation_rejected_result(&confirmation_id, false));
+                    }
+                    ConfirmationWaitOutcome::TimedOut => {
+                        return Ok(confirmation_rejected_result(&confirmation_id, true));
                     }
                 }
             }
@@ -431,29 +506,37 @@ impl SkillsService {
 
     async fn create_confirmation(
         &self,
-        fingerprint: &str,
         skill: &str,
         script: &str,
         args: &[String],
         command_preview: &str,
         reason: &str,
-    ) -> SkillConfirmation {
-        {
-            let guard = self.confirmations.read().await;
-            if let Some(existing) = guard
-                .values()
-                .find(|entry| {
-                    entry.request_fingerprint == fingerprint
-                        && entry.record.status == ConfirmationStatus::Pending
-                })
-                .map(|entry| entry.record.clone())
-            {
-                return existing;
+    ) -> CreateConfirmationResult {
+        let fingerprint = format!("{skill}|{command_preview}");
+        let now = Utc::now();
+        let mut guard = self.confirmations.write().await;
+        Self::prune_confirmations_locked(&mut guard, now);
+
+        // 检查同指纹是否已有条目：
+        // - Pending  → 复用，不重复弹窗
+        // - 刚超时的 Rejected (timed_out=true) → 直接告知调用方已超时，不新建
+        // - 用户手动 Rejected / Approved → 允许重新发起
+        for entry in guard.values() {
+            if entry.fingerprint != fingerprint {
+                continue;
+            }
+            match entry.record.status {
+                ConfirmationStatus::Pending => {
+                    return CreateConfirmationResult::Reused(entry.record.clone());
+                }
+                ConfirmationStatus::Rejected if entry.timed_out => {
+                    return CreateConfirmationResult::AlreadyTimedOut(entry.record.id.clone());
+                }
+                _ => {}
             }
         }
 
         let id = Uuid::new_v4().to_string();
-        let now = Utc::now();
         let record = SkillConfirmation {
             id: id.clone(),
             status: ConfirmationStatus::Pending,
@@ -466,38 +549,157 @@ impl SkillsService {
             reason: reason.to_string(),
         };
 
-        let mut guard = self.confirmations.write().await;
         guard.insert(
             id,
             ConfirmationEntry {
-                request_fingerprint: fingerprint.to_string(),
+                fingerprint,
                 record: record.clone(),
+                notify: Arc::new(Notify::new()),
+                timed_out: false,
             },
         );
-        record
+        let timeout_service = self.clone();
+        let timeout_id = record.id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Self::CONFIRMATION_DECISION_TIMEOUT).await;
+            timeout_service.reject_confirmation_on_timeout(&timeout_id).await;
+        });
+        CreateConfirmationResult::Created(record)
     }
 
-    async fn consume_confirmation_by_fingerprint(&self, fingerprint: &str) -> ConfirmationCheck {
-        let mut guard = self.confirmations.write().await;
-        let Some((id, status)) = guard
-            .iter()
-            .find(|(_, entry)| entry.request_fingerprint == fingerprint)
-            .map(|(id, entry)| (id.clone(), entry.record.status.clone()))
-        else {
-            return ConfirmationCheck::Missing;
-        };
+    async fn wait_for_confirmation_decision(
+        &self,
+        confirmation_id: &str,
+        timeout: Duration,
+        _poll_interval: Duration,
+    ) -> ConfirmationWaitOutcome {
+        let started = Instant::now();
+        loop {
+            let wait_notify = {
+                let now = Utc::now();
+                let mut guard = self.confirmations.write().await;
+                Self::prune_confirmations_locked(&mut guard, now);
+                match guard
+                    .get(confirmation_id)
+                    .map(|entry| {
+                        (
+                            entry.record.status.clone(),
+                            entry.record.created_at,
+                            entry.notify.clone(),
+                            entry.timed_out,
+                        )
+                    })
+                {
+                    Some((ConfirmationStatus::Approved, _, _, _)) => {
+                        guard.remove(confirmation_id);
+                        return ConfirmationWaitOutcome::Approved;
+                    }
+                    Some((ConfirmationStatus::Rejected, _, _, timed_out)) => {
+                        guard.remove(confirmation_id);
+                        return if timed_out {
+                            ConfirmationWaitOutcome::TimedOut
+                        } else {
+                            ConfirmationWaitOutcome::Rejected
+                        };
+                    }
+                    Some((ConfirmationStatus::Pending, created_at, notify, _)) => {
+                        if Self::age_exceeds(created_at, now, timeout) {
+                            if let Some(entry) = guard.get_mut(confirmation_id) {
+                                entry.record.status = ConfirmationStatus::Rejected;
+                                entry.record.updated_at = now;
+                                entry.timed_out = true;
+                                entry.notify.notify_one();
+                            }
+                            return ConfirmationWaitOutcome::TimedOut;
+                        }
+                        notify
+                    }
+                    None => return ConfirmationWaitOutcome::TimedOut,
+                }
+            };
 
-        match status {
-            ConfirmationStatus::Approved => {
-                guard.remove(&id);
-                ConfirmationCheck::Approved
+            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                let mut guard = self.confirmations.write().await;
+                if let Some(entry) = guard.get_mut(confirmation_id) {
+                    entry.record.status = ConfirmationStatus::Rejected;
+                    entry.record.updated_at = Utc::now();
+                    entry.timed_out = true;
+                    entry.notify.notify_one();
+                }
+                return ConfirmationWaitOutcome::TimedOut;
+            };
+            if remaining.is_zero() {
+                let mut guard = self.confirmations.write().await;
+                if let Some(entry) = guard.get_mut(confirmation_id) {
+                    entry.record.status = ConfirmationStatus::Rejected;
+                    entry.record.updated_at = Utc::now();
+                    entry.timed_out = true;
+                    entry.notify.notify_one();
+                }
+                return ConfirmationWaitOutcome::TimedOut;
             }
-            ConfirmationStatus::Pending => ConfirmationCheck::Pending,
-            ConfirmationStatus::Rejected => {
-                guard.remove(&id);
-                ConfirmationCheck::Rejected
+
+            let notified = tokio::time::timeout(remaining, wait_notify.notified()).await;
+            if notified.is_err() {
+                let mut guard = self.confirmations.write().await;
+                if let Some(entry) = guard.get_mut(confirmation_id) {
+                    entry.record.status = ConfirmationStatus::Rejected;
+                    entry.record.updated_at = Utc::now();
+                    entry.timed_out = true;
+                    entry.notify.notify_one();
+                }
+                return ConfirmationWaitOutcome::TimedOut;
             }
         }
+    }
+
+    async fn reject_confirmation_on_timeout(&self, id: &str) {
+        let now = Utc::now();
+        let mut guard = self.confirmations.write().await;
+        Self::prune_confirmations_locked(&mut guard, now);
+        let Some(entry) = guard.get_mut(id) else {
+            return;
+        };
+        if entry.record.status != ConfirmationStatus::Pending {
+            return;
+        }
+        entry.record.status = ConfirmationStatus::Rejected;
+        entry.record.updated_at = now;
+        entry.timed_out = true;
+        entry.notify.notify_one();
+    }
+
+    fn age_exceeds(created_at: DateTime<Utc>, now: DateTime<Utc>, ttl: Duration) -> bool {
+        now.signed_duration_since(created_at)
+            .to_std()
+            .map(|elapsed| elapsed >= ttl)
+            .unwrap_or(false)
+    }
+
+    fn is_same_confirmation_signature(left: &SkillConfirmation, right: &SkillConfirmation) -> bool {
+        left.skill == right.skill
+            && left.script == right.script
+            && left.args == right.args
+            && left.command_preview == right.command_preview
+            && left.reason == right.reason
+    }
+
+    fn prune_confirmations_locked(
+        confirmations: &mut HashMap<String, ConfirmationEntry>,
+        now: DateTime<Utc>,
+    ) {
+        confirmations.retain(|_, entry| match entry.record.status {
+            ConfirmationStatus::Pending => !Self::age_exceeds(
+                entry.record.created_at,
+                now,
+                Self::CONFIRMATION_STALE_PENDING_WINDOW,
+            ),
+            ConfirmationStatus::Approved | ConfirmationStatus::Rejected => !Self::age_exceeds(
+                entry.record.updated_at,
+                now,
+                Self::CONFIRMATION_RESOLVED_RETENTION_WINDOW,
+            ),
+        });
     }
 
     async fn discover_skills(
@@ -538,6 +740,23 @@ fn tool_error(text: String, structured: Value) -> ToolResult {
         structured,
         is_error: true,
     }
+}
+
+fn confirmation_rejected_result(confirmation_id: &str, timed_out: bool) -> ToolResult {
+    let text = if timed_out {
+        "confirmation timed out after 60 seconds; auto rejected"
+    } else {
+        "user rejected confirmation request"
+    };
+    let reason = if timed_out { "timeout" } else { "user_rejected" };
+    tool_success(
+        text.to_string(),
+        json!({
+            "status": "rejected",
+            "reason": reason,
+            "confirmationId": confirmation_id
+        }),
+    )
 }
 
 fn error_to_tool_result(error: AppError) -> ToolResult {
@@ -597,18 +816,16 @@ fn summarize_discovered_skills(skills: &[DiscoveredSkill]) -> Vec<SkillSummary> 
         .collect()
 }
 
-fn tool_definitions(skills: &[DiscoveredSkill], roots: &[String]) -> Value {
+fn tool_definitions(skills: &[DiscoveredSkill]) -> Value {
     let bindings = build_skill_tool_bindings(skills);
     let now = Utc::now().to_rfc3339();
     let os = current_os_label();
-    let root_hints = render_root_skill_md_hints(roots);
 
     Value::Array(
         bindings
             .into_iter()
             .map(|(tool_name, skill)| {
-                let description =
-                    render_skill_tool_description(skill, os, &now, &root_hints);
+                let description = render_skill_tool_description(skill, os, &now);
                 json!({
                     "name": tool_name,
                     "description": description,
@@ -689,47 +906,33 @@ fn sanitize_tool_name(raw: &str) -> String {
     }
 }
 
-fn render_skill_tool_description(
-    skill: &DiscoveredSkill,
-    os: &str,
-    now: &str,
-    root_hints: &str,
-) -> String {
+fn render_skill_tool_description(skill: &DiscoveredSkill, os: &str, now: &str) -> String {
     let meta_description = if skill.description.trim().is_empty() {
         format!("Skill instructions for {}", skill.skill)
     } else {
         skill.description.trim().to_string()
     };
+    let frontmatter_block = if skill.frontmatter_block.trim().is_empty() {
+        "none".to_string()
+    } else {
+        format!("---\n{}\n---", skill.frontmatter_block.trim())
+    };
+    let skill_path = normalize_display_path(&skill.path);
     format!(
-        "To learn the complete usage of this skill, run `cmd` to read the full SKILL.md text. like `cat /.../SKILL.md` or `Get-Content D:/.../SKILL.md`. The `cmd` value should be one shell command string used either to read markdown files or run scripts. Current OS: {os}. Current datetime: {now}. Configured roots: {root_hints}. {meta_description} ."
+        "To learn the complete usage of this skill, run `cmd` to read the full SKILL.md text. like `cat /.../SKILL.md` or `Get-Content D:/.../SKILL.md`. The `cmd` value should be one shell command string used either to read markdown files or run scripts.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill path: {skill_path}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
+        if skill.frontmatter_name.trim().is_empty() {
+            skill.skill.trim()
+        } else {
+            skill.frontmatter_name.trim()
+        },
+        meta_description,
+        if skill.frontmatter_metadata.trim().is_empty() {
+            "none"
+        } else {
+            skill.frontmatter_metadata.trim()
+        },
+        frontmatter_block
     )
-}
-
-fn render_root_skill_md_hints(roots: &[String]) -> String {
-    if roots.is_empty() {
-        return "none".to_string();
-    }
-
-    roots
-        .iter()
-        .map(|root| {
-            let path = PathBuf::from(root);
-            let display_path = if path
-                .file_name()
-                .and_then(OsStr::to_str)
-                .map(|name| name.eq_ignore_ascii_case("SKILL.md"))
-                .unwrap_or(false)
-            {
-                path.parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| path.clone())
-            } else {
-                path
-            };
-            normalize_display_path(&display_path)
-        })
-        .collect::<Vec<_>>()
-        .join(" | ")
 }
 
 fn current_os_label() -> &'static str {
@@ -847,66 +1050,90 @@ fn register_skill_directory(
         .and_then(OsStr::to_str)
         .map(str::to_string)
         .unwrap_or_else(|| canonical_skill_dir.to_string_lossy().to_string());
-    let (frontmatter_name, description) =
-        parse_frontmatter_fields(&skill_md).unwrap_or_else(|_| (String::new(), String::new()));
+    let parsed_frontmatter = parse_frontmatter_fields(&skill_md).unwrap_or_default();
 
     discovered.push(DiscoveredSkill {
         skill: dir_name.clone(),
-        frontmatter_name,
-        description,
+        frontmatter_name: parsed_frontmatter.name,
+        description: parsed_frontmatter.description,
+        frontmatter_metadata: parsed_frontmatter.metadata,
+        frontmatter_block: parsed_frontmatter.block,
         root: root_path.to_path_buf(),
         has_scripts: canonical_skill_dir.join("scripts").is_dir(),
         path: canonical_skill_dir,
     });
 }
 
-fn parse_frontmatter_fields(skill_md_path: &Path) -> Result<(String, String), AppError> {
+fn parse_frontmatter_fields(skill_md_path: &Path) -> Result<ParsedFrontmatter, AppError> {
     let content = std::fs::read_to_string(skill_md_path)?;
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
     let mut lines = content.lines();
-    if lines.next() != Some("---") {
-        return Ok((String::new(), String::new()));
+    if lines.next().map(str::trim) != Some("---") {
+        return Ok(ParsedFrontmatter::default());
     }
 
     let mut frontmatter_lines = Vec::new();
+    let mut has_closing = false;
     for line in lines {
-        if line.trim() == "---" {
+        let trimmed = line.trim();
+        if trimmed == "---" || trimmed == "..." {
+            has_closing = true;
             break;
         }
         frontmatter_lines.push(line.to_string());
     }
-
-    let raw = frontmatter_lines.join("\n");
-    if raw.trim().is_empty() {
-        return Ok((String::new(), String::new()));
+    if !has_closing {
+        return Ok(ParsedFrontmatter::default());
     }
 
-    let frontmatter = serde_yaml_like_to_json(&raw)?;
-    let parsed: SkillFrontmatter = serde_json::from_value(frontmatter).map_err(|error| {
+    let raw = frontmatter_lines.join("\n").trim().to_string();
+    if raw.trim().is_empty() {
+        return Ok(ParsedFrontmatter::default());
+    }
+
+    let frontmatter: Value = serde_yaml::from_str(&raw).map_err(|error| {
         AppError::BadRequest(format!(
-            "invalid frontmatter in {}: {error}",
+            "invalid YAML frontmatter in {}: {error}",
             skill_md_path.display()
         ))
     })?;
-    Ok((
-        parsed.name.trim().to_string(),
-        parsed.description.trim().to_string(),
-    ))
+    let frontmatter_obj = frontmatter.as_object().ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "frontmatter in {} must be a YAML mapping",
+            skill_md_path.display()
+        ))
+    })?;
+
+    let name = frontmatter_obj
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let description = frontmatter_obj
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let metadata = frontmatter_obj
+        .get("metadata")
+        .map(frontmatter_value_summary)
+        .unwrap_or_else(|| "none".to_string());
+    Ok(ParsedFrontmatter {
+        name,
+        description,
+        metadata,
+        block: raw,
+    })
 }
 
-fn serde_yaml_like_to_json(raw: &str) -> Result<Value, AppError> {
-    let mut map = serde_json::Map::new();
-    for line in raw.lines() {
-        let Some((left, right)) = line.split_once(':') else {
-            continue;
-        };
-        let key = left.trim();
-        let value = right.trim().trim_matches('"').trim_matches('\'');
-        if key.is_empty() {
-            continue;
-        }
-        map.insert(key.to_string(), Value::String(value.to_string()));
+fn frontmatter_value_summary(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::String(text) => text.to_string(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "unserializable".to_string()),
     }
-    Ok(Value::Object(map))
 }
 
 fn shell_command_for_current_os(cmd: &str) -> (String, Vec<String>) {
@@ -930,10 +1157,11 @@ fn evaluate_policy(
     skills: &SkillsConfig,
     program: &str,
     command_args: &[String],
+    raw_command: &str,
     script_path: &Path,
     script_text: Option<&str>,
 ) -> PolicyDecision {
-    let invocations = collect_command_invocations(program, command_args, script_text);
+    let invocations = collect_command_invocations(program, command_args, raw_command, script_text);
     for invocation in &invocations {
         for rule in &skills.policy.rules {
             if rule_matches(rule, invocation) {
@@ -991,6 +1219,7 @@ fn action_to_decision(action: &SkillPolicyAction, reason: String) -> PolicyDecis
 fn collect_command_invocations(
     program: &str,
     command_args: &[String],
+    raw_command: &str,
     script_text: Option<&str>,
 ) -> Vec<CommandInvocation> {
     let mut list = Vec::new();
@@ -1005,6 +1234,29 @@ fn collect_command_invocations(
         tokens: runtime_tokens,
         source: "runtime".to_string(),
     });
+
+    for (index, segment) in split_command_segments(raw_command).into_iter().enumerate() {
+        let mut tokens = split_shell_tokens(&segment);
+        if tokens.is_empty() {
+            continue;
+        }
+        if tokens[0] == "&" {
+            tokens.remove(0);
+        }
+        if tokens.is_empty() {
+            continue;
+        }
+
+        let mut normalized = Vec::with_capacity(tokens.len());
+        normalized.push(normalize_command_token(&tokens[0]));
+        normalized.extend(tokens.iter().skip(1).map(|item| item.to_ascii_lowercase()));
+
+        list.push(CommandInvocation {
+            raw: segment,
+            tokens: normalized,
+            source: format!("runtime:segment:{}", index + 1),
+        });
+    }
 
     if let Some(script) = script_text {
         for (line_no, line) in script.lines().enumerate().take(300) {
@@ -1037,6 +1289,67 @@ fn collect_command_invocations(
     }
 
     list
+}
+
+fn split_command_segments(raw: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            }
+            current.push(ch);
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            ';' => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            '|' => {
+                if chars.peek().copied() == Some('|') {
+                    let _ = chars.next();
+                }
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            '&' => {
+                if chars.peek().copied() == Some('&') {
+                    let _ = chars.next();
+                    let trimmed = current.trim();
+                    if !trimmed.is_empty() {
+                        segments.push(trimmed.to_string());
+                    }
+                    current.clear();
+                } else {
+                    current.push(ch);
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        segments.push(trimmed.to_string());
+    }
+
+    segments
 }
 
 fn rule_matches(rule: &SkillCommandRule, invocation: &CommandInvocation) -> bool {
@@ -1264,13 +1577,6 @@ fn is_path_like(token: &str) -> bool {
     bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
-fn confirmation_fingerprint_for_command(skill: &str, command: &str) -> String {
-    format!(
-        "{skill}|{}",
-        command.trim().to_ascii_lowercase().replace('\n', " ")
-    )
-}
-
 fn truncate_output(bytes: &[u8], max_bytes: usize) -> (String, bool) {
     let truncated = bytes.len() > max_bytes;
     let slice = if truncated {
@@ -1314,10 +1620,12 @@ mod tests {
     #[test]
     fn command_tree_rule_can_trigger_confirmation() {
         let skills = SkillsConfig::default();
+        let raw = "sh script.sh";
         let decision = evaluate_policy(
             &skills,
             "sh",
             &[String::from("script.sh")],
+            raw,
             Path::new("scripts/script.sh"),
             Some("rm test.txt"),
         );
@@ -1342,6 +1650,7 @@ mod tests {
         skills.policy.path_guard.on_violation = SkillPolicyAction::Deny;
         skills.policy.rules.clear();
 
+        let raw = format!("python tool.py {}", blocked.to_string_lossy());
         let decision = evaluate_policy(
             &skills,
             "python",
@@ -1349,6 +1658,7 @@ mod tests {
                 String::from("tool.py"),
                 blocked.to_string_lossy().to_string(),
             ],
+            &raw,
             &allowed.join("scripts").join("tool.py"),
             None,
         );
@@ -1368,10 +1678,12 @@ mod tests {
         skills.policy.path_guard.enabled = false;
         skills.policy.default_action = SkillPolicyAction::Allow;
 
+        let raw = "python safe.py --help";
         let decision = evaluate_policy(
             &skills,
             "python",
             &[String::from("safe.py"), String::from("--help")],
+            raw,
             Path::new("scripts/safe.py"),
             Some("print('ok')"),
         );
@@ -1385,10 +1697,12 @@ mod tests {
     #[test]
     fn shell_wrapper_chain_is_blocked_by_default_rules() {
         let skills = SkillsConfig::default();
+        let raw = "bash -lc \"rm -rf /tmp/demo\"";
         let decision = evaluate_policy(
             &skills,
             "bash",
             &[String::from("-lc"), String::from("rm -rf /tmp/demo")],
+            raw,
             Path::new("scripts/safe.sh"),
             None,
         );
@@ -1398,6 +1712,357 @@ mod tests {
                 assert!(reason.contains("deny-bash-lc"));
             }
             _ => panic!("expected deny decision"),
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmation_wait_returns_approved_when_user_approves() {
+        let service = SkillsService::new();
+        let confirmation = match service
+            .create_confirmation(
+                "skill",
+                "cmd",
+                &[String::from("cmd")],
+                "cmd",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        let confirmation_id = confirmation.id.clone();
+        let service_for_approve = service.clone();
+        let id_for_approve = confirmation_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = service_for_approve
+                .approve_confirmation(&id_for_approve)
+                .await;
+        });
+
+        let outcome = service
+            .wait_for_confirmation_decision(
+                &confirmation_id,
+                Duration::from_secs(2),
+                Duration::from_millis(10),
+            )
+            .await;
+        match outcome {
+            ConfirmationWaitOutcome::Approved => {}
+            _ => panic!("expected approved outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_confirmation_creates_distinct_requests_for_same_command() {
+        let service = SkillsService::new();
+        let first = match service
+            .create_confirmation(
+                "skill",
+                "cmd-repeat",
+                &[String::from("cmd-repeat")],
+                "cmd-repeat",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        // 同指纹第二次调用 → Reused，复用同一条记录
+        let second = match service
+            .create_confirmation(
+                "skill",
+                "cmd-repeat",
+                &[String::from("cmd-repeat")],
+                "cmd-repeat",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Reused(c) => c,
+            other => panic!("expected Reused, got {other:?}"),
+        };
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.status, ConfirmationStatus::Pending);
+        assert_eq!(second.status, ConfirmationStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn confirmation_wait_returns_rejected_when_user_rejects() {
+        let service = SkillsService::new();
+        let confirmation = match service
+            .create_confirmation(
+                "skill",
+                "cmd-reject-wait",
+                &[String::from("cmd-reject-wait")],
+                "cmd-reject-wait",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        let confirmation_id = confirmation.id.clone();
+        let service_for_reject = service.clone();
+        let id_for_reject = confirmation_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = service_for_reject.reject_confirmation(&id_for_reject).await;
+        });
+
+        let outcome = service
+            .wait_for_confirmation_decision(
+                &confirmation_id,
+                Duration::from_secs(2),
+                Duration::from_millis(10),
+            )
+            .await;
+        match outcome {
+            ConfirmationWaitOutcome::Rejected => {}
+            _ => panic!("expected rejected outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejecting_one_confirmation_rejects_pending_duplicates() {
+        let service = SkillsService::new();
+        // 第一次：新建
+        let first = match service
+            .create_confirmation(
+                "skill",
+                "cmd-dup",
+                &[String::from("cmd-dup")],
+                "cmd-dup",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created for first, got {other:?}"),
+        };
+        // 第二次同指纹：复用
+        let second = match service
+            .create_confirmation(
+                "skill",
+                "cmd-dup",
+                &[String::from("cmd-dup")],
+                "cmd-dup",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Reused(c) => c,
+            other => panic!("expected Reused for second, got {other:?}"),
+        };
+        assert_eq!(first.id, second.id, "same fingerprint should reuse the same entry");
+        let _ = service
+            .reject_confirmation(&first.id)
+            .await
+            .expect("reject first");
+
+        let second_outcome = service
+            .wait_for_confirmation_decision(
+                &second.id,
+                Duration::from_secs(1),
+                Duration::from_millis(10),
+            )
+            .await;
+        match second_outcome {
+            ConfirmationWaitOutcome::Rejected => {}
+            _ => panic!("expected duplicate request to be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_create_confirmation_requests_are_distinct() {
+        let service = SkillsService::new();
+        let s1 = service.clone();
+        let s2 = service.clone();
+
+        let one = tokio::spawn(async move {
+            s1.create_confirmation(
+                "skill",
+                "cmd-dedupe",
+                &[String::from("cmd-dedupe")],
+                "cmd-dedupe",
+                "need approval",
+            )
+            .await
+        });
+        let two = tokio::spawn(async move {
+            s2.create_confirmation(
+                "skill",
+                "cmd-dedupe",
+                &[String::from("cmd-dedupe")],
+                "cmd-dedupe",
+                "need approval",
+            )
+            .await
+        });
+
+        let first = one.await.expect("first join");
+        let second = two.await.expect("second join");
+        // 并发同指纹：一个 Created，另一个 Reused，二者复用同一条记录
+        let first_id = match &first {
+            CreateConfirmationResult::Created(c) | CreateConfirmationResult::Reused(c) => c.id.clone(),
+            CreateConfirmationResult::AlreadyTimedOut(id) => id.clone(),
+        };
+        let second_id = match &second {
+            CreateConfirmationResult::Created(c) | CreateConfirmationResult::Reused(c) => c.id.clone(),
+            CreateConfirmationResult::AlreadyTimedOut(id) => id.clone(),
+        };
+        assert_eq!(first_id, second_id, "concurrent same-fingerprint calls should share one entry");
+    }
+
+    #[tokio::test]
+    async fn confirmation_wait_times_out_when_not_confirmed() {
+        let service = SkillsService::new();
+        let confirmation = match service
+            .create_confirmation(
+                "skill",
+                "cmd-timeout",
+                &[String::from("cmd-timeout")],
+                "cmd-timeout",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created, got {other:?}"),
+        };
+
+        let outcome = service
+            .wait_for_confirmation_decision(
+                &confirmation.id,
+                Duration::from_millis(40),
+                Duration::from_millis(10),
+            )
+            .await;
+        match outcome {
+            ConfirmationWaitOutcome::TimedOut => {}
+            _ => panic!("expected timed out outcome"),
+        }
+        let pending = service.list_pending_confirmations().await;
+        assert!(pending.iter().all(|item| item.id != confirmation.id));
+    }
+
+    #[tokio::test]
+    async fn rejected_confirmation_then_same_command_still_creates_new_request() {
+        let service = SkillsService::new();
+        let first = match service
+            .create_confirmation(
+                "skill",
+                "cmd-reject",
+                &[String::from("cmd-reject")],
+                "cmd-reject",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        // 用户手动拒绝（timed_out=false）→ 允许重新发起
+        let _ = service.reject_confirmation(&first.id).await;
+
+        let reused = match service
+            .create_confirmation(
+                "skill",
+                "cmd-reject",
+                &[String::from("cmd-reject")],
+                "cmd-reject",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created (new entry after user reject), got {other:?}"),
+        };
+        assert_ne!(reused.id, first.id);
+        assert_eq!(reused.status, ConfirmationStatus::Pending);
+
+        let outcome = service
+            .wait_for_confirmation_decision(
+                &first.id,
+                Duration::from_secs(1),
+                Duration::from_millis(10),
+            )
+            .await;
+        match outcome {
+            ConfirmationWaitOutcome::Rejected => {}
+            _ => panic!("expected rejected outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approved_confirmation_then_same_command_still_creates_new_request() {
+        let service = SkillsService::new();
+        let first = match service
+            .create_confirmation(
+                "skill",
+                "cmd-approve",
+                &[String::from("cmd-approve")],
+                "cmd-approve",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        let _ = service.approve_confirmation(&first.id).await;
+
+        let reused = match service
+            .create_confirmation(
+                "skill",
+                "cmd-approve",
+                &[String::from("cmd-approve")],
+                "cmd-approve",
+                "need approval",
+            )
+            .await
+        {
+            CreateConfirmationResult::Created(c) => c,
+            other => panic!("expected Created (new entry after approve), got {other:?}"),
+        };
+        assert_ne!(reused.id, first.id);
+        assert_eq!(reused.status, ConfirmationStatus::Pending);
+
+        let outcome = service
+            .wait_for_confirmation_decision(
+                &first.id,
+                Duration::from_secs(1),
+                Duration::from_millis(10),
+            )
+            .await;
+        match outcome {
+            ConfirmationWaitOutcome::Approved => {}
+            _ => panic!("expected approved outcome"),
+        }
+    }
+
+    #[test]
+    fn chained_remove_item_requires_confirmation() {
+        let skills = SkillsConfig::default();
+        let raw = "Set-Location 'D:/Code_Save/demo'; Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue; npm install";
+        let tokens = split_shell_tokens(raw);
+        let decision = evaluate_policy(
+            &skills,
+            &tokens[0],
+            &tokens[1..],
+            raw,
+            Path::new("scripts/safe.ps1"),
+            None,
+        );
+
+        match decision {
+            PolicyDecision::Confirm(reason) => {
+                assert!(reason.contains("confirm-remove-item"));
+            }
+            _ => panic!("expected confirm decision"),
         }
     }
 
@@ -1473,12 +2138,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_frontmatter_fields_reads_yaml_mapping_and_metadata() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-frontmatter-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let skill_md = sandbox.join("SKILL.md");
+        std::fs::write(
+            &skill_md,
+            "---\nname: demo-skill\ndescription: Demo description\nmetadata:\n  tags:\n    - remotion\n    - video\n  image:\n    format: png\n---\n# Demo\n",
+        )
+        .expect("write SKILL.md");
+
+        let parsed = parse_frontmatter_fields(&skill_md).expect("parse frontmatter");
+        assert_eq!(parsed.name, "demo-skill");
+        assert_eq!(parsed.description, "Demo description");
+        assert!(parsed
+            .metadata
+            .contains("\"tags\":[\"remotion\",\"video\"]"));
+        assert!(parsed.metadata.contains("\"image\":{\"format\":\"png\"}"));
+        assert!(parsed.block.contains("metadata:"));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
     fn tool_definitions_use_metadata_name_and_cmd_schema() {
         let discovered = vec![
             DiscoveredSkill {
                 skill: "alpha".to_string(),
                 frontmatter_name: "Alpha Skill".to_string(),
                 description: "A".to_string(),
+                frontmatter_metadata: r#"{"tags":["alpha"]}"#.to_string(),
+                frontmatter_block:
+                    "name: Alpha Skill\ndescription: A\nmetadata:\n  tags:\n    - alpha".to_string(),
                 root: PathBuf::from("C:/skills"),
                 path: PathBuf::from("C:/skills/alpha"),
                 has_scripts: true,
@@ -1487,19 +2178,14 @@ mod tests {
                 skill: "beta".to_string(),
                 frontmatter_name: "Beta Skill".to_string(),
                 description: "B".to_string(),
+                frontmatter_metadata: "none".to_string(),
+                frontmatter_block: "name: Beta Skill\ndescription: B".to_string(),
                 root: PathBuf::from("C:/skills"),
                 path: PathBuf::from("C:/skills/beta"),
                 has_scripts: false,
             },
         ];
-        let roots = vec![
-            "D:/Code_Save/Node_JS/browser-plugin/weather-skill".to_string(),
-            "D:/Code_Save/Node_JS/skill-2".to_string(),
-            "D:/Code_Save/Node_JS/skill-3".to_string(),
-            "D:/Code_Save/Node_JS/skill-4".to_string(),
-        ];
-
-        let tools = tool_definitions(&discovered, &roots);
+        let tools = tool_definitions(&discovered);
         let alpha_tool = tools
             .as_array()
             .and_then(|items| {
@@ -1525,7 +2211,11 @@ mod tests {
         assert!(description.contains("Current OS:"));
         assert!(description.contains("Current datetime:"));
         assert!(description.contains("SKILL.md"));
-        assert!(description.contains("weather-skill"));
+        assert!(description.contains("Front matter summary:"));
+        assert!(description.contains("name: Alpha Skill"));
+        assert!(description.contains("metadata: {\"tags\":[\"alpha\"]}"));
+        assert!(description.contains("Front matter raw (YAML):"));
+        assert!(description.contains("metadata:"));
 
         let names = tools
             .as_array()

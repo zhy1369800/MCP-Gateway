@@ -12,6 +12,7 @@ futures-util.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true

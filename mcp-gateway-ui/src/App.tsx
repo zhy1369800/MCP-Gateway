@@ -1,7 +1,15 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Play, Square, Copy, Check, Code2, List, Languages, Save, FolderOpen } from "lucide-react";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
-import { loadLocalConfig, saveLocalConfig, getConfigPath, pickFolderDialog, validateSkillDirectory } from "./localConfig";
+import {
+  loadLocalConfig,
+  saveLocalConfig,
+  getConfigPath,
+  getDefaultSkillRules,
+  pickFolderDialog,
+  validateSkillDirectory,
+  focusMainWindowForSkillConfirmation,
+} from "./localConfig";
 import { ApiClient } from "./api";
 import { usePolling } from "./hooks/usePolling";
 import type {
@@ -56,39 +64,6 @@ function jsonToServers(obj: Record<string, unknown>): ServerConfig[] {
   });
 }
 
-function defaultSkillRules(): SkillCommandRule[] {
-  return [
-    {
-      id: "deny-rm-root",
-      action: "deny",
-      commandTree: ["rm"],
-      contains: ["-rf", "/"],
-      reason: "Potential root destructive deletion",
-    },
-    {
-      id: "deny-remove-item-root",
-      action: "deny",
-      commandTree: ["remove-item"],
-      contains: ["-recurse", "c:\\"],
-      reason: "Potential recursive deletion on drive root",
-    },
-    {
-      id: "confirm-rm",
-      action: "confirm",
-      commandTree: ["rm"],
-      contains: [],
-      reason: "File deletion command requires confirmation",
-    },
-    {
-      id: "confirm-remove-item",
-      action: "confirm",
-      commandTree: ["remove-item"],
-      contains: [],
-      reason: "PowerShell deletion command requires confirmation",
-    },
-  ];
-}
-
 function parseRulesJson(input: string): SkillCommandRule[] {
   const parsed = JSON.parse(input) as unknown;
   if (!Array.isArray(parsed)) {
@@ -114,7 +89,17 @@ function parseRulesJson(input: string): SkillCommandRule[] {
   });
 }
 
-function ensureSkillsConfig(raw: Partial<SkillsConfig> | undefined): SkillsConfig {
+function isConfirmationAlreadyResolvedError(error: unknown): boolean {
+  const message = String(error ?? "").toLowerCase();
+  return message.includes("confirmation not found")
+    || message.includes("already rejected")
+    || message.includes("already approved");
+}
+
+function ensureSkillsConfig(
+  raw: Partial<SkillsConfig> | undefined,
+  fallbackRules: SkillCommandRule[] = [],
+): SkillsConfig {
   const legacyPolicy = (raw?.policy as unknown as {
     confirmKeywords?: string[];
     denyKeywords?: string[];
@@ -145,7 +130,7 @@ function ensureSkillsConfig(raw: Partial<SkillsConfig> | undefined): SkillsConfi
   const hasLegacy = Array.isArray(legacyPolicy?.confirmKeywords) || Array.isArray(legacyPolicy?.denyKeywords);
   let rules = Array.isArray(raw?.policy?.rules) && raw.policy.rules.length > 0
     ? raw.policy.rules
-    : defaultSkillRules();
+    : fallbackRules;
 
   if ((!raw?.policy?.rules || raw.policy.rules.length === 0) && hasLegacy) {
     const legacyConfirm = legacyPolicy?.confirmKeywords ?? [];
@@ -206,7 +191,7 @@ function ensureSkillsConfig(raw: Partial<SkillsConfig> | undefined): SkillsConfi
     },
     execution: {
       timeoutMs: raw?.execution?.timeoutMs ?? 30000,
-      maxOutputBytes: raw?.execution?.maxOutputBytes ?? 13107200,
+      maxOutputBytes: raw?.execution?.maxOutputBytes ?? 131072,
     },
   };
 }
@@ -386,6 +371,60 @@ function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function SkillConfirmationPopup({
+  open,
+  item,
+  busy,
+  onApprove,
+  onReject,
+  onLater,
+  t,
+}: {
+  open: boolean;
+  item: SkillConfirmation | null;
+  busy: boolean;
+  onApprove: (id: string) => void;
+  onReject: (id: string) => void;
+  onLater: (id: string) => void;
+  t: ReturnType<typeof useT>;
+}) {
+  if (!open || !item) return null;
+  return (
+    <div className="modal-overlay" onClick={() => onLater(item.id)}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">{t("skillsConfirmPopupTitle")}</div>
+        <div className="modal-body">
+          <div>{t("skillsConfirmPopupMsg")}</div>
+          <div className="json-hint" style={{ marginTop: 8 }}>{t("skillsConfirmTimeoutHint")}</div>
+          <div className="skill-confirm-row" style={{ marginTop: 10 }}>
+            <span className="field-label">{t("commandPreview")}</span>
+            <code className="skill-command">{item.commandPreview}</code>
+          </div>
+          <div className="skill-confirm-row">
+            <span className="field-label">{t("confirmReason")}</span>
+            <span>{item.reason}</span>
+          </div>
+          <div className="skill-confirm-row">
+            <span className="field-label">{t("createdAt")}</span>
+            <span>{formatTime(item.createdAt)}</span>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-secondary" disabled={busy} onClick={() => onLater(item.id)}>
+            {t("decideLater")}
+          </button>
+          <button className="btn btn-secondary" disabled={busy} onClick={() => onReject(item.id)}>
+            {t("reject")}
+          </button>
+          <button className="btn btn-start" disabled={busy} onClick={() => onApprove(item.id)}>
+            {t("approve")}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -635,12 +674,14 @@ function App() {
   const [httpPath, setHttpPath] = useState("/api/v2/mcp");
   const [adminToken, setAdminToken] = useState("");
   const [mcpToken, setMcpToken] = useState("");
-  const [skills, setSkills] = useState<SkillsConfig>(() => ensureSkillsConfig(undefined));
+  const [defaultSkillRules, setDefaultSkillRules] = useState<SkillCommandRule[]>([]);
+  const [skills, setSkills] = useState<SkillsConfig>(() => ensureSkillsConfig(undefined, []));
   const [skillRootItems, setSkillRootItems] = useState<SkillDirectoryItem[]>([]);
   const [skillWhitelistItems, setSkillWhitelistItems] = useState<SkillDirectoryItem[]>([]);
   const [skillsRulesDraft, setSkillsRulesDraft] = useState("[]");
   const [skillsRulesError, setSkillsRulesError] = useState<string | null>(null);
   const [skillPending, setSkillPending] = useState<SkillConfirmation[]>([]);
+  const [activeSkillPopupId, setActiveSkillPopupId] = useState<string | null>(null);
   const [skillActionBusy, setSkillActionBusy] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState<GatewayProcessStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -665,6 +706,9 @@ function App() {
   }>({
     open: false, kind: "roots", id: ""
   });
+  const knownPendingIdsRef = useRef<Set<string>>(new Set());
+  const dismissedPopupIdsRef = useRef<Set<string>>(new Set());
+  const pendingFetchSeqRef = useRef(0);
 
   const syncSkillRootsToConfig = useCallback((nextItems: SkillDirectoryItem[]) => {
     const normalizedEntries = nextItems
@@ -758,7 +802,8 @@ function App() {
 
   // ── 初始加载配置 ──
   useEffect(() => {
-    loadLocalConfig().then((cfg) => {
+    Promise.all([loadLocalConfig(), getDefaultSkillRules().catch(() => [])]).then(([cfg, builtinRules]) => {
+      setDefaultSkillRules(builtinRules);
       const nextServers = cfg.servers ?? [];
       const nextListen = cfg.listen || "127.0.0.1:8765";
       const nextApiPrefix = cfg.apiPrefix || "/api/v2";
@@ -775,7 +820,7 @@ function App() {
       // 加载 Security 配置
       setAdminToken(nextAdminToken);
       setMcpToken(nextMcpToken);
-      const nextSkills = ensureSkillsConfig(cfg.skills);
+      const nextSkills = ensureSkillsConfig(cfg.skills, builtinRules);
       setSkills(nextSkills);
       const rootEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
         ? nextSkills.rootEntries
@@ -846,15 +891,45 @@ function App() {
   const running = !!status?.running;
 
   const fetchSkillPending = useCallback(async () => {
+    const fetchSeq = pendingFetchSeqRef.current + 1;
+    pendingFetchSeqRef.current = fetchSeq;
+
     if (!running || !skills.enabled) {
+      if (fetchSeq !== pendingFetchSeqRef.current) return;
       setSkillPending([]);
+      setActiveSkillPopupId(null);
+      knownPendingIdsRef.current = new Set();
+      dismissedPopupIdsRef.current = new Set();
       return;
     }
     try {
       const client = new ApiClient(listen, adminToken, apiPrefix);
       const pending = await client.listSkillConfirmations();
+      if (fetchSeq !== pendingFetchSeqRef.current) return;
+      const nextIds = new Set(pending.map((item) => item.id));
+      const knownIds = knownPendingIdsRef.current;
+      const newItems = pending.filter((item) => !knownIds.has(item.id));
+
+      dismissedPopupIdsRef.current = new Set(
+        Array.from(dismissedPopupIdsRef.current).filter((id) => nextIds.has(id)),
+      );
+
+      if (newItems.length > 0) {
+        setActiveTab("skills");
+        void focusMainWindowForSkillConfirmation().catch(() => {});
+        const popupCandidate = newItems.find((item) => !dismissedPopupIdsRef.current.has(item.id)) ?? newItems[0];
+        setActiveSkillPopupId(popupCandidate.id);
+      }
+
       setSkillPending(pending);
+      setActiveSkillPopupId((current) => {
+        if (current && nextIds.has(current)) return current;
+        const fallback = pending.find((item) => !dismissedPopupIdsRef.current.has(item.id));
+        return fallback ? fallback.id : null;
+      });
+      knownPendingIdsRef.current = nextIds;
     } catch (error) {
+      if (fetchSeq !== pendingFetchSeqRef.current) return;
       setError(String(error));
     }
   }, [adminToken, apiPrefix, listen, running, skills.enabled]);
@@ -867,6 +942,7 @@ function App() {
       next.add(id);
       return next;
     });
+    let success = false;
     try {
       const client = new ApiClient(listen, adminToken, apiPrefix);
       if (action === "approve") {
@@ -875,8 +951,14 @@ function App() {
         await client.rejectSkillConfirmation(id);
       }
       await fetchSkillPending();
+      success = true;
     } catch (error) {
-      setError(String(error));
+      if (isConfirmationAlreadyResolvedError(error)) {
+        await fetchSkillPending();
+        success = true;
+      } else {
+        setError(String(error));
+      }
     } finally {
       setSkillActionBusy((prev) => {
         const next = new Set(prev);
@@ -884,7 +966,27 @@ function App() {
         return next;
       });
     }
+    return success;
   }, [adminToken, apiPrefix, fetchSkillPending, listen]);
+
+  const handleSkillConfirmationAction = useCallback((id: string, action: "approve" | "reject") => {
+    void (async () => {
+      const ok = await updateConfirmation(id, action);
+      if (!ok) return;
+      dismissedPopupIdsRef.current = new Set(dismissedPopupIdsRef.current).add(id);
+      setActiveSkillPopupId((current) => (current === id ? null : current));
+    })();
+  }, [updateConfirmation]);
+
+  const deferSkillConfirmationPopup = useCallback((id: string) => {
+    dismissedPopupIdsRef.current = new Set(dismissedPopupIdsRef.current).add(id);
+    setActiveSkillPopupId((current) => (current === id ? null : current));
+  }, []);
+
+  const activeSkillPopupItem = useMemo(
+    () => skillPending.find((item) => item.id === activeSkillPopupId) ?? null,
+    [activeSkillPopupId, skillPending],
+  );
 
   const onRulesDraftChange = (value: string) => {
     setSkillsRulesDraft(value);
@@ -1041,9 +1143,9 @@ function App() {
       httpPath,
       adminToken,
       mcpToken,
-      skills: ensureSkillsConfig(skills),
+      skills: ensureSkillsConfig(skills, defaultSkillRules),
     }));
-  }, [servers, serversMode, jsonText, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills]);
+  }, [servers, serversMode, jsonText, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills, defaultSkillRules]);
 
   const isConfigDirty = configLoaded
     && (currentConfigFingerprint === null || currentConfigFingerprint !== savedConfigFingerprint);
@@ -1058,7 +1160,7 @@ function App() {
       httpPath,
       adminToken,
       mcpToken,
-      skills: ensureSkillsConfig(skills),
+      skills: ensureSkillsConfig(skills, defaultSkillRules),
     });
     const cfg: GatewayConfig = await loadLocalConfig();
     cfg.servers = snapshot.servers;
@@ -1538,8 +1640,8 @@ function App() {
               <SkillConfirmations
                 pending={skillPending}
                 busyIds={skillActionBusy}
-                onApprove={(id) => { void updateConfirmation(id, "approve"); }}
-                onReject={(id) => { void updateConfirmation(id, "reject"); }}
+                onApprove={(id) => { handleSkillConfirmationAction(id, "approve"); }}
+                onReject={(id) => { handleSkillConfirmationAction(id, "reject"); }}
                 t={t}
               />
             </section>
@@ -1556,6 +1658,16 @@ function App() {
           <code className="bottom-bar-path">{configPath}</code>
         </div>
       )}
+
+      <SkillConfirmationPopup
+        open={!!activeSkillPopupItem}
+        item={activeSkillPopupItem}
+        busy={!!activeSkillPopupItem && skillActionBusy.has(activeSkillPopupItem.id)}
+        onApprove={(id) => handleSkillConfirmationAction(id, "approve")}
+        onReject={(id) => handleSkillConfirmationAction(id, "reject")}
+        onLater={deferSkillConfirmationPopup}
+        t={t}
+      />
 
       {/* ── 删除确认弹窗 ── */}
       <ConfirmDialog
