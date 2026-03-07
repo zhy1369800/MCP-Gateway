@@ -4,14 +4,14 @@ use std::net::TcpListener;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{fs, io};
 
 use chrono::Utc;
 use gateway_core::{
-    load_config_from_path, ConfigService, GatewayConfig, ProcessManager, ServerConfig,
-    SkillCommandRule,
+    load_config_from_path, ConfigService, GatewayConfig, ProcessManager, ServerAuthState,
+    ServerConfig, SkillCommandRule,
 };
 use gateway_http::{build_router, spawn_idle_reaper, AppState, SkillsService, SseHub};
 use serde::Serialize;
@@ -34,10 +34,49 @@ fn configure_ui_command(command: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn configure_ui_command(_command: &mut Command) {}
 
+#[cfg(target_os = "windows")]
+fn open_external_browser(url: &str) -> Result<(), String> {
+    let mut command = Command::new("cmd");
+    command.args(["/C", "start", "", url]);
+    configure_ui_command(&mut command);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("打开浏览器失败：{error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_external_browser(url: &str) -> Result<(), String> {
+    Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("打开浏览器失败：{error}"))
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn open_external_browser(url: &str) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("打开浏览器失败：{error}"))
+}
+
+fn build_ui_process_manager() -> ProcessManager {
+    ProcessManager::with_browser_opener(Arc::new(|url| open_external_browser(&url)))
+}
+
+fn active_process_manager(state: &State<'_, GatewayProcessState>) -> Option<ProcessManager> {
+    let guard = state.inner.lock().ok()?;
+    guard.as_ref().map(|managed| managed.process_manager.clone())
+}
+
 struct ManagedGateway {
     task: JoinHandle<()>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     config_path: PathBuf,
+    process_manager: ProcessManager,
 }
 
 #[derive(Default)]
@@ -157,9 +196,10 @@ async fn start_embedded_gateway(config_path: PathBuf) -> Result<ManagedGateway, 
         .await
         .map_err(|error| format!("初始化配置服务失败：{error}"))?;
 
+    let process_manager = build_ui_process_manager();
     let state = AppState {
         config_service,
-        process_manager: ProcessManager::new(),
+        process_manager: process_manager.clone(),
         started_at: Utc::now(),
         sse_hub: SseHub::new(),
         skills: SkillsService::new(),
@@ -189,6 +229,7 @@ async fn start_embedded_gateway(config_path: PathBuf) -> Result<ManagedGateway, 
         task,
         shutdown_tx: Some(shutdown_tx),
         config_path,
+        process_manager,
     })
 }
 
@@ -470,7 +511,34 @@ fn get_default_skill_rules() -> Vec<SkillCommandRule> {
 }
 
 #[tauri::command]
-async fn test_mcp_server_local(server: ServerConfig) -> Result<Value, String> {
+async fn get_server_auth_state_local(
+    state: State<'_, GatewayProcessState>,
+    server: ServerConfig,
+) -> Result<ServerAuthState, String> {
+    let manager = active_process_manager(&state).unwrap_or_else(build_ui_process_manager);
+    manager
+        .get_server_auth_state(&server)
+        .await
+        .map_err(|error| format!("读取认证状态失败：{error}"))
+}
+
+#[tauri::command]
+async fn clear_server_auth_local(
+    state: State<'_, GatewayProcessState>,
+    server: ServerConfig,
+) -> Result<ServerAuthState, String> {
+    let manager = active_process_manager(&state).unwrap_or_else(build_ui_process_manager);
+    manager
+        .clear_server_auth(&server)
+        .await
+        .map_err(|error| format!("清除认证状态失败：{error}"))
+}
+
+#[tauri::command]
+async fn test_mcp_server_local(
+    state: State<'_, GatewayProcessState>,
+    server: ServerConfig,
+) -> Result<Value, String> {
     if server.command.trim().is_empty() {
         return Err("命令不能为空，无法执行检测".to_string());
     }
@@ -484,11 +552,31 @@ async fn test_mcp_server_local(server: ServerConfig) -> Result<Value, String> {
     .await
     .map_err(|error| format!("读取默认配置任务失败：{error}"))?;
 
-    match ProcessManager::new().test_server(&server, &defaults).await {
+    let manager = active_process_manager(&state).unwrap_or_else(build_ui_process_manager);
+    match manager.test_server(&server, &defaults).await {
         Ok(value) => Ok(value),
         Err(error) => {
-            if let Some(value) = auth_required_test_result(&error.to_string()) {
-                Ok(value)
+            let auth = manager
+                .get_server_auth_state(&server)
+                .await
+                .unwrap_or(ServerAuthState {
+                    status: gateway_core::AuthSessionStatus::Idle,
+                    authorize_url: None,
+                    last_success_at: None,
+                    last_updated_at: Some(Utc::now()),
+                    last_error: None,
+                    adapter_kind: None,
+                    browser_opened: false,
+                    session_key: String::new(),
+                    session_dir: None,
+                });
+            if !matches!(auth.status, gateway_core::AuthSessionStatus::Idle) {
+                Ok(json!({
+                    "ok": false,
+                    "message": error.to_string(),
+                    "auth": auth,
+                    "testedAt": Utc::now()
+                }))
             } else {
                 Err(format!("MCP 连通性检测失败：{error}"))
             }
@@ -496,31 +584,17 @@ async fn test_mcp_server_local(server: ServerConfig) -> Result<Value, String> {
     }
 }
 
-fn auth_required_test_result(message: &str) -> Option<Value> {
-    let auth_url = extract_auth_field(message, "authorize_url=")?;
-    let browser_opened = extract_auth_field(message, "browser_opened=")
-        .map(|value| value == "true")
-        .unwrap_or(false);
-    let waiting_for_authorization = extract_auth_field(message, "waiting_for_authorization=")
-        .map(|value| value == "true")
-        .unwrap_or(true);
-
-    Some(json!({
-        "ok": false,
-        "status": "auth_required",
-        "message": "需要浏览器登录后再继续检测",
-        "authUrl": auth_url,
-        "browserOpened": browser_opened,
-        "waitingForAuthorization": waiting_for_authorization,
-        "testedAt": Utc::now(),
-    }))
-}
-
-fn extract_auth_field(message: &str, key: &str) -> Option<String> {
-    let start = message.find(key)? + key.len();
-    let rest = &message[start..];
-    let end = rest.find(';').unwrap_or(rest.len());
-    Some(rest[..end].trim().to_string())
+#[tauri::command]
+async fn reauthorize_server_local(
+    state: State<'_, GatewayProcessState>,
+    server: ServerConfig,
+) -> Result<Value, String> {
+    let manager = active_process_manager(&state).unwrap_or_else(build_ui_process_manager);
+    manager
+        .clear_server_auth(&server)
+        .await
+        .map_err(|error| format!("清除旧认证失败：{error}"))?;
+    test_mcp_server_local(state, server).await
 }
 
 fn upgrade_legacy_skill_rules_in_place(config: &mut Value) -> bool {
@@ -647,6 +721,9 @@ pub fn run() {
             save_local_config,
             get_config_path,
             get_default_skill_rules,
+            get_server_auth_state_local,
+            clear_server_auth_local,
+            reauthorize_server_local,
             test_mcp_server_local,
             focus_main_window_for_skill_confirmation,
             pick_folder_dialog,

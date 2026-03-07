@@ -262,6 +262,12 @@ html, body {
   flex-shrink: 0;
 }
 
+.btn-auth-action {
+  min-width: 66px;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
 /* ── Server 高级配置区（工作目录、环境变量）── */
 .server-advanced-fields {
   display: flex;

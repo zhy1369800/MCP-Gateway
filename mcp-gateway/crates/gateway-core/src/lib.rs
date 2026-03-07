@@ -11,4 +11,4 @@ pub use config::{
     TokenScope, TransportConfig,
 };
 pub use error::{AppError, ErrorCode};
-pub use runtime::ProcessManager;
+pub use runtime::{AuthOrchestrator, AuthSessionStatus, ProcessManager, ServerAuthState};

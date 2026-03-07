@@ -18,10 +18,13 @@ import {
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
 import {
+  clearServerAuthLocal,
+  getServerAuthStateLocal,
   loadLocalConfig,
   saveLocalConfig,
   getConfigPath,
   getDefaultSkillRules,
+  reauthorizeServerLocal,
   testMcpServerLocal,
   pickFolderDialog,
   validateSkillDirectory,
@@ -32,6 +35,7 @@ import { usePolling, type PollOutcome } from "./hooks/usePolling";
 import type {
   GatewayConfig,
   ServerConfig,
+  ServerAuthState,
   SkillCommandRule,
   SkillConfirmation,
   ServerConnectivityTestResult,
@@ -324,12 +328,59 @@ function createMcpClientEntryJson(name: string, type: EndpointTransportType, url
 type SkillDirStatus = "idle" | "checking" | "valid" | "invalid" | "error";
 type SkillDirKind = "roots" | "whitelist";
 type ServerTestStatus = "idle" | "testing" | "success" | "failed" | "auth_required";
+type AuthChipTone = "idle" | "testing" | "success" | "failed" | "auth_required";
 
 interface ServerTestState {
   status: ServerTestStatus;
   message: string;
   testedAt?: string;
-  authUrl?: string;
+}
+
+function createEmptyAuthState(): ServerAuthState {
+  return {
+    status: "idle",
+    browserOpened: false,
+    sessionKey: "",
+  };
+}
+
+function authStateTone(state: ServerAuthState): AuthChipTone {
+  if (state.status === "starting") return "testing";
+  if (state.status === "connected" || state.status === "authorized") return "success";
+  if (
+    state.status === "auth_pending"
+    || state.status === "browser_opened"
+    || state.status === "waiting_callback"
+  ) {
+    return "auth_required";
+  }
+  if (
+    state.status === "auth_timeout"
+    || state.status === "auth_failed"
+    || state.status === "launch_failed"
+    || state.status === "init_failed"
+  ) {
+    return "failed";
+  }
+  return "idle";
+}
+
+function authStateText(state: ServerAuthState, t: ReturnType<typeof useT>): string {
+  if (state.status === "starting") return t("serverAuthStarting");
+  if (state.status === "auth_pending") return t("serverAuthPending");
+  if (state.status === "browser_opened") return t("serverAuthBrowserOpened");
+  if (state.status === "waiting_callback") return t("serverAuthWaiting");
+  if (state.status === "authorized") return t("serverAuthAuthorized");
+  if (state.status === "connected") return t("serverAuthConnected");
+  if (state.status === "auth_timeout") return t("serverAuthTimeout");
+  if (
+    state.status === "auth_failed"
+    || state.status === "launch_failed"
+    || state.status === "init_failed"
+  ) {
+    return t("serverAuthFailed");
+  }
+  return t("serverAuthIdle");
 }
 
 function serverTestKey(index: number, server?: Pick<ServerConfig, "name">): string {
@@ -596,7 +647,10 @@ function ServerRow({
   copied,
   onCopy,
   testState,
+  authState,
   onTest,
+  onReauthorize,
+  onClearAuth,
   t,
 }: {
   server: ServerConfig;
@@ -609,7 +663,10 @@ function ServerRow({
   copied: string | null;
   onCopy: (name: string, type: EndpointTransportType, url: string, key: string) => void;
   testState: ServerTestState;
+  authState: ServerAuthState;
   onTest: () => void;
+  onReauthorize: () => void;
+  onClearAuth: () => void;
   t: ReturnType<typeof useT>;
 }) {
   const sseUrl  = `${baseUrl}${ssePath}/${server.name}`;
@@ -628,6 +685,19 @@ function ServerRow({
   const statusTitle = testState.testedAt
     ? `${statusText} · ${formatTime(testState.testedAt)}${testState.message ? `\n${testState.message}` : ""}`
     : (testState.message || statusText);
+  const authText = authStateText(authState, t);
+  const authTitleParts = [authText];
+  if (authState.lastSuccessAt) {
+    authTitleParts.push(`${t("serverAuthLastSuccess")} ${formatTime(authState.lastSuccessAt)}`);
+  }
+  if (authState.lastError) {
+    authTitleParts.push(authState.lastError);
+  }
+  if (authState.authorizeUrl) {
+    authTitleParts.push(authState.authorizeUrl);
+  }
+  const authTitle = authTitleParts.join("\n");
+  const showAuthActions = !!authState.adapterKind || authState.status !== "idle" || !!authState.lastSuccessAt;
 
   // 环境变量数组形式（方便渲染）
   const envEntries = Object.entries(server.env);
@@ -724,6 +794,7 @@ function ServerRow({
             }} />
         </div>
         <span className={`server-test-chip ${testState.status}`} title={statusTitle}>{statusText}</span>
+        <span className={`server-test-chip ${authStateTone(authState)}`} title={authTitle}>{authText}</span>
         <button
           className="btn btn-secondary btn-sm btn-test-server"
           title={t("testServerHint")}
@@ -732,6 +803,16 @@ function ServerRow({
         >
           {isTesting ? t("serverTestTesting") : t("testServer")}
         </button>
+        {showAuthActions && (
+          <>
+            <button className="btn btn-secondary btn-sm btn-auth-action" title={t("reauthorizeServer")} onClick={onReauthorize}>
+              {t("reauthorizeServer")}
+            </button>
+            <button className="btn btn-secondary btn-sm btn-auth-action" title={t("clearServerAuth")} onClick={onClearAuth}>
+              {t("clearServerAuth")}
+            </button>
+          </>
+        )}
         {/* ── 添加环境变量的加号按钮 ── */}
         <button className="btn-icon btn-add-env" title={t("addEnvVar")} onClick={addEnvVar}>+</button>
         <button className="btn-icon btn-danger-icon" title={t("remove")} onClick={onDelete}>✕</button>
@@ -847,6 +928,7 @@ function App() {
   const [copied, setCopied] = useState<string | null>(null);
   const [autoTestingServers, setAutoTestingServers] = useState(false);
   const [serverTestStates, setServerTestStates] = useState<Record<string, ServerTestState>>({});
+  const [serverAuthStates, setServerAuthStates] = useState<Record<string, ServerAuthState>>({});
   const [configLoaded, setConfigLoaded] = useState(false);
   const [serversMode, setServersMode] = useState<"visual" | "json">("visual");
   const [jsonText, setJsonText] = useState("{}");
@@ -978,6 +1060,7 @@ function App() {
 
       setServers(nextServers);
       setServerTestStates({});
+      setServerAuthStates({});
       setAutoTestingServers(false);
       setListen(nextListen);
       setApiPrefix(nextApiPrefix);
@@ -1051,6 +1134,7 @@ function App() {
     }
     setServers(parsedJsonServers);
     setServerTestStates({});
+    setServerAuthStates({});
     setJsonError(null);
     setServersMode("visual");
   };
@@ -1074,6 +1158,44 @@ function App() {
   });
 
   const running = !!status?.running;
+
+  const refreshServerAuthStates = useCallback(async (): Promise<PollOutcome> => {
+    if (servers.length === 0) {
+      setServerAuthStates({});
+      return "idle";
+    }
+
+    const results = await Promise.all(
+      servers.map(async (server, index) => {
+        const key = serverTestKey(index, server);
+        try {
+          const authState = await getServerAuthStateLocal(server);
+          return [key, authState] as const;
+        } catch {
+          return [key, createEmptyAuthState()] as const;
+        }
+      }),
+    );
+
+    const nextState = Object.fromEntries(results);
+    setServerAuthStates(nextState);
+    const hasActiveAuth = Object.values(nextState).some((state) =>
+      state.status === "starting"
+      || state.status === "auth_pending"
+      || state.status === "browser_opened"
+      || state.status === "waiting_callback"
+      || state.status === "authorized",
+    );
+    return hasActiveAuth ? "active" : "idle";
+  }, [servers]);
+
+  usePolling(refreshServerAuthStates, {
+    enabled: configLoaded,
+    activeMs: 2000,
+    idleMs: 10000,
+    errorMs: 5000,
+    immediate: true,
+  });
 
   const runServerConnectivityTest = useCallback(async (server: ServerConfig, index: number) => {
     const key = serverTestKey(index, server);
@@ -1100,22 +1222,21 @@ function App() {
       const result: ServerConnectivityTestResult = await testMcpServerLocal(server);
       const nextStatus: ServerTestStatus = result.ok
         ? "success"
-        : result.status === "auth_required"
+        : authStateTone(result.auth) === "auth_required"
           ? "auth_required"
           : "failed";
-      const authUrl = typeof result.authUrl === "string" && result.authUrl ? result.authUrl : undefined;
       setServerTestStates((prev) => ({
         ...prev,
         [key]: {
           status: nextStatus,
           message: typeof result.message === "string" ? result.message : "",
           testedAt: typeof result.testedAt === "string" ? result.testedAt : new Date().toISOString(),
-          authUrl,
         },
       }));
-      if (nextStatus === "auth_required" && authUrl) {
-        void open(authUrl).catch(() => {});
-      }
+      setServerAuthStates((prev) => ({
+        ...prev,
+        [key]: result.auth ?? createEmptyAuthState(),
+      }));
     } catch (error) {
       setServerTestStates((prev) => ({
         ...prev,
@@ -1126,6 +1247,67 @@ function App() {
       }));
     }
   }, [t]);
+
+  const runServerReauthorize = useCallback(async (server: ServerConfig, index: number) => {
+    const key = serverTestKey(index, server);
+    setServerTestStates((prev) => ({
+      ...prev,
+      [key]: {
+        status: "testing",
+        message: "",
+      },
+    }));
+
+    try {
+      const result = await reauthorizeServerLocal(server);
+      setServerAuthStates((prev) => ({
+        ...prev,
+        [key]: result.auth ?? createEmptyAuthState(),
+      }));
+      setServerTestStates((prev) => ({
+        ...prev,
+        [key]: {
+          status: result.ok ? "success" : authStateTone(result.auth) === "auth_required" ? "auth_required" : "failed",
+          message: typeof result.message === "string" ? result.message : "",
+          testedAt: typeof result.testedAt === "string" ? result.testedAt : new Date().toISOString(),
+        },
+      }));
+    } catch (error) {
+      setServerTestStates((prev) => ({
+        ...prev,
+        [key]: {
+          status: "failed",
+          message: asErrorMessage(error),
+        },
+      }));
+    }
+  }, []);
+
+  const runServerClearAuth = useCallback(async (server: ServerConfig, index: number) => {
+    const key = serverTestKey(index, server);
+    try {
+      const nextAuthState = await clearServerAuthLocal(server);
+      setServerAuthStates((prev) => ({
+        ...prev,
+        [key]: nextAuthState,
+      }));
+      setServerTestStates((prev) => ({
+        ...prev,
+        [key]: {
+          status: "idle",
+          message: "",
+        },
+      }));
+    } catch (error) {
+      setServerTestStates((prev) => ({
+        ...prev,
+        [key]: {
+          status: "failed",
+          message: asErrorMessage(error),
+        },
+      }));
+    }
+  }, []);
 
   const runEnabledServerConnectivityTests = useCallback(async (targetServers: ServerConfig[]) => {
     const candidates = targetServers
@@ -1485,6 +1667,7 @@ function App() {
   const confirmDelete = () => {
     setServers((prev) => prev.filter((_, xi) => xi !== deleteConfirm.index));
     setServerTestStates({});
+    setServerAuthStates({});
     setDeleteConfirm({ open: false, index: -1, name: "" });
   };
   const cancelDelete = () => {
@@ -1706,11 +1889,20 @@ function App() {
                             copied={copied}
                             onCopy={handleCopy}
                             testState={serverTestStates[serverTestKey(i, s)] ?? { status: "idle", message: "" }}
+                            authState={serverAuthStates[serverTestKey(i, s)] ?? createEmptyAuthState()}
                             onTest={() => { void runServerConnectivityTest(s, i); }}
+                            onReauthorize={() => { void runServerReauthorize(s, i); }}
+                            onClearAuth={() => { void runServerClearAuth(s, i); }}
                             t={t}
                             onChange={(u) => {
                               setServers((prev) => prev.map((x, xi) => xi === i ? u : x));
                               setServerTestStates((prev) => {
+                                const next = { ...prev };
+                                delete next[serverTestKey(i, s)];
+                                delete next[serverTestKey(i, u)];
+                                return next;
+                              });
+                              setServerAuthStates((prev) => {
                                 const next = { ...prev };
                                 delete next[serverTestKey(i, s)];
                                 delete next[serverTestKey(i, u)];
@@ -1730,6 +1922,7 @@ function App() {
                         description: "", cwd: "", env: {}, lifecycle: null, stdioProtocol: "auto", enabled: true,
                       }]);
                       setServerTestStates({});
+                      setServerAuthStates({});
                     }}>
                     {t("addServer")}
                   </button>

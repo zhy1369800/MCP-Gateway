@@ -1,17 +1,16 @@
-use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::config::ServerConfig;
 use crate::error::AppError;
 
+use super::auth::{
+    AuthOrchestrator, AuthSignalSource, PreparedServerLaunch, RuntimeAuthState,
+};
 use super::io_codec::{read_message, write_message};
 use super::protocol_negotiation::NegotiatedStdioProtocol;
 
@@ -27,40 +26,47 @@ fn configure_spawn_command(command: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn configure_spawn_command(_command: &mut Command) {}
 
-const MAX_CAPTURED_STDERR_LINES: usize = 80;
-
 pub struct ProcessConnection {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stdio_protocol: NegotiatedStdioProtocol,
-    stderr_lines: Arc<Mutex<VecDeque<String>>>,
+    auth_state: RuntimeAuthState,
 }
 
 impl ProcessConnection {
     pub async fn spawn(
-        server: &ServerConfig,
+        prepared: PreparedServerLaunch,
         stdio_protocol: NegotiatedStdioProtocol,
+        auth: AuthOrchestrator,
     ) -> Result<Self, AppError> {
-        let resolved_command = resolve_command(server.command.trim());
+        let auth_state = RuntimeAuthState::new(auth.clone(), prepared.clone()).await;
+        let resolved_command = resolve_command(prepared.server.command.trim());
         let mut command = Command::new(&resolved_command);
-        command.args(&server.args);
+        command.args(&prepared.server.args);
 
-        if !server.cwd.trim().is_empty() {
-            command.current_dir(Path::new(&server.cwd));
+        if !prepared.server.cwd.trim().is_empty() {
+            command.current_dir(Path::new(&prepared.server.cwd));
         }
 
-        command.envs(server.env.clone());
+        command.envs(prepared.server.env.clone());
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
         configure_spawn_command(&mut command);
 
         let mut child = command.spawn().map_err(|error| {
-            AppError::Upstream(format!(
+            let message = format!(
                 "failed to spawn MCP stdio server '{}' for {}: {error}",
-                resolved_command, server.name
-            ))
+                resolved_command, prepared.server.name
+            );
+            let error_message = message.clone();
+            let auth = auth.clone();
+            let prepared = prepared.clone();
+            tokio::spawn(async move {
+                auth.mark_launch_failed(&prepared, error_message).await;
+            });
+            AppError::Upstream(message)
         })?;
 
         let stdin = child
@@ -71,12 +77,8 @@ impl ProcessConnection {
             .stdout
             .take()
             .ok_or_else(|| AppError::Internal("missing stdout for spawned process".to_string()))?;
-        let stderr_lines = Arc::new(Mutex::new(VecDeque::with_capacity(
-            MAX_CAPTURED_STDERR_LINES,
-        )));
-
         if let Some(stderr) = child.stderr.take() {
-            let stderr_lines = stderr_lines.clone();
+            let auth_state = auth_state.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
@@ -84,11 +86,9 @@ impl ProcessConnection {
                     if message.is_empty() {
                         continue;
                     }
-                    let mut guard = stderr_lines.lock().await;
-                    if guard.len() == MAX_CAPTURED_STDERR_LINES {
-                        let _ = guard.pop_front();
-                    }
-                    guard.push_back(message.to_string());
+                    auth_state
+                        .handle_output_line(AuthSignalSource::Stderr, message.to_string())
+                        .await;
                 }
             });
         }
@@ -98,7 +98,7 @@ impl ProcessConnection {
             stdin,
             stdout: BufReader::new(stdout),
             stdio_protocol,
-            stderr_lines,
+            auth_state,
         })
     }
 
@@ -116,26 +116,42 @@ impl ProcessConnection {
         }
 
         let mut iterations: u32 = 0;
-        while iterations < max_response_wait_iterations {
-            let message = timeout(
+        loop {
+            let message = match timeout(
                 timeout_duration,
                 read_message(&mut self.stdout, self.stdio_protocol),
             )
             .await
-            .map_err(|_| {
-                AppError::Upstream("request timed out waiting for stdio response".to_string())
-            })??;
+            {
+                Ok(Ok(message)) => message,
+                Ok(Err(error)) => {
+                    self.auth_state.mark_request_error(&error).await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    if self.auth_state.should_continue_waiting_for_auth().await {
+                        continue;
+                    }
+                    self.auth_state.mark_timeout().await;
+                    return Err(AppError::Upstream(
+                        "request timed out waiting for stdio response".to_string(),
+                    ));
+                }
+            };
 
             if message.get("id") == expected_id.as_ref() {
+                self.auth_state.mark_connected().await;
                 return Ok(message);
             }
 
             iterations = iterations.saturating_add(1);
+            if iterations >= max_response_wait_iterations {
+                self.auth_state.mark_timeout().await;
+                return Err(AppError::Upstream(format!(
+                    "exceeded max response wait iterations ({max_response_wait_iterations}) waiting for stdio response"
+                )));
+            }
         }
-
-        Err(AppError::Upstream(format!(
-            "exceeded max response wait iterations ({max_response_wait_iterations}) waiting for stdio response"
-        )))
     }
 
     pub async fn notify(&mut self, notification: &serde_json::Value) -> Result<(), AppError> {
@@ -143,8 +159,11 @@ impl ProcessConnection {
     }
 
     pub async fn stderr_snapshot(&self) -> String {
-        let guard = self.stderr_lines.lock().await;
-        guard.iter().cloned().collect::<Vec<_>>().join("\n")
+        self.auth_state.stderr_snapshot().await
+    }
+
+    pub async fn auth_state(&self) -> super::auth::ServerAuthState {
+        self.auth_state.current_state().await
     }
 
     pub async fn shutdown(&mut self) -> Result<(), AppError> {

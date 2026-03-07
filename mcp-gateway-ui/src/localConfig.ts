@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   GatewayConfig,
   ServerConfig,
+  ServerAuthState,
   ServerConnectivityTestResult,
   SkillCommandRule,
   SkillDirectoryValidation,
@@ -37,5 +38,17 @@ export async function focusMainWindowForSkillConfirmation(): Promise<void> {
 
 export async function testMcpServerLocal(server: ServerConfig): Promise<ServerConnectivityTestResult> {
   return invoke<ServerConnectivityTestResult>("test_mcp_server_local", { server });
+}
+
+export async function getServerAuthStateLocal(server: ServerConfig): Promise<ServerAuthState> {
+  return invoke<ServerAuthState>("get_server_auth_state_local", { server });
+}
+
+export async function clearServerAuthLocal(server: ServerConfig): Promise<ServerAuthState> {
+  return invoke<ServerAuthState>("clear_server_auth_local", { server });
+}
+
+export async function reauthorizeServerLocal(server: ServerConfig): Promise<ServerConnectivityTestResult> {
+  return invoke<ServerConnectivityTestResult>("reauthorize_server_local", { server });
 }
 

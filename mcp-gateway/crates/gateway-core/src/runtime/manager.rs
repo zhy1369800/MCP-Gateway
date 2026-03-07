@@ -9,6 +9,9 @@ use uuid::Uuid;
 use crate::config::{DefaultsConfig, LifecycleMode, ServerConfig};
 use crate::error::AppError;
 
+use super::auth::{
+    AuthBrowserOpener, AuthOrchestrator, PreparedServerLaunch, ServerAuthState,
+};
 use super::connection::ProcessConnection;
 use super::pool::PooledEntry;
 use super::protocol_negotiation::{
@@ -20,6 +23,7 @@ pub struct ProcessManager {
     pooled: Arc<RwLock<HashMap<String, Arc<PooledEntry>>>>,
     protocol_hints: Arc<RwLock<HashMap<String, NegotiatedStdioProtocol>>>,
     tools_cache: Arc<RwLock<HashMap<String, Value>>>,
+    auth: AuthOrchestrator,
 }
 
 impl ProcessManager {
@@ -28,7 +32,32 @@ impl ProcessManager {
             pooled: Arc::new(RwLock::new(HashMap::new())),
             protocol_hints: Arc::new(RwLock::new(HashMap::new())),
             tools_cache: Arc::new(RwLock::new(HashMap::new())),
+            auth: AuthOrchestrator::new(),
         }
+    }
+
+    pub fn with_browser_opener(browser_opener: AuthBrowserOpener) -> Self {
+        Self {
+            pooled: Arc::new(RwLock::new(HashMap::new())),
+            protocol_hints: Arc::new(RwLock::new(HashMap::new())),
+            tools_cache: Arc::new(RwLock::new(HashMap::new())),
+            auth: AuthOrchestrator::with_browser_opener(browser_opener),
+        }
+    }
+
+    pub async fn get_server_auth_state(
+        &self,
+        server: &ServerConfig,
+    ) -> Result<ServerAuthState, AppError> {
+        self.auth.auth_state_for_server(server).await
+    }
+
+    pub async fn clear_server_auth(
+        &self,
+        server: &ServerConfig,
+    ) -> Result<ServerAuthState, AppError> {
+        self.evict_server(&server.name).await;
+        self.auth.clear_auth_state(server).await
     }
 
     pub async fn call_server(
@@ -66,18 +95,27 @@ impl ProcessManager {
         defaults: &DefaultsConfig,
     ) -> Result<Value, AppError> {
         let timeout_duration = Duration::from_millis(defaults.request_timeout_ms);
+        let prepared = self.prepare_server(server)?;
 
         let init_request = initialize_request();
         let (mut conn, initialize_response) = self
-            .spawn_initialized_connection(server, defaults, timeout_duration, &init_request)
+            .spawn_initialized_connection(
+                server,
+                &prepared,
+                defaults,
+                timeout_duration,
+                &init_request,
+            )
             .await?;
 
         conn.notify(&initialized_notification()).await?;
+        let auth = conn.auth_state().await;
         let _ = conn.shutdown().await;
 
         Ok(json!({
             "ok": true,
             "initialize": initialize_response,
+            "auth": auth,
             "testedAt": chrono::Utc::now()
         }))
     }
@@ -95,9 +133,16 @@ impl ProcessManager {
         }
 
         let timeout_duration = Duration::from_millis(defaults.request_timeout_ms);
+        let prepared = self.prepare_server(server)?;
         let init_request = initialize_request();
         let (mut conn, _) = self
-            .spawn_initialized_connection(server, defaults, timeout_duration, &init_request)
+            .spawn_initialized_connection(
+                server,
+                &prepared,
+                defaults,
+                timeout_duration,
+                &init_request,
+            )
             .await?;
 
         conn.notify(&initialized_notification()).await?;
@@ -179,16 +224,18 @@ impl ProcessManager {
         defaults: &DefaultsConfig,
         request: Value,
     ) -> Result<Value, AppError> {
+        let prepared = self.prepare_server(server)?;
         let lifecycle = server
             .lifecycle
             .clone()
             .unwrap_or_else(|| defaults.lifecycle.clone());
         let timeout_duration = Duration::from_millis(defaults.request_timeout_ms);
 
-        if self.should_auto_detect_protocol(server).await && is_initialize_request(&request) {
+        if self.should_auto_detect_protocol(server, &prepared).await && is_initialize_request(&request) {
             return self
                 .call_initialize_with_auto_detection(
                     server,
+                    &prepared,
                     &lifecycle,
                     &request,
                     timeout_duration,
@@ -197,12 +244,14 @@ impl ProcessManager {
                 .await;
         }
 
-        let effective_protocol = self.effective_protocol_for(server).await;
-        let allow_any_request_fallback = self.allow_any_request_protocol_fallback(server).await;
+        let effective_protocol = self.effective_protocol_for(server, &prepared).await;
+        let allow_any_request_fallback =
+            self.allow_any_request_protocol_fallback(server, &prepared).await;
 
         let primary_error = match self
             .call_server_with_protocol(
                 server,
+                &prepared,
                 effective_protocol,
                 &lifecycle,
                 &request,
@@ -230,6 +279,7 @@ impl ProcessManager {
         match self
             .call_server_with_protocol(
                 server,
+                &prepared,
                 fallback_protocol,
                 &lifecycle,
                 &request,
@@ -252,6 +302,7 @@ impl ProcessManager {
     async fn call_server_with_protocol(
         &self,
         server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
         protocol: NegotiatedStdioProtocol,
         lifecycle: &LifecycleMode,
         request: &Value,
@@ -260,7 +311,8 @@ impl ProcessManager {
     ) -> Result<Value, AppError> {
         match lifecycle {
             LifecycleMode::PerRequest => {
-                let mut conn = ProcessConnection::spawn(server, protocol).await?;
+                let mut conn =
+                    ProcessConnection::spawn(prepared.clone(), protocol, self.auth.clone()).await?;
                 let response = conn
                     .request(request, timeout_duration, max_response_wait_iterations)
                     .await;
@@ -270,6 +322,7 @@ impl ProcessManager {
             LifecycleMode::Pooled => {
                 self.call_pooled_with_recover(
                     server,
+                    prepared,
                     protocol,
                     request,
                     timeout_duration,
@@ -283,6 +336,7 @@ impl ProcessManager {
     async fn call_pooled_with_recover(
         &self,
         server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
         protocol: NegotiatedStdioProtocol,
         request: &Value,
         timeout_duration: Duration,
@@ -291,6 +345,7 @@ impl ProcessManager {
         match self
             .call_pooled_once(
                 server,
+                prepared,
                 protocol,
                 request,
                 timeout_duration,
@@ -303,6 +358,7 @@ impl ProcessManager {
                 self.evict_server(&server.name).await;
                 self.call_pooled_once(
                     server,
+                    prepared,
                     protocol,
                     request,
                     timeout_duration,
@@ -316,12 +372,15 @@ impl ProcessManager {
     async fn call_pooled_once(
         &self,
         server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
         protocol: NegotiatedStdioProtocol,
         request: &Value,
         timeout_duration: Duration,
         max_response_wait_iterations: u32,
     ) -> Result<Value, AppError> {
-        let entry = self.get_or_create_pooled_entry(server, protocol).await?;
+        let entry = self
+            .get_or_create_pooled_entry(server, prepared, protocol)
+            .await?;
         entry.touch().await;
         let mut conn = entry.connection.lock().await;
         conn.request(request, timeout_duration, max_response_wait_iterations)
@@ -331,6 +390,7 @@ impl ProcessManager {
     async fn call_initialize_with_auto_detection(
         &self,
         server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
         lifecycle: &LifecycleMode,
         request: &Value,
         timeout_duration: Duration,
@@ -338,7 +398,7 @@ impl ProcessManager {
     ) -> Result<Value, AppError> {
         let (mut conn, response, protocol) = self
             .race_protocol_request(
-                server,
+                prepared,
                 request,
                 timeout_duration,
                 max_response_wait_iterations,
@@ -351,7 +411,7 @@ impl ProcessManager {
                 let _ = conn.shutdown().await;
             }
             LifecycleMode::Pooled => {
-                self.replace_pooled_entry(server, conn).await;
+                self.replace_pooled_entry(prepared, conn).await;
             }
         }
 
@@ -360,15 +420,21 @@ impl ProcessManager {
 
     async fn race_protocol_request(
         &self,
-        server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
         request: &Value,
         timeout_duration: Duration,
         max_response_wait_iterations: u32,
     ) -> Result<(ProcessConnection, Value, NegotiatedStdioProtocol), AppError> {
         let (primary_protocol, secondary_protocol) = auto_detection_protocol_candidates();
 
-        let mut primary_conn = ProcessConnection::spawn(server, primary_protocol).await?;
-        let mut secondary_conn = ProcessConnection::spawn(server, secondary_protocol).await?;
+        let mut primary_conn =
+            ProcessConnection::spawn(prepared.clone(), primary_protocol, self.auth.clone()).await?;
+        let mut secondary_conn = ProcessConnection::spawn(
+            prepared.clone(),
+            secondary_protocol,
+            self.auth.clone(),
+        )
+        .await?;
 
         let mut primary_request =
             Box::pin(primary_conn.request(request, timeout_duration, max_response_wait_iterations));
@@ -433,12 +499,16 @@ impl ProcessManager {
         }
     }
 
-    async fn replace_pooled_entry(&self, server: &ServerConfig, connection: ProcessConnection) {
-        let signature = server_signature(server);
+    async fn replace_pooled_entry(
+        &self,
+        prepared: &PreparedServerLaunch,
+        connection: ProcessConnection,
+    ) {
+        let signature = server_signature(&prepared.server);
         let new_entry = Arc::new(PooledEntry::new(signature, connection));
         let old_entry = {
             let mut guard = self.pooled.write().await;
-            guard.insert(server.name.clone(), new_entry)
+            guard.insert(prepared.server.name.clone(), new_entry)
         };
 
         if let Some(old_entry) = old_entry {
@@ -448,21 +518,38 @@ impl ProcessManager {
         }
     }
 
-    async fn should_auto_detect_protocol(&self, server: &ServerConfig) -> bool {
+    async fn should_auto_detect_protocol(
+        &self,
+        server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
+    ) -> bool {
+        if prepared.preferred_protocol.is_some() {
+            return false;
+        }
         !self.protocol_hints.read().await.contains_key(&server.name)
     }
 
-    async fn effective_protocol_for(&self, server: &ServerConfig) -> NegotiatedStdioProtocol {
+    async fn effective_protocol_for(
+        &self,
+        server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
+    ) -> NegotiatedStdioProtocol {
         self.protocol_hints
             .read()
             .await
             .get(&server.name)
             .copied()
+            .or(prepared.preferred_protocol)
             .unwrap_or(NegotiatedStdioProtocol::ContentLength)
     }
 
-    async fn allow_any_request_protocol_fallback(&self, server: &ServerConfig) -> bool {
-        !self.protocol_hints.read().await.contains_key(&server.name)
+    async fn allow_any_request_protocol_fallback(
+        &self,
+        server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
+    ) -> bool {
+        prepared.preferred_protocol.is_none()
+            && !self.protocol_hints.read().await.contains_key(&server.name)
     }
 
     async fn remember_protocol_hint(&self, server_name: &str, protocol: NegotiatedStdioProtocol) {
@@ -475,14 +562,15 @@ impl ProcessManager {
     async fn spawn_initialized_connection(
         &self,
         server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
         defaults: &DefaultsConfig,
         timeout_duration: Duration,
         init_request: &Value,
     ) -> Result<(ProcessConnection, Value), AppError> {
-        if self.should_auto_detect_protocol(server).await {
+        if self.should_auto_detect_protocol(server, prepared).await {
             let (conn, response, protocol) = self
                 .race_protocol_request(
-                    server,
+                    prepared,
                     init_request,
                     timeout_duration,
                     defaults.max_response_wait_iterations,
@@ -492,9 +580,11 @@ impl ProcessManager {
             return Ok((conn, response));
         }
 
-        let effective_protocol = self.effective_protocol_for(server).await;
+        let effective_protocol = self.effective_protocol_for(server, prepared).await;
 
-        let mut conn = ProcessConnection::spawn(server, effective_protocol).await?;
+        let mut conn =
+            ProcessConnection::spawn(prepared.clone(), effective_protocol, self.auth.clone())
+                .await?;
         match conn
             .request(
                 init_request,
@@ -514,7 +604,12 @@ impl ProcessManager {
                 self.remember_protocol_hint(&server.name, fallback_protocol)
                     .await;
 
-                let mut fallback_conn = ProcessConnection::spawn(server, fallback_protocol).await?;
+                let mut fallback_conn = ProcessConnection::spawn(
+                    prepared.clone(),
+                    fallback_protocol,
+                    self.auth.clone(),
+                )
+                .await?;
                 match fallback_conn
                     .request(
                         init_request,
@@ -539,9 +634,10 @@ impl ProcessManager {
     async fn get_or_create_pooled_entry(
         &self,
         server: &ServerConfig,
+        prepared: &PreparedServerLaunch,
         protocol: NegotiatedStdioProtocol,
     ) -> Result<Arc<PooledEntry>, AppError> {
-        let signature = server_signature(server);
+        let signature = server_signature(&prepared.server);
 
         {
             let guard = self.pooled.read().await;
@@ -561,7 +657,8 @@ impl ProcessManager {
 
         // Do not await process spawn while holding pooled write lock.
         drop(guard);
-        let mut conn = ProcessConnection::spawn(server, protocol).await?;
+        let mut conn =
+            ProcessConnection::spawn(prepared.clone(), protocol, self.auth.clone()).await?;
 
         let mut guard = self.pooled.write().await;
         if let Some(entry) = guard.get(&server.name) {
@@ -579,6 +676,10 @@ impl ProcessManager {
         }
 
         Ok(new_entry)
+    }
+
+    fn prepare_server(&self, server: &ServerConfig) -> Result<PreparedServerLaunch, AppError> {
+        self.auth.prepare_server(server)
     }
 }
 

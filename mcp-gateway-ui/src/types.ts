@@ -103,14 +103,36 @@ export interface HealthData {
   version: string;
 }
 
+export type AuthSessionStatus =
+  | "idle"
+  | "starting"
+  | "auth_pending"
+  | "browser_opened"
+  | "waiting_callback"
+  | "authorized"
+  | "connected"
+  | "auth_timeout"
+  | "auth_failed"
+  | "launch_failed"
+  | "init_failed";
+
+export interface ServerAuthState {
+  status: AuthSessionStatus;
+  authorizeUrl?: string | null;
+  lastSuccessAt?: string | null;
+  lastUpdatedAt?: string | null;
+  lastError?: string | null;
+  adapterKind?: string | null;
+  browserOpened: boolean;
+  sessionKey: string;
+  sessionDir?: string | null;
+}
+
 export interface ServerConnectivityTestResult {
   ok: boolean;
-  status?: "ok" | "auth_required";
   message?: string;
-  authUrl?: string;
-  browserOpened?: boolean;
-  waitingForAuthorization?: boolean;
   initialize?: JsonValue;
+  auth: ServerAuthState;
   testedAt: string;
 }
 
