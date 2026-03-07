@@ -166,9 +166,9 @@ export interface SkillConfirmation {
   createdAt: string;
   updatedAt: string;
   skill: string;
-  script: string;
+  displayName: string;
   args: string[];
-  commandPreview: string;
+  rawCommand: string;
   reason: string;
 }
 

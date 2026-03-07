@@ -9,9 +9,7 @@ use uuid::Uuid;
 use crate::config::{DefaultsConfig, LifecycleMode, ServerConfig};
 use crate::error::AppError;
 
-use super::auth::{
-    AuthBrowserOpener, AuthOrchestrator, PreparedServerLaunch, ServerAuthState,
-};
+use super::auth::{AuthBrowserOpener, AuthOrchestrator, PreparedServerLaunch, ServerAuthState};
 use super::connection::ProcessConnection;
 use super::pool::PooledEntry;
 use super::protocol_negotiation::{
@@ -231,7 +229,9 @@ impl ProcessManager {
             .unwrap_or_else(|| defaults.lifecycle.clone());
         let timeout_duration = Duration::from_millis(defaults.request_timeout_ms);
 
-        if self.should_auto_detect_protocol(server, &prepared).await && is_initialize_request(&request) {
+        if self.should_auto_detect_protocol(server, &prepared).await
+            && is_initialize_request(&request)
+        {
             return self
                 .call_initialize_with_auto_detection(
                     server,
@@ -245,8 +245,9 @@ impl ProcessManager {
         }
 
         let effective_protocol = self.effective_protocol_for(server, &prepared).await;
-        let allow_any_request_fallback =
-            self.allow_any_request_protocol_fallback(server, &prepared).await;
+        let allow_any_request_fallback = self
+            .allow_any_request_protocol_fallback(server, &prepared)
+            .await;
 
         let primary_error = match self
             .call_server_with_protocol(
@@ -429,12 +430,9 @@ impl ProcessManager {
 
         let mut primary_conn =
             ProcessConnection::spawn(prepared.clone(), primary_protocol, self.auth.clone()).await?;
-        let mut secondary_conn = ProcessConnection::spawn(
-            prepared.clone(),
-            secondary_protocol,
-            self.auth.clone(),
-        )
-        .await?;
+        let mut secondary_conn =
+            ProcessConnection::spawn(prepared.clone(), secondary_protocol, self.auth.clone())
+                .await?;
 
         let mut primary_request =
             Box::pin(primary_conn.request(request, timeout_duration, max_response_wait_iterations));
@@ -792,9 +790,8 @@ fn build_auto_detection_error(
 }
 
 fn extract_auth_prompt(primary_stderr: &str, secondary_stderr: &str) -> Option<AuthPromptInfo> {
-    let browser_opened =
-        primary_stderr.contains("Browser opened automatically")
-            || secondary_stderr.contains("Browser opened automatically");
+    let browser_opened = primary_stderr.contains("Browser opened automatically")
+        || secondary_stderr.contains("Browser opened automatically");
     let waiting_for_authorization = primary_stderr.contains("Waiting for authorization")
         || primary_stderr.contains("Waiting for auth code")
         || secondary_stderr.contains("Waiting for authorization")
@@ -820,7 +817,7 @@ fn extract_authorize_url(stderr: &str) -> Option<String> {
 
 fn extract_http_url(line: &str) -> Option<String> {
     line.split_whitespace().find_map(|token| {
-        let trimmed = token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '(' | ')' | ',' ));
+        let trimmed = token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '(' | ')' | ','));
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
             Some(trimmed.to_string())
         } else {
@@ -829,10 +826,7 @@ fn extract_http_url(line: &str) -> Option<String> {
     })
 }
 
-fn combined_stderr_excerpt(
-    primary: (&str, &str),
-    secondary: (&str, &str),
-) -> String {
+fn combined_stderr_excerpt(primary: (&str, &str), secondary: (&str, &str)) -> String {
     let mut parts = Vec::new();
     let primary_excerpt = stderr_excerpt(primary.1);
     if !primary_excerpt.is_empty() {

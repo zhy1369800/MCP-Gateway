@@ -8,9 +8,7 @@ use tokio::time::timeout;
 
 use crate::error::AppError;
 
-use super::auth::{
-    AuthOrchestrator, AuthSignalSource, PreparedServerLaunch, RuntimeAuthState,
-};
+use super::auth::{AuthOrchestrator, AuthSignalSource, PreparedServerLaunch, RuntimeAuthState};
 use super::io_codec::{read_message, write_message};
 use super::protocol_negotiation::NegotiatedStdioProtocol;
 

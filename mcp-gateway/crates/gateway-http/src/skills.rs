@@ -58,9 +58,9 @@ pub struct SkillConfirmation {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub skill: String,
-    pub script: String,
+    pub display_name: String,
     pub args: Vec<String>,
-    pub command_preview: String,
+    pub raw_command: String,
     pub reason: String,
 }
 
@@ -409,6 +409,7 @@ impl SkillsService {
         }
         let program = tokens[0].clone();
         let command_args = tokens[1..].to_vec();
+        let display_name = skill_display_name(skill).to_string();
 
         let skill_md_path = skill.path.join("SKILL.md");
         let policy = evaluate_policy(
@@ -435,7 +436,7 @@ impl SkillsService {
                 let (confirmation_id, already_decided) = match self
                     .create_confirmation(
                         &skill.skill,
-                        &command_preview,
+                        &display_name,
                         &tokens,
                         &command_preview,
                         &reason,
@@ -543,12 +544,12 @@ impl SkillsService {
     async fn create_confirmation(
         &self,
         skill: &str,
-        script: &str,
+        display_name: &str,
         args: &[String],
-        command_preview: &str,
+        raw_command: &str,
         reason: &str,
     ) -> CreateConfirmationResult {
-        let fingerprint = format!("{skill}|{command_preview}");
+        let fingerprint = format!("{skill}|{raw_command}");
         let now = Utc::now();
         let mut guard = self.confirmations.write().await;
         Self::prune_confirmations_locked(&mut guard, now);
@@ -579,9 +580,9 @@ impl SkillsService {
             created_at: now,
             updated_at: now,
             skill: skill.to_string(),
-            script: script.to_string(),
+            display_name: display_name.to_string(),
             args: args.to_vec(),
-            command_preview: command_preview.to_string(),
+            raw_command: raw_command.to_string(),
             reason: reason.to_string(),
         };
 
@@ -713,9 +714,9 @@ impl SkillsService {
 
     fn is_same_confirmation_signature(left: &SkillConfirmation, right: &SkillConfirmation) -> bool {
         left.skill == right.skill
-            && left.script == right.script
+            && left.display_name == right.display_name
             && left.args == right.args
-            && left.command_preview == right.command_preview
+            && left.raw_command == right.raw_command
             && left.reason == right.reason
     }
 
@@ -943,12 +944,16 @@ fn build_skill_tool_bindings(skills: &[DiscoveredSkill]) -> Vec<(String, &Discov
 }
 
 fn skill_tool_name_base(skill: &DiscoveredSkill) -> String {
-    let raw = if !skill.frontmatter_name.trim().is_empty() {
-        skill.frontmatter_name.trim()
-    } else {
+    sanitize_tool_name(skill_display_name(skill))
+}
+
+fn skill_display_name(skill: &DiscoveredSkill) -> &str {
+    let frontmatter_name = skill.frontmatter_name.trim();
+    if frontmatter_name.is_empty() {
         skill.skill.trim()
-    };
-    sanitize_tool_name(raw)
+    } else {
+        frontmatter_name
+    }
 }
 
 fn sanitize_tool_name(raw: &str) -> String {
@@ -994,11 +999,7 @@ fn render_skill_tool_description(skill: &DiscoveredSkill, os: &str, now: &str) -
     let skill_path = normalize_display_path(&skill.path);
     format!(
         "To learn the complete usage of this skill, run `cmd` to read the full SKILL.md text. like `cat /.../SKILL.md` or `Get-Content D:/.../SKILL.md`. The `cmd` value should be one shell command string used either to read markdown files or run scripts.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill path: {skill_path}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
-        if skill.frontmatter_name.trim().is_empty() {
-            skill.skill.trim()
-        } else {
-            skill.frontmatter_name.trim()
-        },
+        skill_display_name(skill),
         meta_description,
         if skill.frontmatter_metadata.trim().is_empty() {
             "none"

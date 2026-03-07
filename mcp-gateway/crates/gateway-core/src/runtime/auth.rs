@@ -18,8 +18,7 @@ const DEFAULT_AUTH_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_BROWSER_DEDUP_WINDOW_SECS: u64 = 8;
 const MAX_SIGNAL_LINES: usize = 80;
 
-pub type AuthBrowserOpener =
-    Arc<dyn Fn(String) -> Result<(), String> + Send + Sync + 'static>;
+pub type AuthBrowserOpener = Arc<dyn Fn(String) -> Result<(), String> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -228,11 +227,7 @@ impl AuthOrchestrator {
                 timeout,
             )
         } else {
-            (
-                None,
-                None,
-                Duration::from_secs(DEFAULT_AUTH_TIMEOUT_SECS),
-            )
+            (None, None, Duration::from_secs(DEFAULT_AUTH_TIMEOUT_SECS))
         };
 
         Ok(PreparedServerLaunch {
@@ -319,9 +314,7 @@ impl AuthOrchestrator {
         {
             let guard = self.browser_opened_at.read().await;
             if let Some(last_opened) = guard.get(session_key) {
-                if last_opened.elapsed()
-                    < Duration::from_secs(DEFAULT_BROWSER_DEDUP_WINDOW_SECS)
-                {
+                if last_opened.elapsed() < Duration::from_secs(DEFAULT_BROWSER_DEDUP_WINDOW_SECS) {
                     return Ok(false);
                 }
             }
@@ -378,11 +371,7 @@ impl RuntimeAuthState {
         this
     }
 
-    pub(crate) async fn handle_output_line(
-        &self,
-        source: AuthSignalSource,
-        line: String,
-    ) {
+    pub(crate) async fn handle_output_line(&self, source: AuthSignalSource, line: String) {
         let event = detect_auth_signal(&line, source);
 
         let mut maybe_open_url: Option<String> = None;
@@ -560,10 +549,7 @@ impl RuntimeAuthState {
         self.orchestrator.save_state(&state).await;
     }
 
-    fn to_server_auth_state_locked(
-        &self,
-        guard: &RuntimeAuthSnapshot,
-    ) -> ServerAuthState {
+    fn to_server_auth_state_locked(&self, guard: &RuntimeAuthSnapshot) -> ServerAuthState {
         ServerAuthState {
             status: guard.status.clone(),
             authorize_url: guard.authorize_url.clone(),
@@ -607,10 +593,9 @@ fn ensure_adapter_defaults(
             {
                 server.args.insert(0, "-y".to_string());
             }
-            let timeout_secs =
-                ensure_flag_with_value(&mut server.args, "--auth-timeout", "120")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(DEFAULT_AUTH_TIMEOUT_SECS);
+            let timeout_secs = ensure_flag_with_value(&mut server.args, "--auth-timeout", "120")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_AUTH_TIMEOUT_SECS);
             Duration::from_secs(timeout_secs)
         }
     }
@@ -631,13 +616,18 @@ fn ensure_flag_with_value(
 }
 
 fn env_contains_key(env: &HashMap<String, String>, key: &str) -> bool {
-    env.keys().any(|existing| existing.eq_ignore_ascii_case(key))
+    env.keys()
+        .any(|existing| existing.eq_ignore_ascii_case(key))
 }
 
 fn detect_known_adapter(server: &ServerConfig) -> Option<KnownAdapter> {
     let command_name = normalized_command_name(&server.command);
     if command_name.eq_ignore_ascii_case("mcp-remote") {
-        let remote_url = server.args.iter().find(|arg| !arg.starts_with('-'))?.clone();
+        let remote_url = server
+            .args
+            .iter()
+            .find(|arg| !arg.starts_with('-'))?
+            .clone();
         let resource_id = build_mcp_remote_resource_id(&server.args, &remote_url);
         return Some(KnownAdapter {
             kind: KnownAdapterKind::McpRemote,
@@ -659,10 +649,7 @@ fn detect_known_adapter(server: &ServerConfig) -> Option<KnownAdapter> {
         .skip(package_index + 1)
         .find(|arg| !arg.starts_with('-'))?
         .clone();
-    let resource_id = build_mcp_remote_resource_id(
-        &server.args[package_index + 1..],
-        &remote_url,
-    );
+    let resource_id = build_mcp_remote_resource_id(&server.args[package_index + 1..], &remote_url);
     Some(KnownAdapter {
         kind: KnownAdapterKind::McpRemote,
         resource_id,
@@ -689,7 +676,10 @@ fn build_mcp_remote_resource_id(args: &[String], remote_url: &str) -> String {
         }
     }
     headers.sort();
-    format!("{remote_url}|resource={resource}|headers={}", headers.join("\u{001f}"))
+    format!(
+        "{remote_url}|resource={resource}|headers={}",
+        headers.join("\u{001f}")
+    )
 }
 
 fn session_key_for_server(server: &ServerConfig, adapter: Option<&KnownAdapter>) -> String {
@@ -739,7 +729,10 @@ fn normalize_package_spec(spec: &str) -> String {
         return String::new();
     }
 
-    raw.split('@').next().unwrap_or_default().to_ascii_lowercase()
+    raw.split('@')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn is_npx_like_command(command: &str) -> bool {
@@ -913,7 +906,9 @@ mod tests {
     fn detects_mcp_remote_adapter() {
         let adapter = detect_known_adapter(&sample_server()).expect("adapter");
         assert_eq!(adapter.kind, KnownAdapterKind::McpRemote);
-        assert!(adapter.resource_id.contains("https://mcp.replicate.com/sse"));
+        assert!(adapter
+            .resource_id
+            .contains("https://mcp.replicate.com/sse"));
     }
 
     #[test]
@@ -936,7 +931,9 @@ mod tests {
     fn prepare_server_injects_controlled_dirs() {
         let store = AuthSessionStore::new_in(PathBuf::from("D:/tmp/auth-test"));
         let orchestrator = AuthOrchestrator::with_store(store);
-        let prepared = orchestrator.prepare_server(&sample_server()).expect("prepare");
+        let prepared = orchestrator
+            .prepare_server(&sample_server())
+            .expect("prepare");
 
         assert_eq!(
             prepared.preferred_protocol,
@@ -982,11 +979,7 @@ mod tests {
         };
 
         store.save(&state).await.expect("save");
-        let loaded = store
-            .load("abc")
-            .await
-            .expect("load")
-            .expect("state");
+        let loaded = store.load("abc").await.expect("load").expect("state");
         assert_eq!(loaded.status, AuthSessionStatus::Connected);
         store.clear("abc").await.expect("clear");
         assert!(store.load("abc").await.expect("load after clear").is_none());

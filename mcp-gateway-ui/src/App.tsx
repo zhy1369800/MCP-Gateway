@@ -459,12 +459,14 @@ function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
     <div className="skill-confirm-list">
       {pending.map((item) => {
         const busy = busyIds.has(item.id);
+        const displayName = item.displayName.trim();
+        const showDisplayName = displayName.length > 0 && displayName !== item.skill;
         return (
           <div className="skill-confirm-item" key={item.id}>
             <div className="skill-confirm-head">
               <div className="skill-confirm-meta">
                 <span className="skill-chip">{item.skill}</span>
-                <span className="skill-script">{item.script}</span>
+                {showDisplayName && <span className="skill-script">{displayName}</span>}
               </div>
               <div className="skill-confirm-actions">
                 <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => onReject(item.id)}>
@@ -477,7 +479,7 @@ function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
             </div>
             <div className="skill-confirm-row">
               <span className="field-label">{t("commandPreview")}</span>
-              <code className="skill-command">{item.commandPreview}</code>
+              <code className="skill-command">{item.rawCommand}</code>
             </div>
             <div className="skill-confirm-row">
               <span className="field-label">{t("confirmReason")}</span>
@@ -512,6 +514,8 @@ function SkillConfirmationPopup({
   t: ReturnType<typeof useT>;
 }) {
   if (!open || !item) return null;
+  const displayName = item.displayName.trim();
+  const showDisplayName = displayName.length > 0 && displayName !== item.skill;
   return (
     <div className="modal-overlay" onClick={() => onLater(item.id)}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
@@ -519,9 +523,13 @@ function SkillConfirmationPopup({
         <div className="modal-body">
           <div>{t("skillsConfirmPopupMsg")}</div>
           <div className="json-hint" style={{ marginTop: 8 }}>{t("skillsConfirmTimeoutHint")}</div>
+          <div className="skill-confirm-meta" style={{ marginTop: 10 }}>
+            <span className="skill-chip">{item.skill}</span>
+            {showDisplayName && <span className="skill-script">{displayName}</span>}
+          </div>
           <div className="skill-confirm-row" style={{ marginTop: 10 }}>
             <span className="field-label">{t("commandPreview")}</span>
-            <code className="skill-command">{item.commandPreview}</code>
+            <code className="skill-command">{item.rawCommand}</code>
           </div>
           <div className="skill-confirm-row">
             <span className="field-label">{t("confirmReason")}</span>
