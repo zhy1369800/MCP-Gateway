@@ -20,9 +20,10 @@ const MAX_SIGNAL_LINES: usize = 80;
 
 pub type AuthBrowserOpener = Arc<dyn Fn(String) -> Result<(), String> + Send + Sync + 'static>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthSessionStatus {
+    #[default]
     Idle,
     Starting,
     AuthPending,
@@ -34,12 +35,6 @@ pub enum AuthSessionStatus {
     AuthFailed,
     LaunchFailed,
     InitFailed,
-}
-
-impl Default for AuthSessionStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

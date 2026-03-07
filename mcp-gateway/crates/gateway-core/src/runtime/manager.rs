@@ -24,6 +24,27 @@ pub struct ProcessManager {
     auth: AuthOrchestrator,
 }
 
+#[derive(Clone, Copy)]
+struct ServerRequestContext<'a> {
+    request: &'a Value,
+    timeout_duration: Duration,
+    max_response_wait_iterations: u32,
+}
+
+impl<'a> ServerRequestContext<'a> {
+    fn new(
+        request: &'a Value,
+        timeout_duration: Duration,
+        max_response_wait_iterations: u32,
+    ) -> Self {
+        Self {
+            request,
+            timeout_duration,
+            max_response_wait_iterations,
+        }
+    }
+}
+
 impl ProcessManager {
     pub fn new() -> Self {
         Self {
@@ -96,14 +117,13 @@ impl ProcessManager {
         let prepared = self.prepare_server(server)?;
 
         let init_request = initialize_request();
+        let request_ctx = ServerRequestContext::new(
+            &init_request,
+            timeout_duration,
+            defaults.max_response_wait_iterations,
+        );
         let (mut conn, initialize_response) = self
-            .spawn_initialized_connection(
-                server,
-                &prepared,
-                defaults,
-                timeout_duration,
-                &init_request,
-            )
+            .spawn_initialized_connection(server, &prepared, request_ctx)
             .await?;
 
         conn.notify(&initialized_notification()).await?;
@@ -133,14 +153,13 @@ impl ProcessManager {
         let timeout_duration = Duration::from_millis(defaults.request_timeout_ms);
         let prepared = self.prepare_server(server)?;
         let init_request = initialize_request();
+        let request_ctx = ServerRequestContext::new(
+            &init_request,
+            timeout_duration,
+            defaults.max_response_wait_iterations,
+        );
         let (mut conn, _) = self
-            .spawn_initialized_connection(
-                server,
-                &prepared,
-                defaults,
-                timeout_duration,
-                &init_request,
-            )
+            .spawn_initialized_connection(server, &prepared, request_ctx)
             .await?;
 
         conn.notify(&initialized_notification()).await?;
@@ -228,19 +247,17 @@ impl ProcessManager {
             .clone()
             .unwrap_or_else(|| defaults.lifecycle.clone());
         let timeout_duration = Duration::from_millis(defaults.request_timeout_ms);
+        let request_ctx = ServerRequestContext::new(
+            &request,
+            timeout_duration,
+            defaults.max_response_wait_iterations,
+        );
 
         if self.should_auto_detect_protocol(server, &prepared).await
-            && is_initialize_request(&request)
+            && is_initialize_request(request_ctx.request)
         {
             return self
-                .call_initialize_with_auto_detection(
-                    server,
-                    &prepared,
-                    &lifecycle,
-                    &request,
-                    timeout_duration,
-                    defaults.max_response_wait_iterations,
-                )
+                .call_initialize_with_auto_detection(server, &prepared, &lifecycle, request_ctx)
                 .await;
         }
 
@@ -255,9 +272,7 @@ impl ProcessManager {
                 &prepared,
                 effective_protocol,
                 &lifecycle,
-                &request,
-                timeout_duration,
-                defaults.max_response_wait_iterations,
+                request_ctx,
             )
             .await
         {
@@ -265,7 +280,11 @@ impl ProcessManager {
             Err(error) => error,
         };
 
-        if !should_attempt_protocol_fallback(&request, &primary_error, allow_any_request_fallback) {
+        if !should_attempt_protocol_fallback(
+            request_ctx.request,
+            &primary_error,
+            allow_any_request_fallback,
+        ) {
             return Err(primary_error);
         }
 
@@ -274,7 +293,7 @@ impl ProcessManager {
         if matches!(lifecycle, LifecycleMode::Pooled) {
             self.evict_server(&server.name).await;
         }
-        self.remember_protocol_hint(&server.name, fallback_protocol.clone())
+        self.remember_protocol_hint(&server.name, fallback_protocol)
             .await;
 
         match self
@@ -283,9 +302,7 @@ impl ProcessManager {
                 &prepared,
                 fallback_protocol,
                 &lifecycle,
-                &request,
-                timeout_duration,
-                defaults.max_response_wait_iterations,
+                request_ctx,
             )
             .await
         {
@@ -306,30 +323,25 @@ impl ProcessManager {
         prepared: &PreparedServerLaunch,
         protocol: NegotiatedStdioProtocol,
         lifecycle: &LifecycleMode,
-        request: &Value,
-        timeout_duration: Duration,
-        max_response_wait_iterations: u32,
+        request_ctx: ServerRequestContext<'_>,
     ) -> Result<Value, AppError> {
         match lifecycle {
             LifecycleMode::PerRequest => {
                 let mut conn =
                     ProcessConnection::spawn(prepared.clone(), protocol, self.auth.clone()).await?;
                 let response = conn
-                    .request(request, timeout_duration, max_response_wait_iterations)
+                    .request(
+                        request_ctx.request,
+                        request_ctx.timeout_duration,
+                        request_ctx.max_response_wait_iterations,
+                    )
                     .await;
                 let _ = conn.shutdown().await;
                 response
             }
             LifecycleMode::Pooled => {
-                self.call_pooled_with_recover(
-                    server,
-                    prepared,
-                    protocol,
-                    request,
-                    timeout_duration,
-                    max_response_wait_iterations,
-                )
-                .await
+                self.call_pooled_with_recover(server, prepared, protocol, request_ctx)
+                    .await
             }
         }
     }
@@ -339,33 +351,17 @@ impl ProcessManager {
         server: &ServerConfig,
         prepared: &PreparedServerLaunch,
         protocol: NegotiatedStdioProtocol,
-        request: &Value,
-        timeout_duration: Duration,
-        max_response_wait_iterations: u32,
+        request_ctx: ServerRequestContext<'_>,
     ) -> Result<Value, AppError> {
         match self
-            .call_pooled_once(
-                server,
-                prepared,
-                protocol,
-                request,
-                timeout_duration,
-                max_response_wait_iterations,
-            )
+            .call_pooled_once(server, prepared, protocol, request_ctx)
             .await
         {
             Ok(value) => Ok(value),
             Err(_) => {
                 self.evict_server(&server.name).await;
-                self.call_pooled_once(
-                    server,
-                    prepared,
-                    protocol,
-                    request,
-                    timeout_duration,
-                    max_response_wait_iterations,
-                )
-                .await
+                self.call_pooled_once(server, prepared, protocol, request_ctx)
+                    .await
             }
         }
     }
@@ -375,17 +371,19 @@ impl ProcessManager {
         server: &ServerConfig,
         prepared: &PreparedServerLaunch,
         protocol: NegotiatedStdioProtocol,
-        request: &Value,
-        timeout_duration: Duration,
-        max_response_wait_iterations: u32,
+        request_ctx: ServerRequestContext<'_>,
     ) -> Result<Value, AppError> {
         let entry = self
             .get_or_create_pooled_entry(server, prepared, protocol)
             .await?;
         entry.touch().await;
         let mut conn = entry.connection.lock().await;
-        conn.request(request, timeout_duration, max_response_wait_iterations)
-            .await
+        conn.request(
+            request_ctx.request,
+            request_ctx.timeout_duration,
+            request_ctx.max_response_wait_iterations,
+        )
+        .await
     }
 
     async fn call_initialize_with_auto_detection(
@@ -393,18 +391,10 @@ impl ProcessManager {
         server: &ServerConfig,
         prepared: &PreparedServerLaunch,
         lifecycle: &LifecycleMode,
-        request: &Value,
-        timeout_duration: Duration,
-        max_response_wait_iterations: u32,
+        request_ctx: ServerRequestContext<'_>,
     ) -> Result<Value, AppError> {
-        let (mut conn, response, protocol) = self
-            .race_protocol_request(
-                prepared,
-                request,
-                timeout_duration,
-                max_response_wait_iterations,
-            )
-            .await?;
+        let (mut conn, response, protocol) =
+            self.race_protocol_request(prepared, request_ctx).await?;
         self.remember_protocol_hint(&server.name, protocol).await;
 
         match lifecycle {
@@ -422,9 +412,7 @@ impl ProcessManager {
     async fn race_protocol_request(
         &self,
         prepared: &PreparedServerLaunch,
-        request: &Value,
-        timeout_duration: Duration,
-        max_response_wait_iterations: u32,
+        request_ctx: ServerRequestContext<'_>,
     ) -> Result<(ProcessConnection, Value, NegotiatedStdioProtocol), AppError> {
         let (primary_protocol, secondary_protocol) = auto_detection_protocol_candidates();
 
@@ -434,12 +422,15 @@ impl ProcessManager {
             ProcessConnection::spawn(prepared.clone(), secondary_protocol, self.auth.clone())
                 .await?;
 
-        let mut primary_request =
-            Box::pin(primary_conn.request(request, timeout_duration, max_response_wait_iterations));
+        let mut primary_request = Box::pin(primary_conn.request(
+            request_ctx.request,
+            request_ctx.timeout_duration,
+            request_ctx.max_response_wait_iterations,
+        ));
         let mut secondary_request = Box::pin(secondary_conn.request(
-            request,
-            timeout_duration,
-            max_response_wait_iterations,
+            request_ctx.request,
+            request_ctx.timeout_duration,
+            request_ctx.max_response_wait_iterations,
         ));
 
         let mut primary_error: Option<AppError> = None;
@@ -483,16 +474,19 @@ impl ProcessManager {
                 let _ = primary_conn.shutdown().await;
                 let _ = secondary_conn.shutdown().await;
 
-                let primary_error = primary_error.expect("primary error should exist");
-                let secondary_error = secondary_error.expect("secondary error should exist");
-                return Err(build_auto_detection_error(
-                    primary_protocol,
-                    &primary_error,
-                    &primary_stderr,
-                    secondary_protocol,
-                    &secondary_error,
-                    &secondary_stderr,
-                ));
+                return match (primary_error.as_ref(), secondary_error.as_ref()) {
+                    (Some(primary_error), Some(secondary_error)) => {
+                        Err(build_auto_detection_error(
+                            primary_protocol,
+                            primary_error,
+                            &primary_stderr,
+                            secondary_protocol,
+                            secondary_error,
+                            &secondary_stderr,
+                        ))
+                    }
+                    _ => unreachable!("both protocol attempts should have completed with errors"),
+                };
             }
         }
     }
@@ -561,19 +555,11 @@ impl ProcessManager {
         &self,
         server: &ServerConfig,
         prepared: &PreparedServerLaunch,
-        defaults: &DefaultsConfig,
-        timeout_duration: Duration,
-        init_request: &Value,
+        request_ctx: ServerRequestContext<'_>,
     ) -> Result<(ProcessConnection, Value), AppError> {
         if self.should_auto_detect_protocol(server, prepared).await {
-            let (conn, response, protocol) = self
-                .race_protocol_request(
-                    prepared,
-                    init_request,
-                    timeout_duration,
-                    defaults.max_response_wait_iterations,
-                )
-                .await?;
+            let (conn, response, protocol) =
+                self.race_protocol_request(prepared, request_ctx).await?;
             self.remember_protocol_hint(&server.name, protocol).await;
             return Ok((conn, response));
         }
@@ -585,16 +571,16 @@ impl ProcessManager {
                 .await?;
         match conn
             .request(
-                init_request,
-                timeout_duration,
-                defaults.max_response_wait_iterations,
+                request_ctx.request,
+                request_ctx.timeout_duration,
+                request_ctx.max_response_wait_iterations,
             )
             .await
         {
             Ok(response) => Ok((conn, response)),
             Err(primary_error) => {
                 let _ = conn.shutdown().await;
-                if !should_attempt_protocol_fallback(init_request, &primary_error, false) {
+                if !should_attempt_protocol_fallback(request_ctx.request, &primary_error, false) {
                     return Err(primary_error);
                 }
 
@@ -610,9 +596,9 @@ impl ProcessManager {
                 .await?;
                 match fallback_conn
                     .request(
-                        init_request,
-                        timeout_duration,
-                        defaults.max_response_wait_iterations,
+                        request_ctx.request,
+                        request_ctx.timeout_duration,
+                        request_ctx.max_response_wait_iterations,
                     )
                     .await
                 {
