@@ -285,7 +285,7 @@ impl SkillsService {
             .filter(|entry| entry.record.status == ConfirmationStatus::Pending)
             .map(|entry| entry.record.clone())
             .collect::<Vec<_>>();
-        list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        list.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
         list
     }
 
@@ -1108,7 +1108,7 @@ fn discover_skills_sync(roots: &[String]) -> Result<Vec<DiscoveredSkill>, AppErr
         }
     }
 
-    discovered.sort_by(|left, right| left.skill.to_lowercase().cmp(&right.skill.to_lowercase()));
+    discovered.sort_by_key(|entry| entry.skill.to_lowercase());
     Ok(discovered)
 }
 
