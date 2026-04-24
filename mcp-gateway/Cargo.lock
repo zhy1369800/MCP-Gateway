@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-http"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "chrono",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-integration-tests"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gateway-core",
  "serde_json",

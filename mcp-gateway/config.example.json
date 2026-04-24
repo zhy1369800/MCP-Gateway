@@ -870,139 +870,139 @@
           "reason": "Network download command is blocked"
         },
         {
-          "id": "deny-set-content",
-          "action": "deny",
+          "id": "confirm-set-content",
+          "action": "confirm",
           "commandTree": [
             "set-content"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-add-content",
-          "action": "deny",
+          "id": "confirm-add-content",
+          "action": "confirm",
           "commandTree": [
             "add-content"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-clear-content",
-          "action": "deny",
+          "id": "confirm-clear-content",
+          "action": "confirm",
           "commandTree": [
             "clear-content"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-out-file",
-          "action": "deny",
+          "id": "confirm-out-file",
+          "action": "confirm",
           "commandTree": [
             "out-file"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-tee",
-          "action": "deny",
+          "id": "confirm-tee",
+          "action": "confirm",
           "commandTree": [
             "tee"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-sed",
-          "action": "deny",
+          "id": "confirm-sed",
+          "action": "confirm",
           "commandTree": [
             "sed"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-awk",
-          "action": "deny",
+          "id": "confirm-awk",
+          "action": "confirm",
           "commandTree": [
             "awk"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-perl",
-          "action": "deny",
+          "id": "confirm-perl",
+          "action": "confirm",
           "commandTree": [
             "perl"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-ed",
-          "action": "deny",
+          "id": "confirm-ed",
+          "action": "confirm",
           "commandTree": [
             "ed"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-ex",
-          "action": "deny",
+          "id": "confirm-ex",
+          "action": "confirm",
           "commandTree": [
             "ex"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-vi",
-          "action": "deny",
+          "id": "confirm-vi",
+          "action": "confirm",
           "commandTree": [
             "vi"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-vim",
-          "action": "deny",
+          "id": "confirm-vim",
+          "action": "confirm",
           "commandTree": [
             "vim"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-nvim",
-          "action": "deny",
+          "id": "confirm-nvim",
+          "action": "confirm",
           "commandTree": [
             "nvim"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-nano",
-          "action": "deny",
+          "id": "confirm-nano",
+          "action": "confirm",
           "commandTree": [
             "nano"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
-          "id": "deny-notepad",
-          "action": "deny",
+          "id": "confirm-notepad",
+          "action": "confirm",
           "commandTree": [
             "notepad"
           ],
           "contains": [],
-          "reason": "Text editing command is blocked"
+          "reason": "Text editing command requires confirmation"
         },
         {
           "id": "confirm-rm",

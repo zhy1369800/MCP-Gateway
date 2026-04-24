@@ -1021,109 +1021,109 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             reason: "Network download command is blocked".to_string(),
         },
         SkillCommandRule {
-            id: "deny-set-content".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-set-content".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["set-content".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-add-content".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-add-content".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["add-content".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-clear-content".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-clear-content".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["clear-content".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-out-file".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-out-file".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["out-file".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-tee".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-tee".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["tee".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-sed".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-sed".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["sed".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-awk".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-awk".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["awk".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-perl".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-perl".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["perl".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-ed".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-ed".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["ed".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-ex".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-ex".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["ex".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-vi".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-vi".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["vi".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-vim".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-vim".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["vim".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-nvim".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-nvim".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["nvim".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-nano".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-nano".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["nano".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
-            id: "deny-notepad".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-notepad".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["notepad".to_string()],
             contains: Vec::new(),
-            reason: "Text editing command is blocked".to_string(),
+            reason: "Text editing command requires confirmation".to_string(),
         },
         SkillCommandRule {
             id: "confirm-rm".to_string(),
@@ -1426,26 +1426,26 @@ mod tests {
     }
 
     #[test]
-    fn default_skills_rules_include_sensitive_and_editor_denies() {
+    fn default_skills_rules_include_sensitive_denies_and_editor_confirmations() {
         let rules = default_skills_command_rules();
-        let check = |id: &str| {
+        let check_action = |id: &str, action: SkillPolicyAction| {
             let rule = rules
                 .iter()
                 .find(|item| item.id == id)
                 .unwrap_or_else(|| panic!("missing rule: {id}"));
-            assert_eq!(rule.action, SkillPolicyAction::Deny);
+            assert_eq!(rule.action, action);
         };
 
-        check("deny-sudo");
-        check("deny-runas");
-        check("deny-pkexec");
-        check("deny-launchctl");
-        check("deny-invoke-expression");
-        check("deny-curl");
-        check("deny-bash-lc");
-        check("deny-set-content");
-        check("deny-sed");
-        check("deny-vim");
+        check_action("deny-sudo", SkillPolicyAction::Deny);
+        check_action("deny-runas", SkillPolicyAction::Deny);
+        check_action("deny-pkexec", SkillPolicyAction::Deny);
+        check_action("deny-launchctl", SkillPolicyAction::Deny);
+        check_action("deny-invoke-expression", SkillPolicyAction::Deny);
+        check_action("deny-curl", SkillPolicyAction::Deny);
+        check_action("deny-bash-lc", SkillPolicyAction::Deny);
+        check_action("confirm-set-content", SkillPolicyAction::Confirm);
+        check_action("confirm-sed", SkillPolicyAction::Confirm);
+        check_action("confirm-vim", SkillPolicyAction::Confirm);
     }
 
     #[test]

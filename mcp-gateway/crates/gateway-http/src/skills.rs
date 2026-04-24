@@ -423,13 +423,14 @@ impl SkillsService {
         );
         match policy {
             PolicyDecision::Deny(reason) => {
-                let reason_text = reason.clone();
                 return Ok(tool_error(
-                    format!("command blocked by policy: {reason_text}"),
+                    mcp_gateway_policy_denied_text(&reason),
                     json!({
                         "status": "blocked",
                         "reason": reason,
-                        "command": command_preview
+                        "command": command_preview,
+                        "policyAction": "deny",
+                        "nextStep": "把匹配的 skills.policy 规则或 skills.policy.defaultAction 改为 confirm 让用户确认运行，或改为 allow 让它默认运行，然后重试。"
                     }),
                 ));
             }
@@ -807,9 +808,9 @@ fn tool_error(text: String, structured: Value) -> ToolResult {
 
 fn confirmation_rejected_result(confirmation_id: &str, timed_out: bool) -> ToolResult {
     let text = if timed_out {
-        "confirmation timed out after 60 seconds; auto rejected"
+        "MCP Gateway 已拒绝此命令：确认请求 60 秒内未被批准，命令没有执行。要执行该命令，请重新提交并在 Pending Confirmations 中批准；或者把匹配的 skills.policy 规则改为 allow，让它默认运行。"
     } else {
-        "user rejected confirmation request"
+        "MCP Gateway 已拒绝此命令：用户拒绝了确认请求，命令没有执行。要执行该命令，请重新提交并在 Pending Confirmations 中批准；或者把匹配的 skills.policy 规则改为 allow，让它默认运行。"
     };
     let reason = if timed_out {
         "timeout"
@@ -823,6 +824,12 @@ fn confirmation_rejected_result(confirmation_id: &str, timed_out: bool) -> ToolR
             "reason": reason,
             "confirmationId": confirmation_id
         }),
+    )
+}
+
+fn mcp_gateway_policy_denied_text(reason: &str) -> String {
+    format!(
+        "MCP Gateway 已拒绝此命令：命令命中了网关拒绝策略或默认拒绝规则，因此没有执行。原因：{reason}。要执行该命令，请把匹配的 skills.policy 规则或 skills.policy.defaultAction 改为 \"confirm\" 让用户确认运行，或改为 \"allow\" 让它默认运行，然后重试。"
     )
 }
 
@@ -1897,6 +1904,42 @@ mod tests {
             PolicyDecision::Allow => {}
             _ => panic!("expected allow decision"),
         }
+    }
+
+    #[test]
+    fn default_text_write_commands_require_confirmation() {
+        let skills = SkillsConfig::default();
+        let raw = "Set-Content -Path note.txt -Value hello";
+        let decision = evaluate_policy(
+            &skills,
+            "Set-Content",
+            &[
+                String::from("-Path"),
+                String::from("note.txt"),
+                String::from("-Value"),
+                String::from("hello"),
+            ],
+            raw,
+            Path::new("scripts/write.ps1"),
+            None,
+        );
+
+        match decision {
+            PolicyDecision::Confirm(reason) => {
+                assert!(reason.contains("confirm-set-content"));
+            }
+            _ => panic!("expected confirm decision"),
+        }
+    }
+
+    #[test]
+    fn policy_denied_text_explains_gateway_rejection() {
+        let text = mcp_gateway_policy_denied_text("matched default policy");
+
+        assert!(text.contains("MCP Gateway"));
+        assert!(text.contains("已拒绝此命令"));
+        assert!(text.contains("confirm"));
+        assert!(text.contains("allow"));
     }
 
     #[test]

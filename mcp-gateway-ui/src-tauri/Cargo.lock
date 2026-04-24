@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-http"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "chrono",
@@ -2160,7 +2160,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcp-gateway-ui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "chrono",
