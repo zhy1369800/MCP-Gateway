@@ -422,6 +422,13 @@ function stripIndexKeyedEntries<T>(entries: Record<string, T>): Record<string, T
   ) as Record<string, T>;
 }
 
+function createGatewayDisplayBaseUrl(listen: string, remoteUrl: string, isRemoteMode: boolean): string {
+  if (isRemoteMode && remoteUrl.trim()) {
+    return remoteUrl.trim().replace(/\/+$/, "");
+  }
+  return listen.startsWith("http") ? listen : `http://${listen}`;
+}
+
 function createMcpClientEntryJson(
   name: string,
   type: EndpointTransportType,
@@ -1411,6 +1418,10 @@ function App() {
   });
 
   const running = !!status?.running;
+  const displayBaseUrl = useMemo(
+    () => createGatewayDisplayBaseUrl(listen, remoteUrl, isRemoteMode),
+    [listen, remoteUrl, isRemoteMode],
+  );
 
   const refreshServerAuthStates = useCallback(async (): Promise<PollOutcome> => {
     if (servers.length === 0) {
@@ -2163,9 +2174,8 @@ function App() {
     };
   }, [draggedServerIndex, findServerDropTarget, resetServerDragState, serverUiIds, servers, updateDraggedServerPreview]);
 
-  const baseUrl = listen.startsWith("http") ? listen : `http://${listen}`;
-  const skillHttpUrl = `${baseUrl}${httpPath}/${skills.serverName}`;
-  const skillSseUrl = `${baseUrl}${ssePath}/${skills.serverName}`;
+  const skillHttpUrl = `${displayBaseUrl}${httpPath}/${skills.serverName}`;
+  const skillSseUrl = `${displayBaseUrl}${ssePath}/${skills.serverName}`;
   const runtimeLoading = !localRuntimeSummary && !localRuntimeDetectFailed;
   const runtimeCards = useMemo(() => ([
     {
@@ -2359,7 +2369,14 @@ function App() {
                 <div className="gw-field">
                   <label className="field-label">{t("listenAddress")}</label>
                   <input className="form-input" placeholder="127.0.0.1:8765"
-                    value={listen} onChange={(e) => setListen(e.target.value)} />
+                    value={listen}
+                    onChange={(e) => setListen(e.target.value)}
+                    readOnly={isRemoteMode}
+                    title={isRemoteMode ? remoteUrl : undefined}
+                  />
+                  {isRemoteMode && (
+                    <span className="json-hint">Remote URL: {displayBaseUrl}</span>
+                  )}
                 </div>
                 <div className="gw-field">
                   <label className="field-label">{t("ssePath")}</label>
@@ -2464,7 +2481,7 @@ function App() {
                           </div>
                           <ServerRow server={s}
                             running={running}
-                            baseUrl={baseUrl}
+                            baseUrl={displayBaseUrl}
                             ssePath={ssePath}
                             httpPath={httpPath}
                             copied={copied}
