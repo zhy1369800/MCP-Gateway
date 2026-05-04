@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
@@ -44,6 +44,10 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
         .route(
             &format!("{}/admin/skills/validate-root", prefix),
             post(validate_skill_root),
+        )
+        .route(
+            &format!("{}/admin/skills/upload", prefix),
+            post(upload_skill_root),
         )
         .route(
             &format!("{}/admin/skills/confirmations", prefix),
@@ -399,6 +403,16 @@ pub struct SkillDirectoryValidation {
     has_skill_md: bool,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillUploadResult {
+    path: String,
+    exists: bool,
+    is_dir: bool,
+    has_skill_md: bool,
+    uploaded_files: usize,
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidateSkillRootRequest {
@@ -438,6 +452,147 @@ pub async fn validate_skill_root(
         is_dir,
         has_skill_md,
     }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/admin/skills/upload",
+    responses((status = 200, description = "Upload local skill directory to remote root", body = SkillUploadResult))
+)]
+pub async fn upload_skill_root(
+    State(_state): State<AppState>,
+    mut multipart: Multipart,
+) -> ApiResult<SkillUploadResult> {
+    let mut target_root: Option<String> = None;
+    let mut uploaded_files = 0usize;
+    let mut skill_name: Option<String> = None;
+    let mut uploaded_root: Option<PathBuf> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|err| response::err_response(AppError::BadRequest(format!("invalid multipart body: {err}"))))?
+    {
+        let Some(name) = field.name().map(str::to_string) else {
+            continue;
+        };
+
+        if name == "targetRoot" {
+            let value = field
+                .text()
+                .await
+                .map_err(|err| response::err_response(AppError::BadRequest(format!("invalid targetRoot field: {err}"))))?;
+            target_root = Some(value.trim().to_string());
+            continue;
+        }
+
+        if name != "files" {
+            continue;
+        }
+
+        let file_name = field.file_name().map(str::to_string).ok_or_else(|| {
+            response::err_response(AppError::BadRequest("uploaded file is missing a relative path".to_string()))
+        })?;
+        let target_root = target_root.clone().ok_or_else(|| {
+            response::err_response(AppError::BadRequest("targetRoot is required before files".to_string()))
+        })?;
+        let rel_path = sanitize_upload_relative_path(&file_name)
+            .map_err(response::err_response)?;
+        let mut components = rel_path.components();
+        let Some(first) = components.next() else {
+            return Err(response::err_response(AppError::BadRequest(
+                "uploaded file path cannot be empty".to_string(),
+            )));
+        };
+        let first = first.as_os_str().to_string_lossy().to_string();
+        if first.trim().is_empty() {
+            return Err(response::err_response(AppError::BadRequest(
+                "uploaded file path cannot have empty root segment".to_string(),
+            )));
+        }
+        if let Some(existing) = &skill_name {
+            if existing != &first {
+                return Err(response::err_response(AppError::BadRequest(
+                    "please upload files from a single top-level folder".to_string(),
+                )));
+            }
+        } else {
+            skill_name = Some(first.clone());
+        }
+
+        let skill_root = PathBuf::from(&target_root).join(&first);
+        uploaded_root = Some(skill_root.clone());
+        let relative_inside_skill = components.as_path();
+        let target_path = if relative_inside_skill.as_os_str().is_empty() {
+            skill_root.join("SKILL.md")
+        } else {
+            skill_root.join(relative_inside_skill)
+        };
+
+        if let Some(parent) = target_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| response::err_response(AppError::Internal(format!("failed to create upload directory: {err}"))))?;
+        }
+
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|err| response::err_response(AppError::BadRequest(format!("failed to read uploaded file: {err}"))))?;
+        tokio::fs::write(&target_path, bytes)
+            .await
+            .map_err(|err| response::err_response(AppError::Internal(format!("failed to write uploaded file: {err}"))))?;
+        uploaded_files += 1;
+    }
+
+    let Some(path) = uploaded_root else {
+        return Err(response::err_response(AppError::BadRequest(
+            "no files were uploaded".to_string(),
+        )));
+    };
+
+    let metadata = tokio::fs::metadata(&path).await.ok();
+    let exists = metadata.is_some();
+    let is_dir = metadata.as_ref().is_some_and(|meta| meta.is_dir());
+    let has_skill_md = if is_dir {
+        tokio::fs::metadata(path.join("SKILL.md")).await.is_ok()
+    } else {
+        false
+    };
+
+    Ok(response::ok(SkillUploadResult {
+        path: path.to_string_lossy().to_string(),
+        exists,
+        is_dir,
+        has_skill_md,
+        uploaded_files,
+    }))
+}
+
+fn sanitize_upload_relative_path(input: &str) -> Result<PathBuf, AppError> {
+    use std::path::Component;
+
+    let candidate = PathBuf::from(input.replace('\\', "/"));
+    if candidate.is_absolute() {
+        return Err(AppError::BadRequest("absolute file paths are not allowed".to_string()));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(AppError::BadRequest("parent traversal is not allowed in uploaded paths".to_string()));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(AppError::BadRequest("uploaded file path cannot be empty".to_string()));
+    }
+
+    Ok(normalized)
 }
 
 #[utoipa::path(
