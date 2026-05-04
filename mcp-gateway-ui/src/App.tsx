@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   Play,
   Square,
@@ -688,6 +688,7 @@ function SkillDirectoryListEditor({
   onPathChange,
   onValidate,
   onBrowse,
+  browseLabel,
   onToggleEnabled,
   enableToggle = false,
   showValidation = true,
@@ -701,6 +702,7 @@ function SkillDirectoryListEditor({
   onPathChange: (id: string, value: string) => void;
   onValidate?: (id: string) => void;
   onBrowse: (id: string) => void;
+  browseLabel?: string;
   onToggleEnabled?: (id: string) => void;
   enableToggle?: boolean;
   showValidation?: boolean;
@@ -747,7 +749,7 @@ function SkillDirectoryListEditor({
             />
             <button className="btn btn-secondary btn-sm skills-dir-browse" onClick={() => onBrowse(item.id)}>
               <FolderOpen size={13} />
-              {t("browseFolder")}
+              {browseLabel ?? t("browseFolder")}
             </button>
             {showValidation && (
               <>
@@ -1063,6 +1065,8 @@ function App() {
   const [status, setStatus] = useState<GatewayProcessStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const skillUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingSkillUploadItemIdRef = useRef<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [autoTestingServers, setAutoTestingServers] = useState(false);
   const [serverTestStates, setServerTestStates] = useState<Record<string, ServerTestState>>({});
@@ -1763,6 +1767,13 @@ function App() {
   const browseRootItem = async (id: string) => {
     const target = skillRootItems.find((item) => item.id === id);
     if (!target) return;
+
+    if (isRemoteMode) {
+      pendingSkillUploadItemIdRef.current = id;
+      skillUploadInputRef.current?.click();
+      return;
+    }
+
     try {
       const selected = await pickFolderDialog(target.path.trim() || undefined);
       if (!selected) return;
@@ -1786,6 +1797,12 @@ function App() {
   const browseWhitelistItem = async (id: string) => {
     const target = skillWhitelistItems.find((item) => item.id === id);
     if (!target) return;
+
+    if (isRemoteMode) {
+      setError(t("remoteBrowseUnsupported"));
+      return;
+    }
+
     try {
       const selected = await pickFolderDialog(target.path.trim() || undefined);
       if (!selected) return;
@@ -1794,6 +1811,44 @@ function App() {
       ));
     } catch (error) {
       setError(String(error));
+    }
+  };
+
+  const handleRemoteSkillUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.target;
+    const targetId = pendingSkillUploadItemIdRef.current;
+    pendingSkillUploadItemIdRef.current = null;
+    const fileList = input.files;
+    if (!targetId || !fileList || fileList.length === 0) {
+      input.value = "";
+      return;
+    }
+
+    const files = Array.from(fileList);
+    setError(null);
+    setRootItemsAndSync(skillRootItems.map((item) =>
+      item.id === targetId ? { ...item, status: "checking", enabled: false } : item
+    ));
+
+    try {
+      const result = await apiClient.uploadSkillDirectory(files, "/data/skills");
+      setRootItemsAndSync(skillRootItems.map((item) =>
+        item.id === targetId
+          ? {
+              ...item,
+              path: result.path,
+              status: skillDirectoryStatusFromResult(result),
+              enabled: false,
+            }
+          : item
+      ));
+    } catch (error) {
+      setError(asErrorMessage(error));
+      setRootItemsAndSync(skillRootItems.map((item) =>
+        item.id === targetId ? { ...item, status: "error", enabled: false } : item
+      ));
+    } finally {
+      input.value = "";
     }
   };
 
@@ -2275,6 +2330,15 @@ function App() {
         </button>
       </div>
 
+      <input
+        ref={skillUploadInputRef}
+        type="file"
+        style={{ display: "none" }}
+        multiple
+        webkitdirectory=""
+        onChange={handleRemoteSkillUpload}
+      />
+
       {/* ── 错误提示 ── */}
       {error && (
         <div className="alert alert-error" style={{ margin: "10px 20px 0" }}>
@@ -2503,6 +2567,7 @@ function App() {
                   onPathChange={updateRootItemPath}
                   onValidate={validateRootItem}
                   onBrowse={browseRootItem}
+                  browseLabel={isRemoteMode ? t("uploadFolder") : t("browseFolder")}
                   onToggleEnabled={toggleRootItemEnabled}
                   enableToggle
                   t={t}
@@ -2582,6 +2647,7 @@ function App() {
                   onRemove={requestRemoveWhitelistItem}
                   onPathChange={updateWhitelistItemPath}
                   onBrowse={browseWhitelistItem}
+                  browseLabel={t("browseFolder")}
                   showValidation={false}
                   t={t}
                 />

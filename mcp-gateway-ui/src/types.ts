@@ -186,6 +186,11 @@ export interface SkillDirectoryValidation {
   hasSkillMd: boolean;
 }
 
+export interface SkillUploadResult extends SkillDirectoryValidation {
+  path: string;
+  uploadedFiles: number;
+}
+
 export interface LocalRuntimeAvailability {
   installed: boolean;
   version: string | null;

@@ -7,6 +7,7 @@ import type {
   SkillConfirmation,
   SkillDirectoryValidation,
   SkillSummary,
+  SkillUploadResult,
   ServerConfig,
   ToolListResult,
 } from "./types";
@@ -159,6 +160,44 @@ export class ApiClient {
 
   async validateSkillDirectory(path: string): Promise<SkillDirectoryValidation> {
     return this.request<SkillDirectoryValidation>("POST", "/admin/skills/validate-root", toJsonValue({ path }));
+  }
+
+  async uploadSkillDirectory(files: File[], targetRoot: string): Promise<SkillUploadResult> {
+    const headers: Record<string, string> = {};
+    if (this.adminToken) {
+      headers.Authorization = `Bearer ${this.adminToken}`;
+    }
+
+    const form = new FormData();
+    form.append("targetRoot", targetRoot);
+    for (const file of files) {
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+      form.append("files", file, relativePath);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS * 10);
+    try {
+      const response = await fetch(`${this.baseUrl}${this.apiPrefix}/admin/skills/upload`, {
+        method: "POST",
+        headers,
+        body: form,
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      const payload = JSON.parse(text) as ApiEnvelope<SkillUploadResult>;
+      if (!response.ok || payload.ok === false || !payload.data) {
+        throw new Error(payload.error?.message || `HTTP ${response.status} ${response.statusText}`);
+      }
+      return payload.data;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("Skill upload timed out");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async listSkillConfirmations(): Promise<SkillConfirmation[]> {
