@@ -1103,10 +1103,20 @@ function App() {
   const latestPointerClientYRef = useRef<number | null>(null);
   const serverBlockRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const serverDropTargetRef = useRef<ServerDragTarget | null>(null);
-  const apiClient = useMemo(
-    () => new ApiClient(listen, adminToken, apiPrefix),
-    [adminToken, apiPrefix, listen],
-  );
+
+  const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem("mcp_remote_url") || "");
+  const [isRemoteMode, setIsRemoteMode] = useState(localStorage.getItem("mcp_remote_mode") === "true");
+
+  const apiClient = useMemo(() => {
+    const effectiveBaseUrl = isRemoteMode ? remoteUrl : listen;
+    return new ApiClient(effectiveBaseUrl, adminToken, apiPrefix);
+  }, [isRemoteMode, remoteUrl, listen, adminToken, apiPrefix]);
+
+  useEffect(() => {
+    localStorage.setItem("mcp_remote_url", remoteUrl);
+    localStorage.setItem("mcp_remote_mode", String(isRemoteMode));
+  }, [remoteUrl, isRemoteMode]);
+
   const createServerUiId = useCallback(() => `server-ui-${serverUiIdSeqRef.current++}`, []);
   const createServerUiIds = useCallback(
     (count: number) => Array.from({ length: count }, () => createServerUiId()),
@@ -1221,7 +1231,7 @@ function App() {
 
   // ── 初始加载配置 ──
   useEffect(() => {
-    Promise.all([loadLocalConfig(), getDefaultSkillRules().catch(() => [])]).then(([cfg, builtinRules]) => {
+    const applyConfig = (cfg: GatewayConfig, builtinRules: SkillCommandRule[]) => {
       setDefaultSkillRules(builtinRules);
       const nextServers = cfg.servers ?? [];
       const nextListen = cfg.listen || "127.0.0.1:8765";
@@ -1240,7 +1250,6 @@ function App() {
       setApiPrefix(nextApiPrefix);
       setSsePath(nextSsePath);
       setHttpPath(nextHttpPath);
-      // 加载 Security 配置
       setAdminToken(nextAdminToken);
       setMcpToken(nextMcpToken);
       const nextSkills = ensureSkillsConfig(cfg.skills, builtinRules);
@@ -1280,13 +1289,36 @@ function App() {
         skills: nextSkills,
       })));
       setConfigLoaded(true);
-    }).catch((e) => setError(String(e)));
-    // 获取配置文件路径
-    getConfigPath().then(setConfigPath).catch(() => {});
-  }, [createServerUiIds, runItemValidation]);
+    };
+
+    const init = async () => {
+      try {
+        const builtinRules = await getDefaultSkillRules().catch(() => []);
+        if (isRemoteMode && remoteUrl.trim()) {
+          const cfg = await apiClient.getConfig();
+          applyConfig(cfg, builtinRules);
+        } else {
+          const cfg = await loadLocalConfig();
+          applyConfig(cfg, builtinRules);
+          getConfigPath().then(setConfigPath).catch(() => {});
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    };
+
+    void init();
+  }, [apiClient, createServerUiIds, isRemoteMode, remoteUrl, runItemValidation]);
 
   useEffect(() => {
     let cancelled = false;
+
+    if (isRemoteMode) {
+      setLocalRuntimeDetectFailed(true);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     detectLocalRuntimes()
       .then((summary) => {
@@ -1306,7 +1338,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isRemoteMode]);
 
   useEffect(() => {
     const baseTitle = `${t("windowTitle")} v${CURRENT_VERSION}`;
@@ -1352,13 +1384,18 @@ function App() {
   // ── 进程状态轮询 ──
   const refreshStatus = useCallback(async (): Promise<PollOutcome> => {
     try {
+      if (isRemoteMode) {
+        await apiClient.getHealth();
+        setStatus({ running: true } as GatewayProcessStatus);
+        return "active";
+      }
       const current = await getGatewayStatus();
       setStatus(current);
       return current.running ? "active" : "idle";
     } catch {
       return "error";
     }
-  }, []);
+  }, [apiClient, isRemoteMode]);
   usePolling(refreshStatus, {
     enabled: true,
     activeMs: 3000,
@@ -1810,6 +1847,19 @@ function App() {
       mcpToken,
       skills: ensureSkillsConfig(skills, defaultSkillRules),
     });
+
+    if (isRemoteMode) {
+      const cfg: GatewayConfig = await apiClient.getConfig();
+      cfg.servers = snapshot.servers;
+      cfg.listen = snapshot.listen;
+      cfg.apiPrefix = snapshot.apiPrefix;
+      cfg.transport = snapshot.transport;
+      cfg.security = snapshot.security;
+      cfg.skills = snapshot.skills;
+      await apiClient.updateConfig(cfg);
+      return createEditableConfigFingerprint(snapshot);
+    }
+
     const cfg: GatewayConfig = await loadLocalConfig();
     cfg.servers = snapshot.servers;
     cfg.listen = snapshot.listen;
@@ -1832,7 +1882,9 @@ function App() {
     try {
       const latestFingerprint = await persistConfig(nextServers);
       setSavedConfigFingerprint(latestFingerprint);
-      await startGateway();
+      if (!isRemoteMode) {
+        await startGateway();
+      }
       await refreshStatus();
       await fetchSkillPending();
       void runEnabledServerConnectivityTests(nextServers);
@@ -1843,7 +1895,9 @@ function App() {
   const handleStop = async () => {
     setError(null); setBusy(true);
     try {
-      await stopGateway();
+      if (!isRemoteMode) {
+        await stopGateway();
+      }
       await refreshStatus();
       setSkillPending([]);
       setAutoTestingServers(false);
@@ -2624,6 +2678,27 @@ function App() {
               <code className="bottom-bar-path">{configPath}</code>
             </>
           )}
+          {/* 远程模式入口 */}
+          <div style={{ marginLeft: '12px', borderLeft: '1px solid #ccc', paddingLeft: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <label style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer', color: '#666' }}>
+              <input 
+                type="checkbox" 
+                checked={isRemoteMode} 
+                onChange={(e) => setIsRemoteMode(e.target.checked)} 
+              />
+              Remote Mode
+            </label>
+            {isRemoteMode && (
+              <input 
+                type="text" 
+                className="form-input" 
+                style={{ height: '24px', fontSize: '11px', width: '200px', padding: '0 8px' }} 
+                placeholder="HuggingFace URL" 
+                value={remoteUrl} 
+                onChange={(e) => setRemoteUrl(e.target.value)} 
+              />
+            )}
+          </div>
         </div>
         <div className="bottom-bar-links" role="group" aria-label={t("quickLinks")}>
           <button

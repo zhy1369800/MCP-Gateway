@@ -38,22 +38,8 @@ pub fn spawn_idle_reaper(state: AppState) {
 }
 
 fn build_cors_layer() -> CorsLayer {
-    let allow_origin = AllowOrigin::predicate(|origin: &HeaderValue, _| {
-        let Ok(origin) = origin.to_str() else {
-            return false;
-        };
-
-        origin == "tauri://localhost"
-            || origin == "http://tauri.localhost"
-            || origin == "https://tauri.localhost"
-            || origin.starts_with("http://localhost:")
-            || origin.starts_with("http://127.0.0.1:")
-            || origin.starts_with("https://localhost:")
-            || origin.starts_with("https://127.0.0.1:")
-    });
-
     CorsLayer::new()
-        .allow_origin(allow_origin)
+        .allow_origin(tower_http::cors::Any)
         .allow_methods([
             Method::GET,
             Method::POST,

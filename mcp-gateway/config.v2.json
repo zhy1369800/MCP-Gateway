@@ -7,11 +7,11 @@
   "security": {
     "mcp": {
       "enabled": false,
-      "token": "replace-with-random-mcp-token"
+      "token": "123456"
     },
     "admin": {
       "enabled": true,
-      "token": "replace-with-random-admin-token"
+      "token": "123456"
     }
   },
   "transport": {
