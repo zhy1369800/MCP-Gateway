@@ -1483,6 +1483,23 @@ function App() {
     }));
 
     try {
+      if (isRemoteMode) {
+        await apiClient.testServerByName(server.name);
+        setServerTestStates((prev) => ({
+          ...prev,
+          [key]: {
+            status: "success",
+            message: "",
+            testedAt: new Date().toISOString(),
+          },
+        }));
+        setServerAuthStates((prev) => ({
+          ...prev,
+          [key]: createEmptyAuthState(),
+        }));
+        return;
+      }
+
       const result: ServerConnectivityTestResult = await testMcpServerLocal(server);
       const nextStatus: ServerTestStatus = result.ok
         ? "success"
@@ -1510,7 +1527,7 @@ function App() {
         },
       }));
     }
-  }, [t]);
+  }, [apiClient, isRemoteMode, t]);
 
   const runServerReauthorize = useCallback(async (server: ServerConfig, index: number) => {
     const key = serverTestKey(index, server);

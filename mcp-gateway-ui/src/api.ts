@@ -127,6 +127,10 @@ export class ApiClient {
     return this.request<ServerConfig>("POST", "/admin/servers", toJsonValue(server));
   }
 
+  async testServerByName(name: string): Promise<JsonValue> {
+    return this.request<JsonValue>("POST", `/admin/servers/${encodeURIComponent(name)}/test`);
+  }
+
   async updateServer(name: string, server: ServerConfig): Promise<ServerConfig> {
     return this.request<ServerConfig>(
       "PUT",
