@@ -5,6 +5,7 @@ import type {
   HealthData,
   JsonValue,
   SkillConfirmation,
+  SkillDirectoryValidation,
   SkillSummary,
   ServerConfig,
   ToolListResult,
@@ -154,6 +155,10 @@ export class ApiClient {
 
   async listSkills(): Promise<SkillSummary[]> {
     return this.request<SkillSummary[]>("GET", "/admin/skills");
+  }
+
+  async validateSkillDirectory(path: string): Promise<SkillDirectoryValidation> {
+    return this.request<SkillDirectoryValidation>("POST", "/admin/skills/validate-root", toJsonValue({ path }));
   }
 
   async listSkillConfirmations(): Promise<SkillConfirmation[]> {

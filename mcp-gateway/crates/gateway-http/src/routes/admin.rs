@@ -1,10 +1,11 @@
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::response::{self, ApiResult};
@@ -40,6 +41,10 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
             get(export_mcp_servers_payload),
         )
         .route(&format!("{}/admin/skills", prefix), get(get_skills))
+        .route(
+            &format!("{}/admin/skills/validate-root", prefix),
+            post(validate_skill_root),
+        )
         .route(
             &format!("{}/admin/skills/confirmations", prefix),
             get(get_pending_skill_confirmations),
@@ -384,6 +389,55 @@ pub async fn get_skills(State(state): State<AppState>) -> ApiResult<Vec<SkillSum
         .await
         .map_err(response::err_response)?;
     Ok(response::ok(skills))
+}
+
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDirectoryValidation {
+    exists: bool,
+    is_dir: bool,
+    has_skill_md: bool,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidateSkillRootRequest {
+    path: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/admin/skills/validate-root",
+    request_body = ValidateSkillRootRequest,
+    responses((status = 200, description = "Skill root validation result", body = SkillDirectoryValidation))
+)]
+pub async fn validate_skill_root(
+    State(_state): State<AppState>,
+    Json(payload): Json<ValidateSkillRootRequest>,
+) -> ApiResult<SkillDirectoryValidation> {
+    let path = PathBuf::from(payload.path.trim());
+    if payload.path.trim().is_empty() {
+        return Ok(response::ok(SkillDirectoryValidation {
+            exists: false,
+            is_dir: false,
+            has_skill_md: false,
+        }));
+    }
+
+    let metadata = tokio::fs::metadata(&path).await.ok();
+    let exists = metadata.is_some();
+    let is_dir = metadata.as_ref().is_some_and(|meta| meta.is_dir());
+    let has_skill_md = if is_dir {
+        tokio::fs::metadata(path.join("SKILL.md")).await.is_ok()
+    } else {
+        false
+    };
+
+    Ok(response::ok(SkillDirectoryValidation {
+        exists,
+        is_dir,
+        has_skill_md,
+    }))
 }
 
 #[utoipa::path(

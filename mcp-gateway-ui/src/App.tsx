@@ -1212,12 +1212,14 @@ function App() {
     }
 
     try {
-      const result = await validateSkillDirectory(normalized);
+      const result = isRemoteMode
+        ? await apiClient.validateSkillDirectory(normalized)
+        : await validateSkillDirectory(normalized);
       updateItemStatus(kind, id, normalized, skillDirectoryStatusFromResult(result));
     } catch {
       updateItemStatus(kind, id, normalized, "error");
     }
-  }, [updateItemStatus]);
+  }, [apiClient, isRemoteMode, updateItemStatus]);
 
   const triggerItemValidation = useCallback((kind: "roots" | "whitelist", id: string, path: string) => {
     const normalized = path.trim();
