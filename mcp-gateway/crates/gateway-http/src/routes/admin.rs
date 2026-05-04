@@ -5,6 +5,7 @@ use axum::extract::{Multipart, Path, Query, State};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
+use crate::terminal::TerminalTaskSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -39,6 +40,18 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
         .route(
             &format!("{}/admin/export/mcp-servers", prefix),
             get(export_mcp_servers_payload),
+        )
+        .route(
+            &format!("{}/admin/terminal/execute", prefix),
+            post(execute_terminal_command),
+        )
+        .route(
+            &format!("{}/admin/terminal/tasks/:task_id", prefix),
+            get(get_terminal_task),
+        )
+        .route(
+            &format!("{}/admin/terminal/tasks/:task_id/kill", prefix),
+            post(kill_terminal_task),
         )
         .route(&format!("{}/admin/skills", prefix), get(get_skills))
         .route(
@@ -298,6 +311,67 @@ pub async fn get_server_tools(
         .map_err(response::err_response)?;
 
     Ok(response::ok(json!({"refresh": refresh, "result": result})))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteTerminalRequest {
+    command: String,
+    cwd: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/admin/terminal/execute",
+    request_body = ExecuteTerminalRequest,
+    responses((status = 200, description = "Execute terminal command", body = TerminalTaskSnapshot))
+)]
+pub async fn execute_terminal_command(
+    State(state): State<AppState>,
+    Json(payload): Json<ExecuteTerminalRequest>,
+) -> ApiResult<TerminalTaskSnapshot> {
+    let snapshot = state
+        .terminal
+        .execute(payload.command, payload.cwd)
+        .await
+        .map_err(response::err_response)?;
+    Ok(response::ok(snapshot))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/admin/terminal/tasks/{task_id}",
+    params(("task_id" = String, Path, description = "Terminal task id")),
+    responses((status = 200, description = "Terminal task snapshot", body = TerminalTaskSnapshot))
+)]
+pub async fn get_terminal_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> ApiResult<TerminalTaskSnapshot> {
+    let snapshot = state
+        .terminal
+        .get(&task_id)
+        .await
+        .map_err(response::err_response)?;
+    Ok(response::ok(snapshot))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/admin/terminal/tasks/{task_id}/kill",
+    params(("task_id" = String, Path, description = "Terminal task id")),
+    responses((status = 200, description = "Killed terminal task", body = TerminalTaskSnapshot))
+)]
+pub async fn kill_terminal_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> ApiResult<TerminalTaskSnapshot> {
+    let snapshot = state
+        .terminal
+        .kill(&task_id)
+        .await
+        .map_err(response::err_response)?;
+    Ok(response::ok(snapshot))
 }
 
 #[utoipa::path(

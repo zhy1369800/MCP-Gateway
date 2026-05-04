@@ -10,6 +10,7 @@ import type {
   SkillUploadResult,
   ServerConfig,
   ToolListResult,
+  TerminalTaskSnapshot,
 } from "./types";
 
 export function normalizeBaseUrl(baseUrl: string): string {
@@ -220,5 +221,17 @@ export class ApiClient {
       "POST",
       `/admin/skills/confirmations/${encodeURIComponent(id)}/reject`,
     );
+  }
+
+  async executeTerminalCommand(command: string, cwd: string): Promise<TerminalTaskSnapshot> {
+    return this.request<TerminalTaskSnapshot>("POST", "/admin/terminal/execute", toJsonValue({ command, cwd }));
+  }
+
+  async getTerminalTask(taskId: string): Promise<TerminalTaskSnapshot> {
+    return this.request<TerminalTaskSnapshot>("GET", `/admin/terminal/tasks/${encodeURIComponent(taskId)}`);
+  }
+
+  async killTerminalTask(taskId: string): Promise<TerminalTaskSnapshot> {
+    return this.request<TerminalTaskSnapshot>("POST", `/admin/terminal/tasks/${encodeURIComponent(taskId)}/kill`);
   }
 }

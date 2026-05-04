@@ -10,7 +10,7 @@ use gateway_core::{
     load_config_from_path, migrate_v1_to_v2_file, rotate_token, save_config_atomic,
     validate_config, ConfigService, ProcessManager, RunMode,
 };
-use gateway_http::{build_router, spawn_idle_reaper, AppState, SkillsService, SseHub};
+use gateway_http::{build_router, spawn_idle_reaper, AppState, SkillsService, SseHub, TerminalService};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -108,6 +108,7 @@ async fn main() -> Result<()> {
                 started_at: chrono::Utc::now(),
                 sse_hub: SseHub::new(),
                 skills: SkillsService::new(),
+                terminal: TerminalService::new(),
             };
 
             let app = build_router(state.clone(), &cfg);

@@ -4,6 +4,7 @@ mod response;
 mod routes;
 mod skills;
 mod state;
+mod terminal;
 
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 pub use openapi::ApiDoc;
 pub use skills::{ConfirmationStatus, SkillConfirmation, SkillSummary, SkillsService};
 pub use state::{AppState, SseHub};
+pub use terminal::{TerminalService, TerminalTaskSnapshot, TerminalTaskStatus};
 
 pub fn build_router(state: AppState, config: &GatewayConfig) -> Router {
     Router::new()

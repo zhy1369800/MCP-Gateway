@@ -16,6 +16,7 @@ const translations = {
     // Tab 标签
     tabMcp: "MCP",
     tabSkills: "SKILLS",
+    tabTerminal: "TERMINAL",
 
     // 网关设置
     gatewaySettings: "网关设置",
@@ -198,6 +199,14 @@ const translations = {
     updateViewRelease: "查看更新",
     updateDismiss: "关闭更新提示",
     updateCurrentOutdated: "当前版本已过时",
+
+    terminalTitle: "远程终端",
+    terminalCommand: "命令",
+    terminalCwd: "工作目录",
+    terminalRun: "执行",
+    terminalStop: "停止任务",
+    terminalOutput: "输出",
+    terminalIdle: "尚未执行命令。",
   },
   en: {
     // Topbar
@@ -213,6 +222,7 @@ const translations = {
     // Tab labels
     tabMcp: "MCP",
     tabSkills: "SKILLS",
+    tabTerminal: "TERMINAL",
 
     // Gateway settings
     gatewaySettings: "Gateway Settings",

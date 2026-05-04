@@ -47,6 +47,7 @@ import type {
   SkillPolicyAction,
   SkillsConfig,
   TerminalEncodingStatus,
+  TerminalTaskSnapshot,
 } from "./types";
 import { useT, type Lang } from "./i18n";
 import JsonEditor from "./components/JsonEditor";
@@ -1051,7 +1052,7 @@ function App() {
   };
 
   // ── Tab 状态 ──
-  const [activeTab, setActiveTab] = useState<"mcp" | "skills">("mcp");
+  const [activeTab, setActiveTab] = useState<"mcp" | "skills" | "terminal">("mcp");
 
   const [servers, setServers] = useState<ServerConfig[]>([]);
   const [listen, setListen] = useState("127.0.0.1:8765");
@@ -1072,6 +1073,10 @@ function App() {
   const [status, setStatus] = useState<GatewayProcessStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [terminalCommand, setTerminalCommand] = useState("");
+  const [terminalCwd, setTerminalCwd] = useState("/app");
+  const [terminalTask, setTerminalTask] = useState<TerminalTaskSnapshot | null>(null);
+  const [terminalBusy, setTerminalBusy] = useState(false);
   const skillUploadInputRef = useRef<HTMLInputElement | null>(null);
   const pendingSkillUploadItemIdRef = useRef<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -1711,6 +1716,65 @@ function App() {
     () => skillPending.find((item) => item.id === activeSkillPopupId) ?? null,
     [activeSkillPopupId, skillPending],
   );
+
+  useEffect(() => {
+    if (!terminalTask || terminalTask.status !== "running") {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await apiClient.getTerminalTask(terminalTask.taskId);
+        if (!cancelled) {
+          setTerminalTask(next);
+          if (next.status !== "running") {
+            setTerminalBusy(false);
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(asErrorMessage(err));
+          setTerminalBusy(false);
+        }
+      }
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [apiClient, terminalTask]);
+
+  const runTerminalCommand = useCallback(async () => {
+    if (!terminalCommand.trim()) {
+      return;
+    }
+    setError(null);
+    setTerminalBusy(true);
+    try {
+      const task = await apiClient.executeTerminalCommand(terminalCommand, terminalCwd);
+      setTerminalTask(task);
+      if (task.status !== "running") {
+        setTerminalBusy(false);
+      }
+    } catch (err) {
+      setError(asErrorMessage(err));
+      setTerminalBusy(false);
+    }
+  }, [apiClient, terminalCommand, terminalCwd]);
+
+  const stopTerminalCommand = useCallback(async () => {
+    if (!terminalTask) return;
+    try {
+      const next = await apiClient.killTerminalTask(terminalTask.taskId);
+      setTerminalTask(next);
+    } catch (err) {
+      setError(asErrorMessage(err));
+    } finally {
+      setTerminalBusy(false);
+    }
+  }, [apiClient, terminalTask]);
 
   const onRulesDraftChange = (value: string) => {
     setSkillsRulesDraft(value);
@@ -2355,6 +2419,12 @@ function App() {
             <span className="tab-badge">{skillPending.length}</span>
           )}
         </button>
+        <button
+          className={`tab-button ${activeTab === "terminal" ? "active" : ""}`}
+          onClick={() => setActiveTab("terminal")}
+        >
+          {t("tabTerminal")}
+        </button>
       </div>
 
       <input
@@ -2766,6 +2836,46 @@ function App() {
               />
             </section>
           </>
+        )}
+
+        {activeTab === "terminal" && (
+          <section className="config-section">
+            <div className="section-heading">{t("terminalTitle")}</div>
+            <div className="gateway-fields">
+              <div className="gw-field">
+                <label className="field-label">{t("terminalCwd")}</label>
+                <input className="form-input" value={terminalCwd} onChange={(e) => setTerminalCwd(e.target.value)} />
+              </div>
+              <div className="gw-field" style={{ gridColumn: "1 / -1" }}>
+                <label className="field-label">{t("terminalCommand")}</label>
+                <input
+                  className="form-input"
+                  value={terminalCommand}
+                  onChange={(e) => setTerminalCommand(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !terminalBusy) {
+                      void runTerminalCommand();
+                    }
+                  }}
+                  placeholder="pip install yt-dlp"
+                />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button className="btn btn-start" onClick={() => { void runTerminalCommand(); }} disabled={terminalBusy || !terminalCommand.trim()}>
+                {t("terminalRun")}
+              </button>
+              <button className="btn btn-stop" onClick={() => { void stopTerminalCommand(); }} disabled={!terminalTask || terminalTask.status !== "running"}>
+                {t("terminalStop")}
+              </button>
+            </div>
+            <div className="gw-field" style={{ marginTop: 12 }}>
+              <label className="field-label">{t("terminalOutput")}</label>
+              <pre className="form-textarea" style={{ minHeight: 260, whiteSpace: "pre-wrap", overflow: "auto" }}>{terminalTask
+                ? `$ ${terminalTask.command}\n\n${terminalTask.stdout}${terminalTask.stderr ? `\n${terminalTask.stderr}` : ""}\n\nstatus=${terminalTask.status}${terminalTask.exitCode !== null ? ` exit=${terminalTask.exitCode}` : ""}`
+                : t("terminalIdle")}</pre>
+            </div>
+          </section>
         )}
 
       </div>

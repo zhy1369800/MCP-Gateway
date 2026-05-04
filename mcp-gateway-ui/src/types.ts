@@ -212,3 +212,17 @@ export interface LocalRuntimeSummary {
   uv: LocalRuntimeAvailability;
   terminal: TerminalEncodingStatus;
 }
+
+export type TerminalTaskStatus = "running" | "completed" | "failed" | "killed" | "timeout";
+
+export interface TerminalTaskSnapshot {
+  taskId: string;
+  status: TerminalTaskStatus;
+  command: string;
+  cwd: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  startedAt: string;
+  endedAt: string | null;
+}
