@@ -36,11 +36,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /app/target/release/gateway /usr/local/bin/mcp-gateway
 
 # Prepare config file
-COPY mcp-gateway/config.v2.json ./config.json
+COPY mcp-gateway/config.v2.json /opt/bootstrap/default-config.json
 
 # Modify default listen address for Hugging Face (0.0.0.0:7860)
-RUN sed -i 's/"listen": "127.0.0.1:8765"/"listen": "0.0.0.0:7860"/g' config.json && \
-    sed -i 's/"allowNonLoopback": false/"allowNonLoopback": true/g' config.json
+RUN sed -i 's/"listen": "127.0.0.1:8765"/"listen": "0.0.0.0:7860"/g' /opt/bootstrap/default-config.json && \
+    sed -i 's/"allowNonLoopback": false/"allowNonLoopback": true/g' /opt/bootstrap/default-config.json
 
 # Expose Hugging Face mandatory port
 EXPOSE 7860
@@ -49,7 +49,10 @@ EXPOSE 7860
 ENV RUST_LOG=info
 ENV HOME=/app
 ENV XDG_CONFIG_HOME=/app
+ENV MCP_GATEWAY_CONFIG=/data/config/config.json
+ENV MCP_SKILLS_ROOT=/data/skills
 
+#挂载/dada
 # Start the server
 # Use 'server' subcommand from gateway-cli
-CMD ["mcp-gateway", "run", "--config", "config.json"]
+CMD ["sh", "-c", "mkdir -p /data/config /data/skills && if [ ! -f \"$MCP_GATEWAY_CONFIG\" ]; then cp /opt/bootstrap/default-config.json \"$MCP_GATEWAY_CONFIG\"; fi && exec mcp-gateway run --config \"$MCP_GATEWAY_CONFIG\""]

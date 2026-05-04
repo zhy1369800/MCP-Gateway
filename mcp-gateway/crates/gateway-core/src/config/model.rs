@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,8 @@ use crate::error::AppError;
 use super::validate::validate_config;
 
 const CONFIG_DIR_NAME: &str = "mcp-gateway";
+pub const ADMIN_TOKEN_ENV: &str = "MCP_GATEWAY_ADMIN_TOKEN";
+pub const MCP_TOKEN_ENV: &str = "MCP_GATEWAY_MCP_TOKEN";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1256,7 +1259,17 @@ pub fn apply_runtime_overrides(
     if let Some(l) = listen {
         cfg.listen = l;
     }
+    apply_token_env_overrides(cfg);
     normalize_config_in_place(cfg);
+}
+
+pub fn apply_token_env_overrides(cfg: &mut GatewayConfig) {
+    if let Ok(token) = env::var(ADMIN_TOKEN_ENV) {
+        cfg.security.admin.token = token;
+    }
+    if let Ok(token) = env::var(MCP_TOKEN_ENV) {
+        cfg.security.mcp.token = token;
+    }
 }
 
 pub fn normalize_config_in_place(cfg: &mut GatewayConfig) {

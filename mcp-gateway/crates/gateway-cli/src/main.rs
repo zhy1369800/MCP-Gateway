@@ -6,9 +6,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use cli::{Cli, Commands, TokenCommand};
 use gateway_core::{
-    apply_runtime_overrides, default_config_path, init_default_config, load_config_from_path,
-    migrate_v1_to_v2_file, rotate_token, save_config_atomic, validate_config, ConfigService,
-    ProcessManager, RunMode,
+    apply_runtime_overrides, apply_token_env_overrides, default_config_path, init_default_config,
+    load_config_from_path, migrate_v1_to_v2_file, rotate_token, save_config_atomic,
+    validate_config, ConfigService, ProcessManager, RunMode,
 };
 use gateway_http::{build_router, spawn_idle_reaper, AppState, SkillsService, SseHub};
 
@@ -43,8 +43,9 @@ async fn main() -> Result<()> {
         }
         Commands::Validate { config } => {
             let config_path = resolve_config_path(config)?;
-            let cfg = load_config_from_path(&config_path)
+            let mut cfg = load_config_from_path(&config_path)
                 .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            apply_token_env_overrides(&mut cfg);
             validate_config(&cfg)?;
             println!("Config is valid: {}", config_path.display());
             Ok(())

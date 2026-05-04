@@ -6,7 +6,8 @@ use tokio::sync::{Mutex, RwLock};
 use crate::error::AppError;
 
 use super::model::{
-    load_config_from_path, normalize_config_in_place, save_config_atomic, GatewayConfig,
+    apply_token_env_overrides, load_config_from_path, normalize_config_in_place,
+    save_config_atomic, GatewayConfig,
 };
 use super::validate::validate_config;
 
@@ -37,6 +38,7 @@ impl ConfigService {
     }
 
     pub async fn replace(&self, mut next: GatewayConfig) -> Result<GatewayConfig, AppError> {
+        apply_token_env_overrides(&mut next);
         normalize_config_in_place(&mut next);
         validate_config(&next)?;
         self.update(|_| Ok(next)).await
@@ -49,6 +51,7 @@ impl ConfigService {
         let _guard = self.update_lock.lock().await;
         let current = self.state.read().await.config.clone();
         let mut next = f(&current)?;
+        apply_token_env_overrides(&mut next);
         normalize_config_in_place(&mut next);
         validate_config(&next)?;
         save_config_async(self.path.as_ref().clone(), next.clone()).await?;
@@ -60,9 +63,13 @@ impl ConfigService {
 }
 
 async fn load_config_async(path: PathBuf) -> Result<GatewayConfig, AppError> {
-    tokio::task::spawn_blocking(move || load_config_from_path(path.as_path()))
+    let mut cfg = tokio::task::spawn_blocking(move || load_config_from_path(path.as_path()))
         .await
-        .map_err(|err| AppError::Internal(format!("join error when loading config: {err}")))?
+        .map_err(|err| AppError::Internal(format!("join error when loading config: {err}")))??;
+    apply_token_env_overrides(&mut cfg);
+    normalize_config_in_place(&mut cfg);
+    validate_config(&cfg)?;
+    Ok(cfg)
 }
 
 async fn save_config_async(path: PathBuf, cfg: GatewayConfig) -> Result<(), AppError> {
