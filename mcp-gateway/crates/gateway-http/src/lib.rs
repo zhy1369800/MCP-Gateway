@@ -20,6 +20,7 @@ pub use terminal::{TerminalService, TerminalTaskSnapshot, TerminalTaskStatus};
 
 pub fn build_router(state: AppState, config: &GatewayConfig) -> Router {
     Router::new()
+        .merge(routes::welcome::router())
         .merge(routes::gateway_router(state.clone(), config))
         .merge(routes::admin_router(state.clone(), &config.api_prefix))
         .merge(openapi::openapi_router(&config.api_prefix))

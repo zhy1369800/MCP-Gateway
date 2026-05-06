@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod gateway;
+pub mod welcome;
 
 use axum::middleware;
 use axum::Router;

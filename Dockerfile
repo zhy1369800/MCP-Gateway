@@ -44,7 +44,8 @@ COPY mcp-gateway/config.v2.json /opt/bootstrap/default-config.json
 
 # Modify default listen address for Hugging Face (0.0.0.0:7860)
 RUN sed -i 's/"listen": "127.0.0.1:8765"/"listen": "0.0.0.0:7860"/g' /opt/bootstrap/default-config.json && \
-    sed -i 's/"allowNonLoopback": false/"allowNonLoopback": true/g' /opt/bootstrap/default-config.json
+    sed -i 's/"allowNonLoopback": false/"allowNonLoopback": true/g' /opt/bootstrap/default-config.json && \
+    mkdir -p /data/config /data/skills /data/www
 
 # Expose Hugging Face mandatory port
 EXPOSE 7860
@@ -56,7 +57,7 @@ ENV XDG_CONFIG_HOME=/app
 ENV MCP_GATEWAY_CONFIG=/data/config/config.json
 ENV MCP_SKILLS_ROOT=/data/skills
 
-#ÊåÇËΩΩ/dada
+#π“‘ÿ/dada
 # Start the server
 # Use 'server' subcommand from gateway-cli
 CMD ["sh", "-c", "mkdir -p /data/config /data/skills && if [ ! -f \"$MCP_GATEWAY_CONFIG\" ]; then cp /opt/bootstrap/default-config.json \"$MCP_GATEWAY_CONFIG\"; fi && exec mcp-gateway run --config \"$MCP_GATEWAY_CONFIG\""]
