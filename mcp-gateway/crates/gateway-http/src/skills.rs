@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -58,10 +59,14 @@ pub struct SkillConfirmation {
     pub status: ConfirmationStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub kind: String,
     pub skill: String,
     pub display_name: String,
     pub args: Vec<String>,
     pub raw_command: String,
+    pub cwd: String,
+    pub affected_paths: Vec<String>,
+    pub preview: String,
     pub reason: String,
 }
 
@@ -108,6 +113,24 @@ struct SkillCommandArgs {
     cmd: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuiltinShellArgs {
+    cmd: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyPatchArgs {
+    patch: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
 #[derive(Debug)]
 struct ToolResult {
     text: String,
@@ -127,6 +150,54 @@ struct CommandInvocation {
     tokens: Vec<String>,
     raw: String,
     source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuiltinTool {
+    ShellCommand,
+    ApplyPatch,
+}
+
+#[derive(Debug, Clone)]
+struct ConfirmationMetadata {
+    kind: String,
+    cwd: String,
+    affected_paths: Vec<String>,
+    preview: String,
+}
+
+#[derive(Debug)]
+enum PatchHunk {
+    AddFile {
+        path: String,
+        contents: Vec<String>,
+    },
+    DeleteFile {
+        path: String,
+    },
+    UpdateFile {
+        path: String,
+        move_path: Option<String>,
+        chunks: Vec<PatchChunk>,
+    },
+}
+
+#[derive(Debug, Default)]
+struct PatchChunk {
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ParsedPatch {
+    hunks: Vec<PatchHunk>,
+}
+
+#[derive(Debug)]
+struct PatchSummary {
+    added: Vec<String>,
+    modified: Vec<String>,
+    deleted: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -374,6 +445,12 @@ impl SkillsService {
         config: &GatewayConfig,
         params: ToolCallParams,
     ) -> Result<ToolResult, AppError> {
+        if let Some(tool) = BuiltinTool::from_name(&params.name) {
+            return self
+                .execute_builtin_tool(config, tool, params.arguments)
+                .await;
+        }
+
         let skills = self.discover_skills(&config.skills).await?;
         let bindings = build_skill_tool_bindings(&skills);
         let Some((tool_name, skill)) = bindings
@@ -390,6 +467,280 @@ impl SkillsService {
         let args = decode_tool_args::<SkillCommandArgs>(&params.arguments)?;
         self.handle_skill_command(config, &tool_name, &skill, args)
             .await
+    }
+
+    async fn execute_builtin_tool(
+        &self,
+        config: &GatewayConfig,
+        tool: BuiltinTool,
+        arguments: Value,
+    ) -> Result<ToolResult, AppError> {
+        match tool {
+            BuiltinTool::ShellCommand => {
+                let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
+                self.handle_builtin_shell_command(config, args).await
+            }
+            BuiltinTool::ApplyPatch => {
+                let args = decode_tool_args::<ApplyPatchArgs>(&arguments)?;
+                self.handle_builtin_apply_patch(config, args).await
+            }
+        }
+    }
+
+    async fn handle_builtin_shell_command(
+        &self,
+        config: &GatewayConfig,
+        args: BuiltinShellArgs,
+    ) -> Result<ToolResult, AppError> {
+        let command_preview = args.cmd.trim().to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("cmd cannot be empty".to_string()));
+        }
+
+        if let Some(result) = missing_cwd_result_if_ambiguous(
+            BuiltinTool::ShellCommand,
+            &config.skills,
+            args.cwd.as_deref(),
+        ) {
+            return Ok(result);
+        }
+        let cwd = resolve_builtin_cwd(&config.skills, args.cwd.as_deref())?;
+
+        if let Some(patch) = extract_apply_patch_from_shell_command(&command_preview) {
+            return self
+                .execute_apply_patch_text(config, patch, &cwd, &command_preview)
+                .await;
+        }
+
+        let tokens = split_shell_tokens(&command_preview);
+        if tokens.is_empty() {
+            return Err(AppError::BadRequest("cmd cannot be empty".to_string()));
+        }
+        let program = tokens[0].clone();
+        let command_args = tokens[1..].to_vec();
+
+        let policy = evaluate_policy(
+            &config.skills,
+            &program,
+            &command_args,
+            &command_preview,
+            &cwd,
+            None,
+        );
+        match policy {
+            PolicyDecision::Deny(reason) => {
+                return Ok(tool_error(
+                    mcp_gateway_policy_denied_text(&reason),
+                    json!({
+                        "status": "blocked",
+                        "reason": reason,
+                        "command": command_preview,
+                        "cwd": normalize_display_path(&cwd),
+                        "policyAction": "deny"
+                    }),
+                ));
+            }
+            PolicyDecision::Confirm(reason) => {
+                let metadata = ConfirmationMetadata {
+                    kind: "shell".to_string(),
+                    cwd: normalize_display_path(&cwd),
+                    affected_paths: Vec::new(),
+                    preview: command_preview.clone(),
+                };
+                let confirmation_id = match self
+                    .create_confirmation_with_metadata(
+                        "builtin:shell",
+                        "Shell Command",
+                        &tokens,
+                        &command_preview,
+                        &reason,
+                        metadata,
+                    )
+                    .await
+                {
+                    CreateConfirmationResult::Created(c) | CreateConfirmationResult::Reused(c) => {
+                        c.id
+                    }
+                    CreateConfirmationResult::AlreadyTimedOut(id) => id,
+                };
+
+                match self
+                    .wait_for_confirmation_decision(
+                        &confirmation_id,
+                        Self::CONFIRMATION_DECISION_TIMEOUT,
+                        Duration::from_millis(250),
+                    )
+                    .await
+                {
+                    ConfirmationWaitOutcome::Approved => {}
+                    ConfirmationWaitOutcome::Rejected => {
+                        return Ok(confirmation_rejected_result(&confirmation_id, false));
+                    }
+                    ConfirmationWaitOutcome::TimedOut => {
+                        return Ok(confirmation_rejected_result(&confirmation_id, true));
+                    }
+                }
+            }
+            PolicyDecision::Allow => {}
+        }
+
+        let timeout_ms = args
+            .timeout_ms
+            .unwrap_or(config.skills.execution.timeout_ms)
+            .max(1000);
+        let max_output_bytes = config.skills.execution.max_output_bytes.max(1024);
+        let (runner, runner_args) = shell_command_for_current_os(&command_preview);
+
+        let started = Instant::now();
+        let mut command = Command::new(&runner);
+        command
+            .args(&runner_args)
+            .current_dir(&cwd)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        configure_skill_command(&mut command);
+
+        let disable_truncation = should_disable_output_truncation(&program, &command_args);
+        let output = execute_skill_command(
+            &mut command,
+            timeout_ms,
+            max_output_bytes,
+            disable_truncation,
+        )
+        .await?;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let stdout = output.stdout.text;
+        let stderr = output.stderr.text;
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        let structured = json!({
+            "status": if output.status.success() { "completed" } else { "failed" },
+            "tool": BuiltinTool::ShellCommand.name(),
+            "command": command_preview,
+            "cwd": normalize_display_path(&cwd),
+            "exitCode": exit_code,
+            "durationMs": duration_ms,
+            "stdoutTruncated": output.stdout.truncated,
+            "stderrTruncated": output.stderr.truncated
+        });
+        let output_text = command_output_text(&stdout, &stderr);
+
+        if output.status.success() {
+            Ok(tool_success(output_text, structured))
+        } else {
+            Ok(tool_error(
+                command_failure_text(exit_code, &stdout, &stderr),
+                structured,
+            ))
+        }
+    }
+
+    async fn handle_builtin_apply_patch(
+        &self,
+        config: &GatewayConfig,
+        args: ApplyPatchArgs,
+    ) -> Result<ToolResult, AppError> {
+        if let Some(result) = missing_cwd_result_if_ambiguous(
+            BuiltinTool::ApplyPatch,
+            &config.skills,
+            args.cwd.as_deref(),
+        ) {
+            return Ok(result);
+        }
+        let cwd = resolve_builtin_cwd(&config.skills, args.cwd.as_deref())?;
+        self.execute_apply_patch_text(config, args.patch, &cwd, "apply_patch")
+            .await
+    }
+
+    async fn execute_apply_patch_text(
+        &self,
+        config: &GatewayConfig,
+        patch: String,
+        cwd: &Path,
+        raw_command: &str,
+    ) -> Result<ToolResult, AppError> {
+        let patch_preview = patch.trim().to_string();
+        if patch_preview.is_empty() {
+            return Err(AppError::BadRequest("patch cannot be empty".to_string()));
+        }
+
+        let parsed = parse_apply_patch(&patch_preview)?;
+        let affected_paths = patch_affected_paths(&parsed, cwd)?;
+        let access_decision = evaluate_paths_policy(&config.skills, &affected_paths);
+        match access_decision {
+            PolicyDecision::Deny(reason) => {
+                return Ok(tool_error(
+                    mcp_gateway_policy_denied_text(&reason),
+                    json!({
+                        "status": "blocked",
+                        "reason": reason,
+                        "tool": BuiltinTool::ApplyPatch.name(),
+                        "cwd": normalize_display_path(cwd),
+                        "affectedPaths": affected_paths.iter().map(|path| normalize_display_path(path)).collect::<Vec<_>>()
+                    }),
+                ));
+            }
+            PolicyDecision::Confirm(reason) => {
+                let metadata = ConfirmationMetadata {
+                    kind: "patch".to_string(),
+                    cwd: normalize_display_path(cwd),
+                    affected_paths: affected_paths
+                        .iter()
+                        .map(|path| normalize_display_path(path))
+                        .collect(),
+                    preview: truncate_preview(&patch_preview, 4000),
+                };
+                let confirmation_id = match self
+                    .create_confirmation_with_metadata(
+                        "builtin:apply_patch",
+                        "Apply Patch",
+                        &[String::from("apply_patch")],
+                        raw_command,
+                        &reason,
+                        metadata,
+                    )
+                    .await
+                {
+                    CreateConfirmationResult::Created(c) | CreateConfirmationResult::Reused(c) => {
+                        c.id
+                    }
+                    CreateConfirmationResult::AlreadyTimedOut(id) => id,
+                };
+
+                match self
+                    .wait_for_confirmation_decision(
+                        &confirmation_id,
+                        Self::CONFIRMATION_DECISION_TIMEOUT,
+                        Duration::from_millis(250),
+                    )
+                    .await
+                {
+                    ConfirmationWaitOutcome::Approved => {}
+                    ConfirmationWaitOutcome::Rejected => {
+                        return Ok(confirmation_rejected_result(&confirmation_id, false));
+                    }
+                    ConfirmationWaitOutcome::TimedOut => {
+                        return Ok(confirmation_rejected_result(&confirmation_id, true));
+                    }
+                }
+            }
+            PolicyDecision::Allow => {}
+        }
+
+        let summary = apply_parsed_patch(&parsed, cwd)?;
+        let text = patch_summary_text(&summary);
+        Ok(tool_success(
+            text,
+            json!({
+                "status": "completed",
+                "tool": BuiltinTool::ApplyPatch.name(),
+                "cwd": normalize_display_path(cwd),
+                "added": summary.added,
+                "modified": summary.modified,
+                "deleted": summary.deleted
+            }),
+        ))
     }
 
     async fn handle_skill_command(
@@ -436,12 +787,18 @@ impl SkillsService {
             }
             PolicyDecision::Confirm(reason) => {
                 let (confirmation_id, already_decided) = match self
-                    .create_confirmation(
+                    .create_confirmation_with_metadata(
                         &skill.skill,
                         &display_name,
                         &tokens,
                         &command_preview,
                         &reason,
+                        ConfirmationMetadata {
+                            kind: "skill".to_string(),
+                            cwd: normalize_display_path(&skill.path),
+                            affected_paths: Vec::new(),
+                            preview: command_preview.clone(),
+                        },
                     )
                     .await
                 {
@@ -543,6 +900,7 @@ impl SkillsService {
         }
     }
 
+    #[cfg(test)]
     async fn create_confirmation(
         &self,
         skill: &str,
@@ -550,6 +908,31 @@ impl SkillsService {
         args: &[String],
         raw_command: &str,
         reason: &str,
+    ) -> CreateConfirmationResult {
+        self.create_confirmation_with_metadata(
+            skill,
+            display_name,
+            args,
+            raw_command,
+            reason,
+            ConfirmationMetadata {
+                kind: "skill".to_string(),
+                cwd: String::new(),
+                affected_paths: Vec::new(),
+                preview: raw_command.to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn create_confirmation_with_metadata(
+        &self,
+        skill: &str,
+        display_name: &str,
+        args: &[String],
+        raw_command: &str,
+        reason: &str,
+        metadata: ConfirmationMetadata,
     ) -> CreateConfirmationResult {
         let fingerprint = format!("{skill}|{raw_command}");
         let now = Utc::now();
@@ -581,10 +964,14 @@ impl SkillsService {
             status: ConfirmationStatus::Pending,
             created_at: now,
             updated_at: now,
+            kind: metadata.kind,
             skill: skill.to_string(),
             display_name: display_name.to_string(),
             args: args.to_vec(),
             raw_command: raw_command.to_string(),
+            cwd: metadata.cwd,
+            affected_paths: metadata.affected_paths,
+            preview: metadata.preview,
             reason: reason.to_string(),
         };
 
@@ -903,30 +1290,131 @@ fn tool_definitions(skills: &[DiscoveredSkill]) -> Value {
     let bindings = build_skill_tool_bindings(skills);
     let now = Utc::now().to_rfc3339();
     let os = current_os_label();
+    let mut tools = builtin_tool_definitions(os, &now);
 
-    Value::Array(
-        bindings
-            .into_iter()
-            .map(|(tool_name, skill)| {
-                let description = render_skill_tool_description(skill, os, &now);
-                json!({
-                    "name": tool_name,
-                    "description": description,
-                    "inputSchema": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["cmd"],
-                        "properties": {
-                            "cmd": {
-                                "type": "string",
-                                "description": "Shell command string for this skill. Main uses: read markdown files with full paths (for example `cat D:/.../SKILL.md` or `Get-Content D:/.../SKILL.md`) and run scripts."
-                            }
-                        }
+    tools.extend(bindings.into_iter().map(|(tool_name, skill)| {
+        let description = render_skill_tool_description(skill, os, &now);
+        json!({
+            "name": tool_name,
+            "description": description,
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["cmd"],
+                "properties": {
+                    "cmd": {
+                        "type": "string",
+                        "description": "Shell command string for this skill. Main uses: read markdown files with full paths (for example `cat D:/.../SKILL.md` or `Get-Content D:/.../SKILL.md`) and run scripts."
                     }
-                })
-            })
-            .collect(),
-    )
+                }
+            }
+        })
+    }));
+
+    Value::Array(tools)
+}
+
+fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
+    let shell_description = format!(
+        r#"Bundled Skill: terminal operations.
+This bundled skill has no separate SKILL.md file; follow this description as the full usage guide.
+
+Scope and cwd:
+- The user-configured allowed directories are the only folders this skill can operate in.
+- Always set cwd to the concrete directory you intend to operate in.
+- If multiple allowed directories exist and the user has not specified which folder to operate in, ask the user to choose one before calling this tool.
+- If the requested file or folder is outside every allowed directory, ask the user to add the corresponding directory to allowed directories before continuing.
+
+Command usage:
+- Use non-interactive commands only; avoid commands that wait for prompts or open full-screen editors.
+- Quote paths that contain spaces or non-ASCII characters.
+- Prefer fast discovery commands: rg --files for listing project files, rg for text search. If rg is unavailable, use the platform shell's normal alternatives.
+- For reading files on Windows, prefer Get-Content -Raw <path>; on Unix-like systems, use cat, sed -n, or similar read-only commands.
+- Prefer the apply_patch bundled skill for file edits instead of shell redirection or in-place text tools when a structured edit is possible.
+- Destructive or sensitive commands may be blocked or require user approval by policy.
+
+Current OS: {os}. Current datetime: {now}."#
+    );
+    let patch_description = format!(
+        r#"Bundled Skill: structured file editing.
+This bundled skill has no separate SKILL.md file; follow this description as the full usage guide.
+
+Scope and cwd:
+- All affected files must be inside the user-configured allowed directories.
+- Always set cwd to the concrete directory for relative patch paths.
+- If multiple allowed directories exist and the user has not specified which folder to edit, ask the user to choose one before calling this tool.
+- If the requested file is outside every allowed directory, ask the user to add the corresponding directory to allowed directories before continuing.
+
+Patch format:
+- This tool does not accept standard unified diff headers such as --- file and +++ file.
+- Use only the format below. Every patch starts with *** Begin Patch and ends with *** End Patch.
+- Add files with *** Add File: path, where every content line starts with +.
+- Delete files with *** Delete File: path.
+- Update files with *** Update File: path. Inside update hunks, unchanged context lines start with one space, removed lines start with -, and added lines start with +.
+- Move files by adding *** Move to: new-path immediately after *** Update File: old-path.
+
+Minimal replacement example:
+*** Begin Patch
+*** Update File: index.html
+@@
+-<h1>Old title</h1>
++<h1>New title</h1>
+*** End Patch
+
+Add file example:
+*** Begin Patch
+*** Add File: notes.txt
++first line
++second line
+*** End Patch
+
+Current OS: {os}. Current datetime: {now}."#
+    );
+    vec![
+        json!({
+            "name": BuiltinTool::ShellCommand.name(),
+            "description": shell_description,
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["cmd"],
+                "properties": {
+                    "cmd": {
+                        "type": "string",
+                        "description": "Shell command to run."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Concrete working directory for the operation. It must be inside one configured allowed directory. Required when more than one allowed directory exists; do not omit it in that case."
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "description": "Optional command timeout in milliseconds."
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": BuiltinTool::ApplyPatch.name(),
+            "description": patch_description,
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["patch"],
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "description": "Structured patch text. Must use *** Add File, *** Delete File, or *** Update File blocks. Do not send standard unified diff headers like --- file and +++ file."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Concrete working directory for relative patch paths. It must be inside one configured allowed directory. Required when more than one allowed directory exists; do not omit it in that case."
+                    }
+                }
+            }
+        }),
+    ]
 }
 
 fn build_skill_tool_bindings(skills: &[DiscoveredSkill]) -> Vec<(String, &DiscoveredSkill)> {
@@ -953,6 +1441,25 @@ fn build_skill_tool_bindings(skills: &[DiscoveredSkill]) -> Vec<(String, &Discov
 
 fn skill_tool_name_base(skill: &DiscoveredSkill) -> String {
     sanitize_tool_name(skill_display_name(skill))
+}
+
+impl BuiltinTool {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            value if value.eq_ignore_ascii_case(Self::ShellCommand.name()) => {
+                Some(Self::ShellCommand)
+            }
+            value if value.eq_ignore_ascii_case(Self::ApplyPatch.name()) => Some(Self::ApplyPatch),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::ShellCommand => "shell_command",
+            Self::ApplyPatch => "apply_patch",
+        }
+    }
 }
 
 fn skill_display_name(skill: &DiscoveredSkill) -> &str {
@@ -1667,6 +2174,447 @@ fn resolve_candidate_path(script_dir: &Path, token: &str) -> PathBuf {
         script_dir.join(raw)
     };
     normalize_root_path(absolute)
+}
+
+fn resolve_builtin_cwd(skills: &SkillsConfig, cwd: Option<&str>) -> Result<PathBuf, AppError> {
+    let allowed_dirs = skills
+        .policy
+        .path_guard
+        .whitelist_dirs
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    let selected = if let Some(cwd) = cwd.map(str::trim).filter(|value| !value.is_empty()) {
+        PathBuf::from(cwd)
+    } else {
+        match allowed_dirs.as_slice() {
+            [] => {
+                return Err(AppError::Validation(
+                    "skills enabled requires at least one allowed directory".to_string(),
+                ));
+            }
+            [only] => PathBuf::from(only),
+            _ => {
+                return Err(AppError::BadRequest(
+                    "cwd is required because multiple allowed directories are configured; ask the user which directory to operate in".to_string(),
+                ));
+            }
+        }
+    };
+    let normalized = normalize_root_path(selected);
+    if !normalized.exists() || !normalized.is_dir() {
+        return Err(AppError::Validation(format!(
+            "working directory must be an existing directory: {}",
+            normalized.to_string_lossy()
+        )));
+    }
+
+    match evaluate_paths_policy(skills, std::slice::from_ref(&normalized)) {
+        PolicyDecision::Allow => Ok(normalized),
+        PolicyDecision::Confirm(reason) | PolicyDecision::Deny(reason) => {
+            Err(AppError::Validation(reason))
+        }
+    }
+}
+
+fn missing_cwd_result_if_ambiguous(
+    tool: BuiltinTool,
+    skills: &SkillsConfig,
+    cwd: Option<&str>,
+) -> Option<ToolResult> {
+    if cwd.map(str::trim).is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+
+    let allowed_dirs = configured_allowed_dirs(skills);
+    if allowed_dirs.len() <= 1 {
+        return None;
+    }
+
+    let message = "cwd is required because multiple allowed directories are configured; ask the user which directory to operate in";
+    Some(tool_error(
+        format!(
+            "{message}\nAllowed directories:\n{}",
+            allowed_dirs
+                .iter()
+                .map(|item| format!("- {item}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+        json!({
+            "status": "error",
+            "code": "BadRequest",
+            "message": message,
+            "tool": tool.name(),
+            "allowedDirectories": allowed_dirs,
+            "nextStep": "Ask the user which allowed directory should be used as cwd, then retry with cwd set to that directory or a child directory."
+        }),
+    ))
+}
+
+fn configured_allowed_dirs(skills: &SkillsConfig) -> Vec<String> {
+    skills
+        .policy
+        .path_guard
+        .whitelist_dirs
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_display_path(&normalize_root_path(PathBuf::from(value))))
+        .collect()
+}
+
+fn evaluate_paths_policy(skills: &SkillsConfig, paths: &[PathBuf]) -> PolicyDecision {
+    if !skills.policy.path_guard.enabled {
+        return PolicyDecision::Allow;
+    }
+
+    let whitelist = skills
+        .policy
+        .path_guard
+        .whitelist_dirs
+        .iter()
+        .map(PathBuf::from)
+        .map(normalize_root_path)
+        .collect::<Vec<_>>();
+    if whitelist.is_empty() {
+        return PolicyDecision::Deny("skills allowed directories are empty".to_string());
+    }
+
+    for path in paths {
+        let resolved = normalize_root_path(path.clone());
+        let allowed = whitelist.iter().any(|root| resolved.starts_with(root));
+        if !allowed {
+            let reason = format!(
+                "path '{}' is outside allowed directories",
+                resolved.to_string_lossy()
+            );
+            return action_to_decision(&skills.policy.path_guard.on_violation, reason);
+        }
+    }
+
+    PolicyDecision::Allow
+}
+
+fn extract_apply_patch_from_shell_command(command: &str) -> Option<String> {
+    let begin = command.find("*** Begin Patch")?;
+    let end_marker = "*** End Patch";
+    let end = command[begin..].find(end_marker)? + begin + end_marker.len();
+    Some(command[begin..end].to_string())
+}
+
+fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
+    let lines = input.lines().collect::<Vec<_>>();
+    if lines.first().map(|line| line.trim()) != Some("*** Begin Patch") {
+        return Err(AppError::BadRequest(
+            "patch must start with *** Begin Patch".to_string(),
+        ));
+    }
+    if lines.last().map(|line| line.trim()) != Some("*** End Patch") {
+        return Err(AppError::BadRequest(
+            "patch must end with *** End Patch".to_string(),
+        ));
+    }
+
+    let mut index = 1;
+    let mut hunks = Vec::new();
+    while index + 1 < lines.len() {
+        let line = lines[index];
+        if line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            index += 1;
+            let mut contents = Vec::new();
+            while index + 1 < lines.len() && !lines[index].starts_with("*** ") {
+                let content_line = lines[index].strip_prefix('+').ok_or_else(|| {
+                    AppError::BadRequest(format!(
+                        "add file hunk lines must start with '+': {}",
+                        lines[index]
+                    ))
+                })?;
+                contents.push(content_line.to_string());
+                index += 1;
+            }
+            hunks.push(PatchHunk::AddFile {
+                path: path.trim().to_string(),
+                contents,
+            });
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            hunks.push(PatchHunk::DeleteFile {
+                path: path.trim().to_string(),
+            });
+            index += 1;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            index += 1;
+            let mut move_path = None;
+            if index + 1 < lines.len() {
+                if let Some(target) = lines[index].strip_prefix("*** Move to: ") {
+                    move_path = Some(target.trim().to_string());
+                    index += 1;
+                }
+            }
+            let mut chunks = Vec::new();
+            let mut current = PatchChunk::default();
+            while index + 1 < lines.len() && !is_patch_file_header(lines[index]) {
+                let patch_line = lines[index];
+                if patch_line == "@@" || patch_line.starts_with("@@ ") {
+                    push_patch_chunk(&mut chunks, &mut current);
+                    index += 1;
+                    continue;
+                }
+                if patch_line == "*** End of File" {
+                    index += 1;
+                    continue;
+                }
+                let Some(prefix) = patch_line.chars().next() else {
+                    index += 1;
+                    continue;
+                };
+                let body = patch_line.get(1..).unwrap_or_default().to_string();
+                match prefix {
+                    ' ' => {
+                        current.old_lines.push(body.clone());
+                        current.new_lines.push(body);
+                    }
+                    '-' => current.old_lines.push(body),
+                    '+' => current.new_lines.push(body),
+                    _ => {
+                        return Err(AppError::BadRequest(format!(
+                            "invalid update hunk line: {patch_line}"
+                        )));
+                    }
+                }
+                index += 1;
+            }
+            push_patch_chunk(&mut chunks, &mut current);
+            hunks.push(PatchHunk::UpdateFile {
+                path: path.trim().to_string(),
+                move_path,
+                chunks,
+            });
+            continue;
+        }
+
+        return Err(unsupported_patch_line_error(line));
+    }
+
+    if hunks.is_empty() {
+        return Err(AppError::BadRequest(
+            "patch contains no file changes".to_string(),
+        ));
+    }
+
+    Ok(ParsedPatch { hunks })
+}
+
+fn unsupported_patch_line_error(line: &str) -> AppError {
+    AppError::BadRequest(format!(
+        "unsupported patch line: {line}\n\nThis apply_patch tool does not accept standard unified diff headers such as '--- file' and '+++ file', and it does not accept Search/Replace prose blocks. Use this format instead:\n*** Begin Patch\n*** Update File: path/to/file\n@@\n-old line\n+new line\n*** End Patch\n\nFor adding a file:\n*** Begin Patch\n*** Add File: path/to/file\n+new line\n*** End Patch\n\nFor deleting a file:\n*** Begin Patch\n*** Delete File: path/to/file\n*** End Patch"
+    ))
+}
+
+fn is_patch_file_header(line: &str) -> bool {
+    line.starts_with("*** Add File: ")
+        || line.starts_with("*** Delete File: ")
+        || line.starts_with("*** Update File: ")
+        || line == "*** End Patch"
+}
+
+fn push_patch_chunk(chunks: &mut Vec<PatchChunk>, current: &mut PatchChunk) {
+    if current.old_lines.is_empty() && current.new_lines.is_empty() {
+        return;
+    }
+    chunks.push(std::mem::take(current));
+}
+
+fn patch_affected_paths(parsed: &ParsedPatch, cwd: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let mut paths = Vec::new();
+    for hunk in &parsed.hunks {
+        match hunk {
+            PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => {
+                paths.push(resolve_patch_path(cwd, path)?);
+            }
+            PatchHunk::UpdateFile {
+                path, move_path, ..
+            } => {
+                paths.push(resolve_patch_path(cwd, path)?);
+                if let Some(move_path) = move_path {
+                    paths.push(resolve_patch_path(cwd, move_path)?);
+                }
+            }
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    paths.retain(|path| seen.insert(normalize_display_path(path)));
+    Ok(paths)
+}
+
+fn resolve_patch_path(cwd: &Path, raw: &str) -> Result<PathBuf, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest(
+            "patch path cannot be empty".to_string(),
+        ));
+    }
+    let expanded = expand_home_path(trimmed);
+    let path = PathBuf::from(expanded);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    Ok(normalize_root_path(absolute))
+}
+
+fn apply_parsed_patch(parsed: &ParsedPatch, cwd: &Path) -> Result<PatchSummary, AppError> {
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+
+    for hunk in &parsed.hunks {
+        match hunk {
+            PatchHunk::AddFile { path, contents } => {
+                let target = resolve_patch_path(cwd, path)?;
+                if target.exists() {
+                    return Err(AppError::Conflict(format!(
+                        "file already exists: {}",
+                        target.to_string_lossy()
+                    )));
+                }
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&target, format!("{}\n", contents.join("\n")))?;
+                added.push(path.clone());
+            }
+            PatchHunk::DeleteFile { path } => {
+                let target = resolve_patch_path(cwd, path)?;
+                if target.is_dir() {
+                    return Err(AppError::BadRequest(format!(
+                        "delete file target is a directory: {}",
+                        target.to_string_lossy()
+                    )));
+                }
+                fs::remove_file(&target)?;
+                deleted.push(path.clone());
+            }
+            PatchHunk::UpdateFile {
+                path,
+                move_path,
+                chunks,
+            } => {
+                let source = resolve_patch_path(cwd, path)?;
+                if source.is_dir() {
+                    return Err(AppError::BadRequest(format!(
+                        "update file target is a directory: {}",
+                        source.to_string_lossy()
+                    )));
+                }
+                let original = fs::read_to_string(&source)?;
+                let updated = apply_update_chunks(&original, chunks, &source)?;
+                if let Some(move_path) = move_path {
+                    let target = resolve_patch_path(cwd, move_path)?;
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(&target, updated)?;
+                    fs::remove_file(&source)?;
+                    modified.push(move_path.clone());
+                } else {
+                    fs::write(&source, updated)?;
+                    modified.push(path.clone());
+                }
+            }
+        }
+    }
+
+    Ok(PatchSummary {
+        added,
+        modified,
+        deleted,
+    })
+}
+
+fn apply_update_chunks(
+    original: &str,
+    chunks: &[PatchChunk],
+    path: &Path,
+) -> Result<String, AppError> {
+    let mut lines = original
+        .split('\n')
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+
+    let mut cursor = 0;
+    for chunk in chunks {
+        if chunk.old_lines.is_empty() {
+            let insert_at = lines.len();
+            lines.splice(insert_at..insert_at, chunk.new_lines.clone());
+            cursor = insert_at + chunk.new_lines.len();
+            continue;
+        }
+
+        let Some(found) = find_line_sequence(&lines, &chunk.old_lines, cursor)
+            .or_else(|| find_line_sequence(&lines, &chunk.old_lines, 0))
+        else {
+            return Err(AppError::BadRequest(format!(
+                "failed to find expected lines in {}:\n{}",
+                path.to_string_lossy(),
+                chunk.old_lines.join("\n")
+            )));
+        };
+        let end = found + chunk.old_lines.len();
+        lines.splice(found..end, chunk.new_lines.clone());
+        cursor = found + chunk.new_lines.len();
+    }
+
+    Ok(format!("{}\n", lines.join("\n")))
+}
+
+fn find_line_sequence(lines: &[String], needle: &[String], start: usize) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(start.min(lines.len()));
+    }
+    if needle.len() > lines.len() {
+        return None;
+    }
+    (start..=lines.len() - needle.len())
+        .find(|index| lines[*index..*index + needle.len()] == *needle)
+}
+
+fn patch_summary_text(summary: &PatchSummary) -> String {
+    let mut lines = vec!["Success. Updated the following files:".to_string()];
+    for path in &summary.added {
+        lines.push(format!("A {path}"));
+    }
+    for path in &summary.modified {
+        lines.push(format!("M {path}"));
+    }
+    for path in &summary.deleted {
+        lines.push(format!("D {path}"));
+    }
+    lines.join("\n")
+}
+
+fn truncate_preview(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let mut out = input.chars().take(max_chars).collect::<String>();
+    out.push_str("\n[preview truncated]");
+    out
 }
 
 fn normalize_root_path(path: PathBuf) -> PathBuf {
@@ -2491,6 +3439,38 @@ mod tests {
             },
         ];
         let tools = tool_definitions(&discovered);
+        let shell_tool = tools
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("name").and_then(Value::as_str) == Some("shell_command"))
+            })
+            .expect("shell command tool exists");
+        let shell_description = shell_tool
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("shell description");
+        assert!(shell_description.contains("no separate SKILL.md"));
+        assert!(shell_description.contains("rg --files"));
+        assert!(shell_description.contains("Get-Content -Raw"));
+
+        let patch_tool = tools
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("name").and_then(Value::as_str) == Some("apply_patch"))
+            })
+            .expect("apply patch tool exists");
+        let patch_description = patch_tool
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("patch description");
+        assert!(patch_description.contains("*** Update File:"));
+        assert!(patch_description.contains("does not accept standard unified diff"));
+        assert!(patch_description.contains("-<h1>Old title</h1>"));
+
         let alpha_tool = tools
             .as_array()
             .and_then(|items| {
@@ -2528,6 +3508,55 @@ mod tests {
             .iter()
             .filter_map(|item| item.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["alpha_skill", "beta_skill"]);
+        assert_eq!(
+            names,
+            vec!["shell_command", "apply_patch", "alpha_skill", "beta_skill"]
+        );
+    }
+
+    #[test]
+    fn apply_patch_updates_adds_and_deletes_files() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let update_path = sandbox.join("update.txt");
+        let delete_path = sandbox.join("delete.txt");
+        std::fs::write(&update_path, "alpha\nbeta\n").expect("write update");
+        std::fs::write(&delete_path, "remove me\n").expect("write delete");
+
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: update.txt\n@@\n alpha\n-beta\n+gamma\n*** Add File: added.txt\n+new file\n*** Delete File: delete.txt\n*** End Patch"
+        );
+        let parsed = parse_apply_patch(&patch).expect("parse patch");
+        let affected = patch_affected_paths(&parsed, &sandbox).expect("affected paths");
+        assert_eq!(affected.len(), 3);
+
+        let summary = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
+        assert_eq!(summary.added, vec!["added.txt"]);
+        assert_eq!(summary.modified, vec!["update.txt"]);
+        assert_eq!(summary.deleted, vec!["delete.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("update.txt")).expect("read update"),
+            "alpha\ngamma\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("added.txt")).expect("read added"),
+            "new file\n"
+        );
+        assert!(!delete_path.exists());
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn apply_patch_rejects_unified_diff_with_format_hint() {
+        let patch = "*** Begin Patch\n--- index.html\n+++ index.html\n@@ -1 +1 @@\n-old\n+new\n*** End Patch";
+        let error = parse_apply_patch(patch).expect_err("unified diff should be rejected");
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("does not accept standard unified diff"));
+                assert!(message.contains("*** Update File: path/to/file"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 }

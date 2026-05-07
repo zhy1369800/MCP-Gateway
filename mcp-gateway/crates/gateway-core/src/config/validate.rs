@@ -102,17 +102,27 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
             "skills.execution.maxOutputBytes must be >= 1024".to_string(),
         ));
     }
-    if cfg.skills.policy.path_guard.enabled
-        && cfg.skills.policy.path_guard.whitelist_dirs.is_empty()
-    {
+    if cfg.skills.enabled && cfg.skills.policy.path_guard.whitelist_dirs.is_empty() {
         return Err(AppError::Validation(
-            "skills.policy.pathGuard.enabled=true requires non-empty whitelistDirs".to_string(),
+            "skills.enabled=true requires at least one skills.policy.pathGuard.whitelistDirs entry"
+                .to_string(),
+        ));
+    }
+    if cfg.skills.enabled && !cfg.skills.policy.path_guard.enabled {
+        return Err(AppError::Validation(
+            "skills.enabled=true requires skills.policy.pathGuard.enabled=true".to_string(),
         ));
     }
     for dir in &cfg.skills.policy.path_guard.whitelist_dirs {
-        if !Path::new(dir).is_absolute() {
+        let path = Path::new(dir);
+        if !path.is_absolute() {
             return Err(AppError::Validation(format!(
                 "skills.policy.pathGuard.whitelistDirs must be absolute paths: {dir}"
+            )));
+        }
+        if cfg.skills.enabled && (!path.exists() || !path.is_dir()) {
+            return Err(AppError::Validation(format!(
+                "skills.policy.pathGuard.whitelistDirs must be existing directories when skills are enabled: {dir}"
             )));
         }
     }

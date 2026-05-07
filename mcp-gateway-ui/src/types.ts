@@ -165,10 +165,14 @@ export interface SkillConfirmation {
   status: ConfirmationStatus;
   createdAt: string;
   updatedAt: string;
+  kind?: string;
   skill: string;
   displayName: string;
   args: string[];
   rawCommand: string;
+  cwd?: string;
+  affectedPaths?: string[];
+  preview?: string;
   reason: string;
 }
 

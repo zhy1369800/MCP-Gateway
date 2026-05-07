@@ -338,7 +338,7 @@ function ensureSkillsConfig(
         whitelistDirs: Array.isArray(raw?.policy?.pathGuard?.whitelistDirs)
           ? raw.policy.pathGuard.whitelistDirs.map((item) => item.trim()).filter((item) => item.length > 0)
           : [],
-        onViolation: raw?.policy?.pathGuard?.onViolation ?? "confirm",
+        onViolation: raw?.policy?.pathGuard?.onViolation ?? "allow",
       },
     },
     execution: {
@@ -346,6 +346,30 @@ function ensureSkillsConfig(
       maxOutputBytes: raw?.execution?.maxOutputBytes ?? 131072,
     },
   };
+}
+
+function normalizeSkillsForSubmit(input: SkillsConfig, fallbackRules: SkillCommandRule[]): SkillsConfig {
+  const normalized = ensureSkillsConfig(input, fallbackRules);
+  if (!normalized.enabled) {
+    return normalized;
+  }
+  return {
+    ...normalized,
+    policy: {
+      ...normalized.policy,
+      pathGuard: {
+        ...normalized.policy.pathGuard,
+        enabled: true,
+      },
+    },
+  };
+}
+
+function hasRequiredSkillAllowedDirectory(input: SkillsConfig): boolean {
+  if (!input.enabled) {
+    return true;
+  }
+  return input.policy.pathGuard.whitelistDirs.some((item) => item.trim().length > 0);
 }
 
 function formatTime(value: string): string {
@@ -681,6 +705,27 @@ function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: {
   );
 }
 
+function InfoDialog({ open, title, message, onClose, t }: {
+  open: boolean;
+  title: string;
+  message: string;
+  onClose: () => void;
+  t: ReturnType<typeof useT>;
+}) {
+  if (!open) return null;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">{title}</div>
+        <div className="modal-body">{message}</div>
+        <div className="modal-footer">
+          <button className="btn btn-start" onClick={onClose}>{t("confirm")}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
   pending: SkillConfirmation[];
   busyIds: Set<string>;
@@ -715,9 +760,21 @@ function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
               </div>
             </div>
             <div className="skill-confirm-row">
-              <span className="field-label">{t("commandPreview")}</span>
-              <code className="skill-command">{item.rawCommand}</code>
+              <span className="field-label">{item.kind === "patch" ? t("patchPreview") : t("commandPreview")}</span>
+              <code className="skill-command">{item.preview || item.rawCommand}</code>
             </div>
+            {item.cwd && (
+              <div className="skill-confirm-row">
+                <span className="field-label">{t("cwd")}</span>
+                <code className="skill-command">{item.cwd}</code>
+              </div>
+            )}
+            {item.affectedPaths && item.affectedPaths.length > 0 && (
+              <div className="skill-confirm-row">
+                <span className="field-label">{t("affectedPaths")}</span>
+                <code className="skill-command">{item.affectedPaths.join("\n")}</code>
+              </div>
+            )}
             <div className="skill-confirm-row">
               <span className="field-label">{t("confirmReason")}</span>
               <span>{item.reason}</span>
@@ -765,9 +822,21 @@ function SkillConfirmationPopup({
             {showDisplayName && <span className="skill-script">{displayName}</span>}
           </div>
           <div className="skill-confirm-row" style={{ marginTop: 10 }}>
-            <span className="field-label">{t("commandPreview")}</span>
-            <code className="skill-command">{item.rawCommand}</code>
+            <span className="field-label">{item.kind === "patch" ? t("patchPreview") : t("commandPreview")}</span>
+            <code className="skill-command">{item.preview || item.rawCommand}</code>
           </div>
+          {item.cwd && (
+            <div className="skill-confirm-row">
+              <span className="field-label">{t("cwd")}</span>
+              <code className="skill-command">{item.cwd}</code>
+            </div>
+          )}
+          {item.affectedPaths && item.affectedPaths.length > 0 && (
+            <div className="skill-confirm-row">
+              <span className="field-label">{t("affectedPaths")}</span>
+              <code className="skill-command">{item.affectedPaths.join("\n")}</code>
+            </div>
+          )}
           <div className="skill-confirm-row">
             <span className="field-label">{t("confirmReason")}</span>
             <span>{item.reason}</span>
@@ -1432,6 +1501,7 @@ function App() {
   }>({
     open: false, kind: "roots", id: ""
   });
+  const [skillsAccessRequiredOpen, setSkillsAccessRequiredOpen] = useState(false);
   const knownPendingIdsRef = useRef<Set<string>>(new Set());
   const dismissedPopupIdsRef = useRef<Set<string>>(new Set());
   const pendingFetchSeqRef = useRef(0);
@@ -2193,7 +2263,7 @@ function App() {
       httpPath,
       adminToken,
       mcpToken,
-      skills: ensureSkillsConfig(skills, defaultSkillRules),
+      skills: normalizeSkillsForSubmit(skills, defaultSkillRules),
     }));
   }, [servers, serversMode, parsedJsonServers, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills, defaultSkillRules]);
 
@@ -2210,7 +2280,7 @@ function App() {
       httpPath,
       adminToken,
       mcpToken,
-      skills: ensureSkillsConfig(skills, defaultSkillRules),
+      skills: normalizeSkillsForSubmit(skills, defaultSkillRules),
     });
     const cfg: GatewayConfig = await loadLocalConfig();
     cfg.servers = snapshot.servers;
@@ -2223,11 +2293,22 @@ function App() {
     return createEditableConfigFingerprint(snapshot);
   };
 
+  const ensureSkillsAccessReady = () => {
+    const normalized = normalizeSkillsForSubmit(skills, defaultSkillRules);
+    if (hasRequiredSkillAllowedDirectory(normalized)) {
+      return true;
+    }
+    setActiveTab("skills");
+    setSkillsAccessRequiredOpen(true);
+    return false;
+  };
+
   const handleStart = async () => {
     if (skillsRulesError) {
       setError(skillsRulesError);
       return;
     }
+    if (!ensureSkillsAccessReady()) return;
     const nextServers = resolveServers();
     if (nextServers === null) return;
     setError(null); setBusy(true);
@@ -2260,6 +2341,7 @@ function App() {
       setError(skillsRulesError);
       return;
     }
+    if (!ensureSkillsAccessReady()) return;
     const nextServers = resolveServers();
     if (nextServers === null) return;
     setError(null); setSaving(true); setSaveSuccess(false);
@@ -2822,7 +2904,21 @@ function App() {
                       <button
                         id="skills-enabled-toggle"
                         className={`toggle-btn ${skills.enabled ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                        onClick={() =>
+                          setSkills((prev) => {
+                            const nextEnabled = !prev.enabled;
+                            return {
+                              ...prev,
+                              enabled: nextEnabled,
+                              policy: nextEnabled
+                                ? {
+                                    ...prev.policy,
+                                    pathGuard: { ...prev.policy.pathGuard, enabled: true },
+                                  }
+                                : prev.policy,
+                            };
+                          })
+                        }
                         aria-label={t("skillsEnable")}
                         title={t("skillsEnable")}
                       />
@@ -2840,6 +2936,30 @@ function App() {
                   </div>
                 </div>
 
+                <div className="built-in-tools-panel">
+                  <div className="built-in-tools-head">
+                    <div>
+                      <div className="built-in-tools-title">{t("builtInToolsTitle")}</div>
+                      <div className="json-hint">{t("builtInToolsHint")}</div>
+                    </div>
+                  </div>
+                  <div className="built-in-tools-grid">
+                    <div className="built-in-tool">
+                      <Code2 size={15} />
+                      <div>
+                        <div className="built-in-tool-name">shell_command</div>
+                        <div className="built-in-tool-desc">{t("builtInShellDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <Pencil size={15} />
+                      <div>
+                        <div className="built-in-tool-name">apply_patch</div>
+                        <div className="built-in-tool-desc">{t("builtInPatchDesc")}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
                 <SkillDirectoryListEditor
                   title={t("skillsRoots")}
                   hint={t("skillsRootsHint")}
@@ -2879,24 +2999,7 @@ function App() {
               <div className="section-heading">{t("skillsPathGuard")}</div>
 
               <div className="skills-redesign">
-                <div className="skills-top-row">
-                  <div className="skills-switch-card">
-                    <label className="field-label" htmlFor="skills-pathguard-toggle">{t("skillsPathGuardEnable")}</label>
-                    <div className="skills-switch-track">
-                      <button
-                        id="skills-pathguard-toggle"
-                        className={`toggle-btn ${skills.policy.pathGuard.enabled ? "toggle-on" : "toggle-off"}`}
-                        onClick={() =>
-                          setSkills((prev) => ({
-                            ...prev,
-                            policy: { ...prev.policy, pathGuard: { ...prev.policy.pathGuard, enabled: !prev.policy.pathGuard.enabled } },
-                          }))
-                        }
-                        aria-label={t("skillsPathGuardEnable")}
-                        title={t("skillsPathGuardEnable")}
-                      />
-                    </div>
-                  </div>
+                <div className="skills-top-row skills-top-row-single">
                   <div className="skills-input-card">
                     <label className="field-label" htmlFor="skills-violation-action">{t("skillsViolationAction")}</label>
                     <select
@@ -3119,6 +3222,13 @@ function App() {
           : t("confirmDeleteWhitelistDirMsg")}
         onCancel={cancelSkillDirDelete}
         onConfirm={confirmSkillDirDelete}
+        t={t}
+      />
+      <InfoDialog
+        open={skillsAccessRequiredOpen}
+        title={t("skillsAccessRequiredTitle")}
+        message={t("skillsAccessRequiredMsg")}
+        onClose={() => setSkillsAccessRequiredOpen(false)}
         t={t}
       />
     </div>

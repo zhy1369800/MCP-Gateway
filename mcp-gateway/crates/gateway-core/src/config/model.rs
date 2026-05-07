@@ -1164,7 +1164,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
 }
 
 fn default_path_guard_violation_action() -> SkillPolicyAction {
-    SkillPolicyAction::Confirm
+    SkillPolicyAction::Allow
 }
 
 fn default_skills_exec_timeout_ms() -> u64 {

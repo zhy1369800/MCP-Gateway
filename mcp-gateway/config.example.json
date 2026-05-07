@@ -1053,7 +1053,7 @@
       "pathGuard": {
         "enabled": false,
         "whitelistDirs": [],
-        "onViolation": "confirm"
+        "onViolation": "allow"
       }
     },
     "execution": {
