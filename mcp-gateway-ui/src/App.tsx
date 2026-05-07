@@ -14,6 +14,11 @@ import {
   Globe,
   Github,
   Send,
+  Plus,
+  Pencil,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
@@ -125,6 +130,115 @@ function parseRulesJson(input: string): SkillCommandRule[] {
       reason: typeof row.reason === "string" ? row.reason : "",
     };
   });
+}
+
+type SkillRuleMatchType = "commandTree" | "contains" | "both";
+
+interface SkillRuleFormState {
+  action: SkillPolicyAction;
+  matchType: SkillRuleMatchType;
+  commandPattern: string;
+  containsPattern: string;
+  reason: string;
+}
+
+interface SkillRuleGroup {
+  key: "deny" | "confirm";
+  labelKey: "skillsRulesGroupDeny" | "skillsRulesGroupConfirm";
+  hintKey: "skillsRulesGroupDenyHint" | "skillsRulesGroupConfirmHint";
+  rules: SkillCommandRule[];
+}
+
+function createEmptySkillRuleForm(): SkillRuleFormState {
+  return {
+    action: "confirm",
+    matchType: "commandTree",
+    commandPattern: "",
+    containsPattern: "",
+    reason: "",
+  };
+}
+
+function ruleToForm(rule: SkillCommandRule): SkillRuleFormState {
+  const hasCommandTree = rule.commandTree.length > 0;
+  const hasContains = rule.contains.length > 0;
+  return {
+    action: rule.action,
+    matchType: hasCommandTree && hasContains ? "both" : hasCommandTree || !hasContains ? "commandTree" : "contains",
+    commandPattern: argsToStr(rule.commandTree),
+    containsPattern: rule.contains.join("\n"),
+    reason: rule.reason,
+  };
+}
+
+function normalizeContainsInput(value: string): string[] {
+  return value
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function formToRule(form: SkillRuleFormState, id: string): SkillCommandRule {
+  const commandTree = form.matchType === "commandTree" || form.matchType === "both"
+    ? strToArgs(form.commandPattern.trim())
+    : [];
+  const contains = form.matchType === "contains" || form.matchType === "both"
+    ? normalizeContainsInput(form.containsPattern)
+    : [];
+  return {
+    id,
+    action: form.action,
+    commandTree,
+    contains,
+    reason: form.reason.trim(),
+  };
+}
+
+function isSkillRuleFormValid(form: SkillRuleFormState): boolean {
+  const hasCommandTree = strToArgs(form.commandPattern.trim()).length > 0;
+  const hasContains = normalizeContainsInput(form.containsPattern).length > 0;
+  if (form.matchType === "commandTree") return hasCommandTree;
+  if (form.matchType === "contains") return hasContains;
+  return hasCommandTree && hasContains;
+}
+
+function createSkillRuleId(rules: SkillCommandRule[]): string {
+  const used = new Set(rules.map((rule) => rule.id));
+  let candidate = `custom-rule-${Date.now().toString(36)}`;
+  let index = 2;
+  while (used.has(candidate)) {
+    candidate = `custom-rule-${Date.now().toString(36)}-${index}`;
+    index += 1;
+  }
+  return candidate;
+}
+
+function describeSkillRuleMatch(rule: SkillCommandRule, t: ReturnType<typeof useT>): string {
+  const parts: string[] = [];
+  if (rule.commandTree.length > 0) {
+    parts.push(`${t("skillsRuleCommandTreeLabel")} ${argsToStr(rule.commandTree)}`);
+  }
+  if (rule.contains.length > 0) {
+    parts.push(`${t("skillsRuleContainsLabel")} ${rule.contains.join(", ")}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : t("skillsRuleNoCondition");
+}
+
+function groupSkillRules(rules: SkillCommandRule[]): SkillRuleGroup[] {
+  return [
+    {
+      key: "deny",
+      labelKey: "skillsRulesGroupDeny",
+      hintKey: "skillsRulesGroupDenyHint",
+      rules: rules.filter((rule) => rule.action === "deny"),
+    },
+    {
+      key: "confirm",
+      labelKey: "skillsRulesGroupConfirm",
+      hintKey: "skillsRulesGroupConfirmHint",
+      rules: rules.filter((rule) => rule.action === "confirm"),
+    },
+  ];
 }
 
 function isConfirmationAlreadyResolvedError(error: unknown): boolean {
@@ -766,6 +880,227 @@ function SkillDirectoryListEditor({
   );
 }
 
+function SkillPolicyRulesEditor({
+  rules,
+  form,
+  formOpen,
+  editingRuleId,
+  advancedOpen,
+  jsonDraft,
+  jsonError,
+  onStartAdd,
+  onEdit,
+  onCopy,
+  onDelete,
+  onCancelForm,
+  onSubmitForm,
+  onFormChange,
+  onToggleAdvanced,
+  onJsonChange,
+  t,
+}: {
+  rules: SkillCommandRule[];
+  form: SkillRuleFormState;
+  formOpen: boolean;
+  editingRuleId: string | null;
+  advancedOpen: boolean;
+  jsonDraft: string;
+  jsonError: string | null;
+  onStartAdd: () => void;
+  onEdit: (rule: SkillCommandRule) => void;
+  onCopy: (rule: SkillCommandRule) => void;
+  onDelete: (id: string) => void;
+  onCancelForm: () => void;
+  onSubmitForm: () => void;
+  onFormChange: (patch: Partial<SkillRuleFormState>) => void;
+  onToggleAdvanced: () => void;
+  onJsonChange: (value: string) => void;
+  t: ReturnType<typeof useT>;
+}) {
+  const groupedRules = groupSkillRules(rules);
+  const showCommandInput = form.matchType === "commandTree" || form.matchType === "both";
+  const showContainsInput = form.matchType === "contains" || form.matchType === "both";
+  const actionLabel = (action: SkillPolicyAction) => {
+    if (action === "allow") return t("policyAllow");
+    if (action === "confirm") return t("policyConfirm");
+    return t("policyDeny");
+  };
+
+  return (
+    <div className="skills-rules-manager">
+      <div className="skills-rules-toolbar">
+        <div>
+          <div className="skills-rules-title">{t("skillsRulesVisualTitle")}</div>
+          <div className="json-hint">{t("skillsRulesVisualHint")}</div>
+        </div>
+        <button className="btn btn-sm" onClick={onStartAdd}>
+          <Plus size={13} />
+          {t("skillsRuleAdd")}
+        </button>
+      </div>
+
+      {formOpen && (
+        <div className="skills-rule-form">
+          <div className="skills-rule-form-head">
+            <div className="skills-rule-form-title">
+              {editingRuleId ? t("skillsRuleEditTitle") : t("skillsRuleAddTitle")}
+            </div>
+            <button className="btn btn-secondary btn-sm" onClick={onCancelForm}>
+              {t("cancel")}
+            </button>
+          </div>
+
+          <div className="skills-rule-choice-grid">
+            <div className="gw-field">
+              <label className="field-label">{t("skillsRuleActionLabel")}</label>
+              <div className="skills-rule-segmented" role="group" aria-label={t("skillsRuleActionLabel")}>
+                {(["confirm", "deny"] as SkillPolicyAction[]).map((action) => (
+                  <button
+                    key={action}
+                    className={`skills-rule-segment ${form.action === action ? "active" : ""} ${action}`}
+                    onClick={() => onFormChange({ action })}
+                  >
+                    {actionLabel(action)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="gw-field">
+              <label className="field-label">{t("skillsRuleMatchTypeLabel")}</label>
+              <div className="skills-rule-segmented" role="group" aria-label={t("skillsRuleMatchTypeLabel")}>
+                <button
+                  className={`skills-rule-segment ${form.matchType === "commandTree" ? "active" : ""}`}
+                  onClick={() => onFormChange({ matchType: "commandTree" })}
+                >
+                  {t("skillsRuleMatchCommandTree")}
+                </button>
+                <button
+                  className={`skills-rule-segment ${form.matchType === "contains" ? "active" : ""}`}
+                  onClick={() => onFormChange({ matchType: "contains" })}
+                >
+                  {t("skillsRuleMatchContains")}
+                </button>
+                <button
+                  className={`skills-rule-segment ${form.matchType === "both" ? "active" : ""}`}
+                  onClick={() => onFormChange({ matchType: "both" })}
+                >
+                  {t("skillsRuleMatchBoth")}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {showCommandInput && (
+            <div className="gw-field">
+              <label className="field-label">{t("skillsRuleCommandInput")}</label>
+              <input
+                className="form-input"
+                value={form.commandPattern}
+                onChange={(event) => onFormChange({ commandPattern: event.target.value })}
+                placeholder={t("skillsRuleCommandPlaceholder")}
+              />
+              <span className="json-hint">{t("skillsRuleCommandHelp")}</span>
+            </div>
+          )}
+
+          {showContainsInput && (
+            <div className="gw-field">
+              <label className="field-label">{t("skillsRuleContainsInput")}</label>
+              <textarea
+                className="form-textarea skills-rule-pattern-textarea"
+                value={form.containsPattern}
+                onChange={(event) => onFormChange({ containsPattern: event.target.value })}
+                placeholder={t("skillsRuleContainsPlaceholder")}
+              />
+              <span className="json-hint">{t("skillsRuleContainsHelp")}</span>
+            </div>
+          )}
+
+          <div className="gw-field">
+            <label className="field-label">{t("skillsRuleReasonLabel")}</label>
+            <input
+              className="form-input"
+              value={form.reason}
+              onChange={(event) => onFormChange({ reason: event.target.value })}
+              placeholder={t("skillsRuleReasonPlaceholder")}
+            />
+          </div>
+
+          <div className="skills-rule-form-actions">
+            <button className="btn btn-secondary btn-sm" onClick={onCancelForm}>
+              {t("cancel")}
+            </button>
+            <button className="btn btn-sm" onClick={onSubmitForm} disabled={!isSkillRuleFormValid(form)}>
+              {editingRuleId ? t("skillsRuleSaveEdit") : t("skillsRuleCreate")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="skills-rule-groups">
+        {groupedRules.map((group) => (
+          <div className={`skills-rule-group ${group.key}`} key={group.key}>
+            <div className="skills-rule-group-head">
+              <div>
+                <div className="skills-rule-group-title">{t(group.labelKey)}</div>
+                <div className="json-hint">{t(group.hintKey)}</div>
+              </div>
+              <span className="skills-rule-count">{group.rules.length}</span>
+            </div>
+
+            {group.rules.length === 0 ? (
+              <div className="skills-rule-empty">{t("skillsRulesGroupEmpty")}</div>
+            ) : (
+              <div className="skills-rule-list">
+                {group.rules.map((rule) => (
+                  <div className="skills-rule-row" key={rule.id}>
+                    <span className={`skills-rule-action ${rule.action}`}>{actionLabel(rule.action)}</span>
+                    <div className="skills-rule-main">
+                      <div className="skills-rule-condition">{describeSkillRuleMatch(rule, t)}</div>
+                      <div className="skills-rule-reason">{rule.reason || t("skillsRuleNoReason")}</div>
+                    </div>
+                    <div className="skills-rule-actions">
+                      <button className="btn-icon" title={t("skillsRuleEdit")} onClick={() => onEdit(rule)}>
+                        <Pencil size={13} />
+                      </button>
+                      <button className="btn-icon" title={t("skillsRuleCopy")} onClick={() => onCopy(rule)}>
+                        <Copy size={13} />
+                      </button>
+                      <button className="btn-icon btn-danger-icon" title={t("skillsRuleDelete")} onClick={() => onDelete(rule.id)}>
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="skills-rules-advanced">
+        <button className="skills-rules-advanced-toggle" onClick={onToggleAdvanced}>
+          {advancedOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <span>{t("skillsRulesAdvancedJson")}</span>
+        </button>
+        {advancedOpen && (
+          <div className="skills-rules-advanced-body">
+            <textarea
+              className="form-textarea skills-rules-textarea"
+              value={jsonDraft}
+              onChange={(event) => onJsonChange(event.target.value)}
+              placeholder={t("skillsRulesHint")}
+            />
+            <span className="json-hint">{t("skillsRulesAdvancedHint")}</span>
+            {jsonError && <span className="skills-rules-error">{jsonError}</span>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── 单条 Server 可视化编辑行 ──────────────────────────────────────
 function ServerRow({
   server,
@@ -1057,6 +1392,10 @@ function App() {
   const [skillWhitelistItems, setSkillWhitelistItems] = useState<SkillDirectoryItem[]>([]);
   const [skillsRulesDraft, setSkillsRulesDraft] = useState("[]");
   const [skillsRulesError, setSkillsRulesError] = useState<string | null>(null);
+  const [skillsRulesAdvancedOpen, setSkillsRulesAdvancedOpen] = useState(false);
+  const [skillRuleFormOpen, setSkillRuleFormOpen] = useState(false);
+  const [editingSkillRuleId, setEditingSkillRuleId] = useState<string | null>(null);
+  const [skillRuleForm, setSkillRuleForm] = useState<SkillRuleFormState>(() => createEmptySkillRuleForm());
   const [skillPending, setSkillPending] = useState<SkillConfirmation[]>([]);
   const [activeSkillPopupId, setActiveSkillPopupId] = useState<string | null>(null);
   const [skillActionBusy, setSkillActionBusy] = useState<Set<string>>(new Set());
@@ -1268,6 +1607,10 @@ function App() {
       });
       setSkillsRulesDraft(JSON.stringify(nextSkills.policy.rules, null, 2));
       setSkillsRulesError(null);
+      setSkillsRulesAdvancedOpen(false);
+      setSkillRuleFormOpen(false);
+      setEditingSkillRuleId(null);
+      setSkillRuleForm(createEmptySkillRuleForm());
       setJsonText(buildServersJson(nextServers));
       setSavedConfigFingerprint(createEditableConfigFingerprint(createEditableConfigSnapshot({
         servers: nextServers,
@@ -1655,6 +1998,65 @@ function App() {
       setSkillsRulesError(null);
     } catch {
       setSkillsRulesError(t("skillsRulesJsonError"));
+    }
+  };
+
+  const syncSkillRules = (rules: SkillCommandRule[]) => {
+    setSkills((prev) => ({
+      ...prev,
+      policy: {
+        ...prev.policy,
+        rules,
+      },
+    }));
+    setSkillsRulesDraft(JSON.stringify(rules, null, 2));
+    setSkillsRulesError(null);
+  };
+
+  const startAddSkillRule = () => {
+    setEditingSkillRuleId(null);
+    setSkillRuleForm(createEmptySkillRuleForm());
+    setSkillRuleFormOpen(true);
+  };
+
+  const editSkillRule = (rule: SkillCommandRule) => {
+    setEditingSkillRuleId(rule.id);
+    setSkillRuleForm(ruleToForm(rule));
+    setSkillRuleFormOpen(true);
+  };
+
+  const cancelSkillRuleForm = () => {
+    setEditingSkillRuleId(null);
+    setSkillRuleForm(createEmptySkillRuleForm());
+    setSkillRuleFormOpen(false);
+  };
+
+  const submitSkillRuleForm = () => {
+    if (!isSkillRuleFormValid(skillRuleForm)) return;
+    const nextRules = editingSkillRuleId
+      ? skills.policy.rules.map((rule) =>
+          rule.id === editingSkillRuleId ? formToRule(skillRuleForm, rule.id) : rule
+        )
+      : [...skills.policy.rules, formToRule(skillRuleForm, createSkillRuleId(skills.policy.rules))];
+    syncSkillRules(nextRules);
+    cancelSkillRuleForm();
+  };
+
+  const copySkillRule = (rule: SkillCommandRule) => {
+    const nextRule = {
+      ...rule,
+      id: createSkillRuleId(skills.policy.rules),
+    };
+    const index = skills.policy.rules.findIndex((item) => item.id === rule.id);
+    const nextRules = [...skills.policy.rules];
+    nextRules.splice(index >= 0 ? index + 1 : nextRules.length, 0, nextRule);
+    syncSkillRules(nextRules);
+  };
+
+  const deleteSkillRule = (id: string) => {
+    syncSkillRules(skills.policy.rules.filter((rule) => rule.id !== id));
+    if (editingSkillRuleId === id) {
+      cancelSkillRuleForm();
     }
   };
 
@@ -2586,16 +2988,25 @@ function App() {
             {/* ── 策略规则 ── */}
             <section className="config-section">
               <div className="section-heading">{t("skillsRules")}</div>
-              <div className="gw-field">
-                <textarea
-                  className="form-textarea skills-rules-textarea"
-                  value={skillsRulesDraft}
-                  onChange={(e) => onRulesDraftChange(e.target.value)}
-                  placeholder={t("skillsRulesHint")}
-                />
-                <span className="json-hint">{t("skillsRulesHint")}</span>
-                {skillsRulesError && <span className="skills-rules-error">{skillsRulesError}</span>}
-              </div>
+              <SkillPolicyRulesEditor
+                rules={skills.policy.rules}
+                form={skillRuleForm}
+                formOpen={skillRuleFormOpen}
+                editingRuleId={editingSkillRuleId}
+                advancedOpen={skillsRulesAdvancedOpen}
+                jsonDraft={skillsRulesDraft}
+                jsonError={skillsRulesError}
+                onStartAdd={startAddSkillRule}
+                onEdit={editSkillRule}
+                onCopy={copySkillRule}
+                onDelete={deleteSkillRule}
+                onCancelForm={cancelSkillRuleForm}
+                onSubmitForm={submitSkillRuleForm}
+                onFormChange={(patch) => setSkillRuleForm((prev) => ({ ...prev, ...patch }))}
+                onToggleAdvanced={() => setSkillsRulesAdvancedOpen((open) => !open)}
+                onJsonChange={onRulesDraftChange}
+                t={t}
+              />
             </section>
 
             {/* ── 待确认命令 ── */}
