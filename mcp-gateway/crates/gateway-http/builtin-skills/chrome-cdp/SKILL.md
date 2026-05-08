@@ -1,6 +1,11 @@
 ---
 name: chrome-cdp
-description: Browser automation and debugging through a bundled raw Chrome DevTools Protocol CLI
+description: >-
+  Browser automation and debugging through bundled Chrome DevTools Protocol.
+  First read the complete builtin://chrome-cdp/SKILL.md to get skillToken; this
+  SKILL.md read does not require skillToken. Do not use regex or partial reads
+  to fetch only the token. Later calls without the correct skillToken will fail
+  and must be retried, so get the token before debugging.
 ---
 
 # Chrome CDP

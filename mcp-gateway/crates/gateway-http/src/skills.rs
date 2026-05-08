@@ -1,8 +1,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -21,6 +22,14 @@ use uuid::Uuid;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+#[derive(Clone, Copy)]
+struct BundledTool {
+    file_name: &'static str,
+    bytes: &'static [u8],
+}
+
+include!(concat!(env!("OUT_DIR"), "/bundled_tools.rs"));
+
 const BUILTIN_SHELL_COMMAND_SKILL_MD: &str =
     include_str!("../builtin-skills/shell_command/SKILL.md");
 const BUILTIN_APPLY_PATCH_SKILL_MD: &str = include_str!("../builtin-skills/apply_patch/SKILL.md");
@@ -38,6 +47,67 @@ fn configure_skill_command(command: &mut Command) {
 
 #[cfg(not(target_os = "windows"))]
 fn configure_skill_command(_command: &mut Command) {}
+
+fn configure_bundled_tool_path(command: &mut Command) {
+    let entries = bundled_tool_path_entries();
+    if entries.is_empty() {
+        return;
+    }
+
+    let current_path = env::var_os("PATH");
+    if let Some(path) = prepend_path_entries(&entries, current_path.as_deref()) {
+        command.env("PATH", path);
+    }
+}
+
+fn bundled_tool_path_entries() -> Vec<PathBuf> {
+    static ENTRIES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    ENTRIES
+        .get_or_init(|| {
+            BUNDLED_RIPGREP
+                .and_then(materialize_bundled_tool)
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .into_iter()
+                .collect()
+        })
+        .clone()
+}
+
+fn prepend_path_entries(
+    entries: &[PathBuf],
+    current_path: Option<&OsStr>,
+) -> Option<std::ffi::OsString> {
+    let mut paths = entries.to_vec();
+    if let Some(current_path) = current_path {
+        paths.extend(env::split_paths(current_path));
+    }
+    env::join_paths(paths).ok()
+}
+
+fn materialize_bundled_tool(tool: BundledTool) -> Option<PathBuf> {
+    let cache_root = dirs::cache_dir().unwrap_or_else(env::temp_dir);
+    let tool_dir = cache_root.join("mcp-gateway").join("tools").join("ripgrep");
+    let tool_path = tool_dir.join(tool.file_name);
+
+    let should_write = fs::read(&tool_path)
+        .map(|existing| existing != tool.bytes)
+        .unwrap_or(true);
+    if should_write {
+        fs::create_dir_all(&tool_dir).ok()?;
+        fs::write(&tool_path, tool.bytes).ok()?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&tool_path).ok()?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool_path, permissions).ok()?;
+    }
+
+    Some(tool_path)
+}
 
 #[derive(Clone, Default)]
 pub struct SkillsService {
@@ -830,6 +900,7 @@ impl SkillsService {
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        configure_bundled_tool_path(&mut command);
         configure_skill_command(&mut command);
 
         let disable_truncation = should_disable_output_truncation(&program, &command_args);
@@ -1150,6 +1221,7 @@ impl SkillsService {
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        configure_bundled_tool_path(&mut command);
         configure_skill_command(&mut command);
 
         let output = execute_skill_command(
@@ -1398,6 +1470,7 @@ impl SkillsService {
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        configure_bundled_tool_path(&mut command);
         configure_skill_command(&mut command);
 
         let disable_truncation = should_disable_output_truncation(&program, &command_args);
@@ -1891,11 +1964,11 @@ fn tool_definitions(skills: &[DiscoveredSkill]) -> Value {
                 "properties": {
                     "exec": {
                         "type": "string",
-                        "description": "Shell command string for this skill. Main uses: read markdown files with full paths (for example `cat D:/.../SKILL.md` or `Get-Content D:/.../SKILL.md`) and run scripts."
+                        "description": "Shell command string for this skill. Main uses: read full markdown files with full paths (for example `cat D:/.../SKILL.md` or `Get-Content -Raw D:/.../SKILL.md`) and run scripts after SKILL.md has been read."
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. Obtain it by first reading this skill's SKILL.md with this tool; extract the skillToken from the returned markdown content and pass it exactly."
+                        "description": "Required for every non-documentation call. First read this skill's complete SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -1930,7 +2003,7 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. Obtain it by first reading builtin://shell_command/SKILL.md; extract the skillToken from the returned markdown content and pass it exactly."
+                        "description": "Required for every non-documentation call. First read the complete builtin://shell_command/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -1953,7 +2026,7 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every apply_patch call. Obtain it by first reading builtin://apply_patch/SKILL.md with shell_command; extract the skillToken from the returned markdown content and pass it exactly."
+                        "description": "Required for every apply_patch call. First read the complete builtin://apply_patch/SKILL.md with shell_command without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -1968,7 +2041,7 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                 "properties": {
                     "exec": {
                         "type": "string",
-                        "description": "Chrome DevTools Protocol command. First call must read builtin://chrome-cdp/SKILL.md. After reading it, use commands like `open <url>`, `list`, `snap`, `eval`, `netclear`, `net <filter>`, `netget <id>`, or `click <target> <selector>`."
+                        "description": "Chrome DevTools Protocol command. First call must read the complete builtin://chrome-cdp/SKILL.md. After reading it, use commands like `open <url>`, `list`, `snap`, `eval`, `netclear`, `net <filter>`, `netget <id>`, or `click <target> <selector>`."
                     },
                     "timeoutMs": {
                         "type": "integer",
@@ -1977,7 +2050,7 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. Obtain it by first reading builtin://chrome-cdp/SKILL.md; extract the skillToken from the returned markdown content and pass it exactly."
+                        "description": "Required for every non-documentation call. First read the complete builtin://chrome-cdp/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -1992,7 +2065,7 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                 "properties": {
                     "exec": {
                         "type": "string",
-                        "description": "Documentation read or Chrome CDP debugging action. First call must read builtin://chat-plus-adapter-debugger/SKILL.md. Then use `capture start`, `network search <filter>`, `network get <request-id>`, `network perf`, or documented raw CDP commands such as `netclear`, `net`, `netget`, `html`, `snap`, and `evalraw`."
+                        "description": "Documentation read or Chrome CDP debugging action. First call must read the complete builtin://chat-plus-adapter-debugger/SKILL.md. Then use `capture start`, `network search <filter>`, `network get <request-id>`, `network perf`, or documented raw CDP commands such as `netclear`, `net`, `netget`, `html`, `snap`, and `evalraw`."
                     },
                     "timeoutMs": {
                         "type": "integer",
@@ -2001,7 +2074,7 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation action. Obtain it by first reading builtin://chat-plus-adapter-debugger/SKILL.md; extract the skillToken from the returned markdown content and pass it exactly."
+                        "description": "Required for every non-documentation action. First read the complete builtin://chat-plus-adapter-debugger/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -2020,13 +2093,13 @@ fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> St
     };
     let read_requirement = match tool {
         BuiltinTool::ShellCommand => {
-            format!("The only acceptable first call to this tool is a documentation-read call. Suggested `exec`: `{read_cmd}`.")
+            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Suggested `exec`: `{read_cmd}`.")
         }
         BuiltinTool::ApplyPatch => {
-            format!("Before calling `apply_patch`, use `shell_command` to read this SKILL.md. Suggested shell `exec`: `{read_cmd}`.")
+            format!("Before calling `apply_patch`, use `shell_command` to read the complete SKILL.md; this read does not require `skillToken`. Suggested shell `exec`: `{read_cmd}`.")
         }
         BuiltinTool::ChromeCdp | BuiltinTool::ChatPlusAdapterDebugger => {
-            format!("The only acceptable first call to this tool is a documentation-read call using `exec`: `{read_cmd}`.")
+            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`, using `exec`: `{read_cmd}`.")
         }
     };
     let frontmatter_block = if frontmatter.block.trim().is_empty() {
@@ -2036,7 +2109,7 @@ fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> St
     };
 
     format!(
-        "Bundled skill: {}.\nMANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this bundled skill for any real action, you MUST first read its full SKILL.md. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. {read_requirement} The SKILL.md response includes the required `skillToken` only inside the returned markdown content; every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call. The gateway serves bundled SKILL.md reads from embedded content, so this direct documentation read does not require a workspace `cwd`.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill URI: {skill_root_uri}.\nSKILL.md URI: {skill_uri}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
+        "Bundled skill: {}.\nMANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this bundled skill for any real action, you MUST first read its full SKILL.md. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. {read_requirement} The SKILL.md response includes the required `skillToken` only inside the returned markdown content. You must obtain it by reading the complete SKILL.md document; this SKILL.md read is the one call that does not need `skillToken`. Do not use regex, grep, Select-String, line ranges, or other partial-read tricks to fetch only the token. Every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call; a rejected call fails and must be retried with the correct token. The gateway serves bundled SKILL.md reads from embedded content, so this direct documentation read does not require a workspace `cwd`.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill URI: {skill_root_uri}.\nSKILL.md URI: {skill_uri}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
         frontmatter.name,
         frontmatter.name,
         if frontmatter.description.trim().is_empty() {
@@ -2188,7 +2261,7 @@ fn validate_skill_token_result(
 fn skill_token_error(tool_name: &str, message: &str) -> ToolResult {
     tool_error(
         format!(
-            "{message}. Before using `{tool_name}` for any real action, read its SKILL.md first and then retry with the returned `skillToken` argument."
+            "{message}. This call failed and must be retried with the correct token. Read the complete SKILL.md first; that documentation-read call does not require `skillToken`. Then retry `{tool_name}` with the returned `skillToken` argument. Do not use regex, grep, Select-String, line ranges, or partial reads to fetch only the token."
         ),
         json!({
             "status": "error",
@@ -2196,7 +2269,7 @@ fn skill_token_error(tool_name: &str, message: &str) -> ToolResult {
             "tool": tool_name,
             "message": message,
             "requiredArgument": "skillToken",
-            "nextStep": "Read the corresponding SKILL.md with the documented first-call command. The response includes the skillToken only in the returned markdown content; pass that value as skillToken on subsequent non-documentation calls."
+            "nextStep": "This call failed. Read the complete corresponding SKILL.md with the documented first-call command; that SKILL.md read does not require skillToken. Then retry with the returned skillToken. Do not use regex, grep, Select-String, line ranges, or partial reads to fetch only the token."
         }),
     )
 }
@@ -2618,7 +2691,7 @@ fn render_skill_tool_description(skill: &DiscoveredSkill, os: &str, now: &str) -
     };
     let skill_path = normalize_display_path(&skill.path);
     format!(
-        "MANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this skill for any real action, you MUST first call this skill tool with `exec` that reads the full SKILL.md from the skill path below. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. The only acceptable first call is a documentation-read call, such as `cat {skill_path}/SKILL.md` or `Get-Content -Raw {skill_path}/SKILL.md`. The SKILL.md response includes the required `skillToken` only inside the returned markdown content; every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call.\nThe `exec` value should be one shell command string used either to read markdown files or run scripts after SKILL.md has been read.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill path: {skill_path}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
+        "MANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this skill for any real action, you MUST first call this skill tool with `exec` that reads the full SKILL.md from the skill path below. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. The only acceptable first call is a documentation-read call that reads the complete SKILL.md without `skillToken`, such as `cat {skill_path}/SKILL.md` or `Get-Content -Raw {skill_path}/SKILL.md`. The SKILL.md response includes the required `skillToken` only inside the returned markdown content. You must obtain it by reading the complete SKILL.md document; this SKILL.md read is the one call that does not need `skillToken`. Do not use regex, grep, Select-String, line ranges, or other partial-read tricks to fetch only the token. Every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call; a rejected call fails and must be retried with the correct token.\nThe `exec` value should be one shell command string used either to read markdown files or run scripts after SKILL.md has been read.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill path: {skill_path}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
         skill_display_name(skill),
         meta_description,
         if skill.frontmatter_metadata.trim().is_empty() {
@@ -4172,6 +4245,24 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn prepend_path_entries_puts_bundled_paths_first() {
+        let bundled = PathBuf::from("/app/tools");
+        let existing_a = PathBuf::from("/usr/bin");
+        let existing_b = PathBuf::from("/bin");
+        let existing_path = env::join_paths([existing_a.clone(), existing_b.clone()])
+            .expect("join existing test path");
+
+        let updated = prepend_path_entries(
+            std::slice::from_ref(&bundled),
+            Some(existing_path.as_os_str()),
+        )
+        .expect("join updated test path");
+        let paths = env::split_paths(&updated).collect::<Vec<_>>();
+
+        assert_eq!(paths, vec![bundled, existing_a, existing_b]);
+    }
+
+    #[test]
     fn command_tree_rule_can_trigger_confirmation() {
         let skills = SkillsConfig::default();
         let raw = "sh script.sh";
@@ -4937,6 +5028,9 @@ mod tests {
         assert!(shell_description.contains("MANDATORY BEFORE USE"));
         assert!(shell_description.contains("you MUST first read its full SKILL.md"));
         assert!(shell_description.contains("returned markdown content"));
+        assert!(shell_description.contains("partial-read tricks"));
+        assert!(shell_description.contains("prefer rg or rg --files"));
+        assert!(shell_description.contains("node_modules"));
         assert!(!shell_description.contains("structuredContent.skillToken"));
         assert!(shell_description.contains("Front matter summary:"));
         assert!(shell_description.contains("SKILL.md URI:"));
@@ -5020,7 +5114,9 @@ mod tests {
         let shell = builtin_skill_doc_result(tool, "doc", path, "abc123".to_string());
         assert!(!shell.is_error);
         assert!(shell.text.contains("# Shell Command"));
+        assert!(shell.text.contains("## High-Priority Command Choices"));
         assert!(shell.text.contains("rg --files"));
+        assert!(shell.text.contains("Do not use `Get-ChildItem -Recurse`"));
         assert!(shell.text.contains("abc123"));
         assert_eq!(
             shell.structured.get("builtinSkill").and_then(Value::as_str),
@@ -5043,7 +5139,7 @@ mod tests {
         let cdp = builtin_skill_doc_result(tool, "doc", path, "987abc".to_string());
         assert!(!cdp.is_error);
         assert!(cdp.text.contains("# Chrome CDP"));
-        assert!(cdp.text.contains("raw Chrome DevTools Protocol"));
+        assert!(cdp.text.contains("Chrome DevTools Protocol over WebSocket"));
         assert!(cdp.text.contains("netclear"));
         assert!(cdp.text.contains("CDP_PROFILE_MODE=persistent"));
 

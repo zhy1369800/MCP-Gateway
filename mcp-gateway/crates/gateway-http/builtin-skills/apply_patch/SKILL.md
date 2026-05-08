@@ -1,6 +1,11 @@
 ---
 name: apply_patch
-description: Apply structured file additions, updates, deletes, and moves inside an allowed workspace.
+description: >-
+  Apply structured file additions, updates, deletes, and moves. First read the
+  complete builtin://apply_patch/SKILL.md to get skillToken; this SKILL.md read
+  does not require skillToken. Do not use regex or partial reads to fetch only
+  the token. Calls without the correct skillToken will fail and must be retried,
+  so get the token before patching.
 metadata:
   bundled: true
   tool: apply_patch

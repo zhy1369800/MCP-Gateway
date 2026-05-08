@@ -1,6 +1,15 @@
 ---
 name: shell_command
-description: Run non-interactive shell commands inside an allowed workspace for inspection, builds, tests, and narrowly scoped automation.
+description: >-
+  Run non-interactive shell commands inside an allowed workspace. First read the
+  complete builtin://shell_command/SKILL.md to get skillToken; this SKILL.md
+  read does not require skillToken. Do not use regex or partial reads to fetch
+  only the token. Later calls without the correct skillToken will fail and must
+  be retried, so get the token before running real commands. For search,
+  discovery, broad inventories, and file counts, prefer rg or rg --files before
+  recursive shell listings, and exclude dependency folders, VCS metadata,
+  generated outputs, virtual environments, and caches such as node_modules,
+  .git, target, dist, build, coverage, .next, .cache, .venv, and __pycache__.
 metadata:
   bundled: true
   tool: shell_command
@@ -12,6 +21,15 @@ metadata:
 Use this bundled skill when the task is best handled by a terminal command: listing files, searching text, reading files, checking Git state, running builds/tests/formatters, starting a local dev server, or executing a project script.
 
 This skill is intentionally a small terminal orchestration layer. It follows the same practical pattern used by coding agents such as Codex: keep commands non-interactive, keep the working directory explicit, prefer fast search/read tools, stream output back to the model, and let policy decide whether sensitive commands are allowed, denied, or require user confirmation.
+
+## High-Priority Command Choices
+
+- Use `rg --files` first for file discovery, broad inventories, and file counts.
+- Use `rg -n "pattern" path` first for text/code search.
+- Use `git ls-files` for "tracked files only" counts or inventories.
+- Use `Get-ChildItem` only for simple, shallow Windows directory listings, for example `Get-ChildItem -Name` or `Get-ChildItem -Name -Filter *.rs`.
+- Do not use `Get-ChildItem -Recurse`, `find . -type f`, `dir /s`, `ls -R`, or `du` for repository-wide discovery, search, inventories, or counts unless the command includes explicit exclusions and `rg` is unavailable.
+- Never treat dependency folders, VCS metadata, generated outputs, virtual environments, or caches as meaningful project files in broad counts.
 
 ## Operating Model
 
@@ -36,7 +54,7 @@ External programs are still called directly from PowerShell:
 - `npm run lint`
 - `rg -n "pattern" src`
 
-Prefer native PowerShell cmdlets and parameters:
+Prefer native PowerShell cmdlets and parameters for shallow filesystem operations. For search, discovery, broad inventories, and counts, use `rg` first.
 
 - List files: `Get-ChildItem -Name`, `Get-ChildItem -Name -Filter *.js`
 - List a specific directory: `Get-ChildItem -LiteralPath "D:\path with spaces" -Name`
@@ -73,6 +91,7 @@ Use forward-slash paths and quote paths with spaces. Keep `cwd` set to the works
 
 - Discover files: `rg --files`
 - Search code/text: `rg "pattern" path`
+- Count project files: `(rg --files <exclusions> | Measure-Object).Count`
 - List files on Windows: `Get-ChildItem -Name -Filter *.js`
 - Read files on Windows: `Get-Content -LiteralPath path -TotalCount 200`
 - Read files on Unix-like systems: `sed -n '1,200p' path`
@@ -80,13 +99,13 @@ Use forward-slash paths and quote paths with spaces. Keep `cwd` set to the works
 - Run project checks: `cargo test`, `cargo fmt --check`, `npm test`, `npm run lint`
 - Start a project-owned dev server only when the user needs a running app and the server is expected to stay alive.
 
-Prefer `rg` and `rg --files` for discovery because they are fast and ignore common generated directories by default. If `rg` is unavailable, use the platform's normal alternative.
+Prefer `rg` and `rg --files` for discovery because they are fast and respect ignore files. Packaged gateway builds may provide a bundled `rg` on `PATH`; if `rg` is unavailable, use `git ls-files` for repository counts or the platform's normal alternative with explicit exclusions.
 
 ## Counting Files And Broad Inventories
 
-When the user asks for file counts, repository size, broad file inventories, or similar numeric summaries, do not count dependency folders, VCS metadata, generated outputs, virtual environments, or caches as meaningful project files. These directories can dominate the result and make the answer misleading.
+When the user asks for file counts, repository size, broad file inventories, or similar numeric summaries, do not count dependency folders, VCS metadata, generated outputs, virtual environments, or caches as meaningful project files. These directories can dominate the result and make the answer misleading. This is a hard requirement, not a preference.
 
-Prefer commands that respect `.gitignore` and exclude high-volume irrelevant directories before counting:
+Use commands that respect `.gitignore` and exclude high-volume irrelevant directories before counting:
 
 - Tracked files only: `git ls-files | Measure-Object` on Windows, or `git ls-files | wc -l` on Unix-like systems.
 - All non-ignored files with ripgrep on Windows: `(rg --files -g '!node_modules/**' -g '!.git/**' -g '!target/**' -g '!dist/**' -g '!build/**' -g '!coverage/**' -g '!.next/**' -g '!.nuxt/**' -g '!.turbo/**' -g '!.cache/**' -g '!__pycache__/**' -g '!.pytest_cache/**' -g '!.mypy_cache/**' -g '!.ruff_cache/**' -g '!.venv/**' -g '!venv/**' -g '!env/**' -g '!.tox/**' | Measure-Object).Count`
@@ -100,7 +119,7 @@ Common directories to exclude from broad counts and inventories include:
 - Python environments and caches: `.venv`, `venv`, `env`, `.tox`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.nox`
 - General tool caches: `.cache`, `.gradle`, `.idea`, `.vscode`, `tmp`, `temp`
 
-Avoid broad recursive commands such as `Get-ChildItem -Recurse`, `find . -type f`, or `du` at the repository root unless they include explicit exclusions or the workspace is already known to be small. If `rg` is unavailable, prefer `git ls-files` for repository counts. For untracked non-ignored files without `rg`, use the platform's recursive listing only with exclusion filters.
+Do not use broad recursive commands such as `Get-ChildItem -Recurse`, `find . -type f`, `dir /s`, `ls -R`, or `du` at the repository root for counts or inventories unless they include explicit exclusions or the workspace is already known to be small. If `rg` is unavailable, prefer `git ls-files` for repository counts. For untracked non-ignored files without `rg`, use the platform's recursive listing only with exclusion filters.
 
 ## File Editing
 

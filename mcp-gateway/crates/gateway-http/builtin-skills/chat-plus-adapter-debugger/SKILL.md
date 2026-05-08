@@ -1,6 +1,9 @@
 ---
 name: chat-plus-adapter-debugger
-description: 为 Chat Plus 新框架编写、修复、审查站点适配脚本。用于这些场景：根据真实 CDP Network 请求/响应/DOM 样本生成 adapter；检查现有脚本是否符合新框架硬规则；定位 transformRequest / extractResponse / decorateBubbles / continueConversation 哪一环写错。
+description: >-
+  为 Chat Plus 新框架编写、修复、审查站点适配脚本。先读取完整
+  builtin://chat-plus-adapter-debugger/SKILL.md 获取 skillToken；这次读取 SKILL.md 不需要
+  skillToken。不要用正则或局部读取只抓 token。后续调用不带或带错 skillToken 会报错并必须重试，所以正式调试前先拿到正确 token。
 ---
 
 # Chat Plus Adapter Debugger
