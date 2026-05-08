@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,10 +25,9 @@ const BUILTIN_SHELL_COMMAND_SKILL_MD: &str =
     include_str!("../builtin-skills/shell_command/SKILL.md");
 const BUILTIN_APPLY_PATCH_SKILL_MD: &str = include_str!("../builtin-skills/apply_patch/SKILL.md");
 const BUILTIN_CHROME_CDP_SKILL_MD: &str = include_str!("../builtin-skills/chrome-cdp/SKILL.md");
+const BUILTIN_CHROME_CDP_MJS: &str = include_str!("../builtin-skills/chrome-cdp/scripts/cdp.mjs");
 const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
     include_str!("../builtin-skills/chat-plus-adapter-debugger/SKILL.md");
-const BUILTIN_CHAT_PLUS_RECORDER_COMMAND_MJS: &str =
-    include_str!("../builtin-skills/chat-plus-adapter-debugger/scripts/recorder-command.mjs");
 const BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "windows")]
@@ -1100,7 +1098,7 @@ impl SkillsService {
             return Ok(result);
         }
 
-        self.execute_builtin_chrome_axi_command(
+        self.execute_builtin_chrome_cdp_command(
             config,
             BuiltinTool::ChromeCdp.name(),
             &command_preview,
@@ -1110,7 +1108,7 @@ impl SkillsService {
         .await
     }
 
-    async fn execute_builtin_chrome_axi_command(
+    async fn execute_builtin_chrome_cdp_command(
         &self,
         config: &GatewayConfig,
         tool_name: &str,
@@ -1118,10 +1116,17 @@ impl SkillsService {
         structured_command: &str,
         timeout_ms: Option<u64>,
     ) -> Result<ToolResult, AppError> {
-        let axi_args = parse_builtin_chrome_axi_args(command_preview)?;
-        let axi_home_dir = builtin_chrome_axi_home_dir()?;
-        let axi_user_data_dir = builtin_chrome_axi_user_data_dir()?;
-        let bridge_port = find_free_local_port()?;
+        let cdp_args = parse_builtin_chrome_cdp_args(command_preview)?;
+        let cdp_script = materialize_builtin_chrome_cdp_script()?;
+        let cdp_runtime_dir = builtin_chrome_cdp_runtime_dir()?;
+        let cdp_user_data_dir = builtin_chrome_cdp_user_data_dir()?;
+        let effective_user_data_dir = std::env::var_os("CDP_USER_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cdp_user_data_dir.clone());
+        let effective_profile_mode =
+            std::env::var("CDP_PROFILE_MODE").unwrap_or_else(|_| "persistent".to_string());
+        let effective_browser_mode =
+            std::env::var("CDP_BROWSER_MODE").unwrap_or_else(|_| "launch".to_string());
         let timeout_ms = timeout_ms
             .unwrap_or_else(|| {
                 config
@@ -1131,28 +1136,17 @@ impl SkillsService {
                     .max(BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS)
             })
             .max(1000);
-        let bridge_timeout_ms = timeout_ms.saturating_sub(5_000).max(30_000);
         let max_output_bytes = config.skills.execution.max_output_bytes.max(1024);
-        let (runner, runner_prefix_args) = chrome_axi_runner();
 
         let started = Instant::now();
-        let mut command = Command::new(&runner);
+        let mut command = Command::new(node_command());
         command
-            .args(&runner_prefix_args)
-            .args(&axi_args)
-            .env("HOME", &axi_home_dir)
-            .env("USERPROFILE", &axi_home_dir)
-            .env("CHROME_DEVTOOLS_AXI_USER_DATA_DIR", &axi_user_data_dir)
-            .env("CHROME_DEVTOOLS_AXI_PORT", bridge_port.to_string())
-            .env(
-                "CHROME_DEVTOOLS_AXI_BRIDGE_TIMEOUT_MS",
-                bridge_timeout_ms.to_string(),
-            )
-            .env("CHROME_DEVTOOLS_AXI_HEADED", "1")
-            .env("CHROME_DEVTOOLS_AXI_DISABLE_HOOKS", "1")
-            .env_remove("CHROME_DEVTOOLS_AXI_AUTO_CONNECT")
-            .env_remove("CHROME_DEVTOOLS_AXI_BROWSER_URL")
-            .env_remove("CHROME_DEVTOOLS_AXI_WS_HEADERS")
+            .arg(&cdp_script)
+            .args(&cdp_args)
+            .env("CDP_RUNTIME_DIR", &cdp_runtime_dir)
+            .env("CDP_USER_DATA_DIR", &effective_user_data_dir)
+            .env("CDP_PROFILE_MODE", &effective_profile_mode)
+            .env("CDP_BROWSER_MODE", &effective_browser_mode)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -1171,26 +1165,25 @@ impl SkillsService {
         let stdout = output.stdout.text;
         let stderr = output.stderr.text;
         let exit_code = output.status.code().unwrap_or(-1);
-        let structured_axi_args = if tool_name == BuiltinTool::ChatPlusAdapterDebugger.name()
-            && axi_args.first().map(|arg| arg.as_str()) == Some("eval")
+        let structured_cdp_args = if tool_name == BuiltinTool::ChatPlusAdapterDebugger.name()
+            && cdp_args.first().map(|arg| arg.as_str()) == Some("eval")
         {
-            vec!["eval".to_string(), "[recorder eval omitted]".to_string()]
+            vec!["eval".to_string(), "[eval omitted]".to_string()]
         } else {
-            axi_args.clone()
+            cdp_args.clone()
         };
 
         let structured = json!({
             "status": if output.status.success() { "completed" } else { "failed" },
             "tool": tool_name,
             "command": structured_command,
-            "runner": runner,
-            "runnerPrefixArgs": runner_prefix_args,
-            "args": structured_axi_args,
-            "stateHome": normalize_display_path(&axi_home_dir),
-            "userDataDir": normalize_display_path(&axi_user_data_dir),
-            "requestedBridgePort": bridge_port,
-            "bridgeTimeoutMs": bridge_timeout_ms,
-            "browserMode": "persistent-profile-headed",
+            "runner": node_command(),
+            "script": normalize_display_path(&cdp_script),
+            "args": structured_cdp_args,
+            "runtimeDir": normalize_display_path(&cdp_runtime_dir),
+            "userDataDir": normalize_display_path(&effective_user_data_dir),
+            "profileMode": effective_profile_mode,
+            "browserMode": effective_browser_mode,
             "exitCode": exit_code,
             "durationMs": duration_ms,
             "stdoutTruncated": output.stdout.truncated,
@@ -1235,10 +1228,10 @@ impl SkillsService {
             return Ok(result);
         }
 
-        let Some(action) = parse_chat_plus_recorder_action(&command_preview) else {
+        let Some(debug_command) = parse_chat_plus_debug_command(&command_preview)? else {
             return Ok(tool_error(
                 format!(
-                    "{} supports documentation reads and recorder actions only. Use `recorder install`, `recorder clear`, `recorder records`, `recorder records-full`, or `recorder performance` after reading {}.",
+                    "{} supports documentation reads and Chrome CDP debugging actions. Use `capture start`, `network search <filter>`, `network get <request-id>`, or a documented CDP command after reading {}.",
                     BuiltinTool::ChatPlusAdapterDebugger.name(),
                     builtin_skill_uri(BuiltinTool::ChatPlusAdapterDebugger)
                 ),
@@ -1246,163 +1239,36 @@ impl SkillsService {
                     "status": "error",
                     "tool": BuiltinTool::ChatPlusAdapterDebugger.name(),
                     "exec": command_preview,
-                    "nextStep": "Use one of: recorder install, recorder clear, recorder records, recorder records-full, recorder performance"
+                    "nextStep": "Use one of: capture start, capture clear, network search <filter>, network get <request-id>, network perf, netclear, net, netget, perfnet, html, snap, evalraw"
                 }),
             ));
         };
 
-        let recorder_script = materialize_builtin_chat_plus_recorder_script()?;
-        let node_output = self
-            .generate_chat_plus_recorder_axi_command(config, &recorder_script, action)
-            .await?;
-        let axi_command = node_output.trim();
-        if !axi_command.starts_with("eval ") {
-            return Err(AppError::BadRequest(format!(
-                "recorder script returned an invalid AXI command for action `{action}`"
-            )));
-        }
-
-        self.execute_chat_plus_recorder_axi_command(
-            config,
-            axi_command,
-            &format!("recorder {action}"),
-            args.timeout_ms,
-        )
-        .await
-    }
-
-    async fn generate_chat_plus_recorder_axi_command(
-        &self,
-        config: &GatewayConfig,
-        recorder_script: &Path,
-        action: &str,
-    ) -> Result<String, AppError> {
-        let timeout_ms = config.skills.execution.timeout_ms.max(10_000);
-        let max_output_bytes = config.skills.execution.max_output_bytes.max(256 * 1024);
-        let mut command = Command::new(node_command());
-        command
-            .arg(recorder_script)
-            .arg(action)
-            .kill_on_drop(true)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        configure_skill_command(&mut command);
-
-        let output = execute_skill_command(
-            &mut command,
-            timeout_ms,
-            max_output_bytes,
-            false,
-            None,
-            None,
-        )
-        .await?;
-        if !output.status.success() {
-            let stdout = output.stdout.text;
-            let stderr = output.stderr.text;
-            let exit_code = output.status.code().unwrap_or(-1);
-            return Err(AppError::BadRequest(command_failure_text(
-                exit_code, &stdout, &stderr,
-            )));
-        }
-        Ok(output.stdout.text)
-    }
-
-    async fn execute_chat_plus_recorder_axi_command(
-        &self,
-        config: &GatewayConfig,
-        axi_command: &str,
-        structured_command: &str,
-        timeout_ms: Option<u64>,
-    ) -> Result<ToolResult, AppError> {
-        const MAX_DIRECT_AXI_COMMAND_LEN: usize = 6_500;
-
-        if axi_command.len() <= MAX_DIRECT_AXI_COMMAND_LEN {
-            return self
-                .execute_builtin_chrome_axi_command(
+        match debug_command {
+            ChatPlusDebugCommand::Cdp {
+                command,
+                structured_command,
+            } => {
+                self.execute_builtin_chrome_cdp_command(
                     config,
                     BuiltinTool::ChatPlusAdapterDebugger.name(),
-                    axi_command,
-                    structured_command,
-                    timeout_ms,
+                    &command,
+                    &structured_command,
+                    args.timeout_ms,
                 )
-                .await;
-        }
-
-        let tokens = split_shell_tokens(axi_command);
-        if tokens.len() != 2 || tokens.first().map(|arg| arg.as_str()) != Some("eval") {
-            return self
-                .execute_builtin_chrome_axi_command(
+                .await
+            }
+            ChatPlusDebugCommand::CaptureStart | ChatPlusDebugCommand::CaptureClear => {
+                self.execute_builtin_chrome_cdp_command(
                     config,
                     BuiltinTool::ChatPlusAdapterDebugger.name(),
-                    axi_command,
-                    structured_command,
-                    timeout_ms,
+                    "netclear",
+                    &command_preview,
+                    args.timeout_ms,
                 )
-                .await;
-        }
-        let source = &tokens[1];
-
-        self.execute_chunked_chat_plus_recorder_eval(config, source, structured_command, timeout_ms)
-            .await
-    }
-
-    async fn execute_chunked_chat_plus_recorder_eval(
-        &self,
-        config: &GatewayConfig,
-        source: &str,
-        structured_command: &str,
-        timeout_ms: Option<u64>,
-    ) -> Result<ToolResult, AppError> {
-        const KEY: &str = "__MCP_GATEWAY_RECORDER_EVAL_HEX__";
-        const CHUNK_BYTES: usize = 2_500;
-
-        let clear_command = format!(
-            "eval 'function(){{window[\"{KEY}\"]=[];return{{recorderChunked:true,phase:\"clear\"}}}}'"
-        );
-        let clear = self
-            .execute_builtin_chrome_axi_command(
-                config,
-                BuiltinTool::ChatPlusAdapterDebugger.name(),
-                &clear_command,
-                &format!("{structured_command} [chunk clear]"),
-                timeout_ms,
-            )
-            .await?;
-        if clear.is_error {
-            return Ok(clear);
-        }
-
-        for (index, chunk) in source.as_bytes().chunks(CHUNK_BYTES).enumerate() {
-            let hex = hex_encode(chunk);
-            let chunk_command = format!(
-                "eval 'function(){{window[\"{KEY}\"].push(\"{hex}\");return{{recorderChunked:true,phase:\"chunk\",index:{index}}}}}'"
-            );
-            let result = self
-                .execute_builtin_chrome_axi_command(
-                    config,
-                    BuiltinTool::ChatPlusAdapterDebugger.name(),
-                    &chunk_command,
-                    &format!("{structured_command} [chunk {index}]"),
-                    timeout_ms,
-                )
-                .await?;
-            if result.is_error {
-                return Ok(result);
+                .await
             }
         }
-
-        let final_command = format!(
-            "eval 'function(){{const k=\"{KEY}\";const h=(window[k]||[]).join(\"\");delete window[k];const b=new Uint8Array(h.length/2);for(let i=0;i<h.length;i+=2)b[i/2]=parseInt(h.slice(i,i+2),16);const s=new TextDecoder().decode(b);return (0,eval)(\"(\"+s+\")\")();}}'"
-        );
-        self.execute_builtin_chrome_axi_command(
-            config,
-            BuiltinTool::ChatPlusAdapterDebugger.name(),
-            &final_command,
-            structured_command,
-            timeout_ms,
-        )
-        .await
     }
 
     async fn handle_skill_command(
@@ -2102,7 +1968,7 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                 "properties": {
                     "exec": {
                         "type": "string",
-                        "description": "Chrome DevTools AXI command. First call must read builtin://chrome-cdp/SKILL.md. After reading it, use commands like `open <url>`, `snapshot`, `click @<uid>`, or `npx -y chrome-devtools-axi@latest open <url>`."
+                        "description": "Chrome DevTools Protocol command. First call must read builtin://chrome-cdp/SKILL.md. After reading it, use commands like `open <url>`, `list`, `snap`, `eval`, `netclear`, `net <filter>`, `netget <id>`, or `click <target> <selector>`."
                     },
                     "timeoutMs": {
                         "type": "integer",
@@ -2126,16 +1992,16 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                 "properties": {
                     "exec": {
                         "type": "string",
-                        "description": "Documentation read or recorder action. First call must read builtin://chat-plus-adapter-debugger/SKILL.md. Then use `recorder install`, `recorder clear`, `recorder records`, `recorder records-full`, or `recorder performance` to run the built-in recorder through the gateway-managed Chrome CDP session."
+                        "description": "Documentation read or Chrome CDP debugging action. First call must read builtin://chat-plus-adapter-debugger/SKILL.md. Then use `capture start`, `network search <filter>`, `network get <request-id>`, `network perf`, or documented raw CDP commands such as `netclear`, `net`, `netget`, `html`, `snap`, and `evalraw`."
                     },
                     "timeoutMs": {
                         "type": "integer",
                         "minimum": 1000,
-                        "description": "Optional recorder/CDP command timeout in milliseconds."
+                        "description": "Optional CDP command timeout in milliseconds."
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every recorder action. Obtain it by first reading builtin://chat-plus-adapter-debugger/SKILL.md; extract the skillToken from the returned markdown content and pass it exactly."
+                        "description": "Required for every non-documentation action. Obtain it by first reading builtin://chat-plus-adapter-debugger/SKILL.md; extract the skillToken from the returned markdown content and pass it exactly."
                     }
                 }
             }
@@ -2233,8 +2099,7 @@ fn builtin_skill_doc_result(
     matched_path: String,
     token: String,
 ) -> ToolResult {
-    let runtime_assets = builtin_skill_runtime_assets(tool);
-    let mut text = render_builtin_skill_md(tool, runtime_assets.as_ref());
+    let mut text = render_builtin_skill_md(tool);
     text.push_str(&format!(
         "\n\n[skillToken]\nUse this exact skillToken for subsequent non-documentation calls to `{}`: {}\n",
         tool.name(),
@@ -2249,69 +2114,30 @@ fn builtin_skill_doc_result(
             "builtinSkill": tool.name(),
             "path": matched_path,
             "source": "embedded",
-            "runtimeAssets": runtime_assets
-                .as_ref()
-                .map(|assets| json!({
-                    "status": "available",
-                    "recorderScriptPath": normalize_display_path(&assets.recorder_script_path)
-                }))
-                .unwrap_or_else(|| json!({"status": "none"}))
+            "runtimeAssets": json!({"status": "none"})
         }),
     )
 }
 
-struct BuiltinRuntimeAssets {
-    recorder_script_path: PathBuf,
+fn render_builtin_skill_md(tool: BuiltinTool) -> String {
+    builtin_skill_md_content(tool).to_string()
 }
 
-fn render_builtin_skill_md(tool: BuiltinTool, assets: Option<&BuiltinRuntimeAssets>) -> String {
-    let mut content = builtin_skill_md_content(tool).to_string();
-    if tool == BuiltinTool::ChatPlusAdapterDebugger {
-        let replacement = assets
-            .map(|assets| normalize_display_path(&assets.recorder_script_path))
-            .unwrap_or_else(|| {
-                "<recorder script unavailable: report gateway runtime asset materialization failure>"
-                    .to_string()
-            });
-        content = content.replace("{{RECORDER_SCRIPT_PATH}}", &replacement);
-    }
-    content
-}
-
-fn builtin_skill_runtime_assets(tool: BuiltinTool) -> Option<BuiltinRuntimeAssets> {
-    match tool {
-        BuiltinTool::ChatPlusAdapterDebugger => {
-            match materialize_builtin_chat_plus_recorder_script() {
-                Ok(path) => Some(BuiltinRuntimeAssets {
-                    recorder_script_path: path,
-                }),
-                Err(error) => {
-                    eprintln!(
-                        "failed to materialize built-in chat-plus adapter debugger recorder script: {error}"
-                    );
-                    None
-                }
-            }
-        }
-        _ => None,
-    }
-}
-
-fn materialize_builtin_chat_plus_recorder_script() -> Result<PathBuf, AppError> {
+fn materialize_builtin_chrome_cdp_script() -> Result<PathBuf, AppError> {
     let dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("mcp-gateway")
         .join("builtin-skills")
-        .join("chat-plus-adapter-debugger")
+        .join("chrome-cdp")
         .join("scripts");
     fs::create_dir_all(&dir)?;
-    let path = dir.join("recorder-command.mjs");
+    let path = dir.join("cdp.mjs");
     let should_write = match fs::read_to_string(&path) {
-        Ok(existing) => existing != BUILTIN_CHAT_PLUS_RECORDER_COMMAND_MJS,
+        Ok(existing) => existing != BUILTIN_CHROME_CDP_MJS,
         Err(_) => true,
     };
     if should_write {
-        fs::write(&path, BUILTIN_CHAT_PLUS_RECORDER_COMMAND_MJS)?;
+        fs::write(&path, BUILTIN_CHROME_CDP_MJS)?;
     }
     Ok(path)
 }
@@ -2446,139 +2272,229 @@ fn builtin_skill_doc_arg(arg: &str) -> Option<(BuiltinTool, String)> {
     None
 }
 
-fn parse_builtin_chrome_axi_args(command: &str) -> Result<Vec<String>, AppError> {
+fn parse_builtin_chrome_cdp_args(command: &str) -> Result<Vec<String>, AppError> {
     let tokens = split_shell_tokens(command);
     let Some((program, args)) = tokens.split_first() else {
         return Err(AppError::BadRequest("exec cannot be empty".to_string()));
     };
     let normalized_program = normalize_command_token(program);
 
-    if matches!(normalized_program.as_str(), "npx" | "npx.cmd" | "npx.exe") {
-        let mut remaining = args;
-        if remaining.first().map(|arg| arg.as_str()) == Some("-y") {
-            remaining = &remaining[1..];
-        }
-        let Some((package, rest)) = remaining.split_first() else {
-            return Err(AppError::BadRequest(
-                "chrome-cdp command must include chrome-devtools-axi".to_string(),
-            ));
-        };
-        if is_chrome_devtools_axi_package(package) {
-            return Ok(rest.to_vec());
-        }
+    if is_chrome_cdp_node_invocation(&normalized_program, args) {
+        return Ok(args[1..].to_vec());
     }
 
-    if is_chrome_devtools_axi_package(program) {
+    if is_chrome_cdp_script_token(program) || normalized_program == "cdp" {
         return Ok(args.to_vec());
     }
 
-    if is_chrome_axi_cli_command(&normalized_program) || is_chrome_axi_cli_flag(&normalized_program)
+    if is_chrome_cdp_cli_command(&normalized_program) || is_chrome_cdp_cli_flag(&normalized_program)
     {
         return Ok(tokens);
     }
 
     Err(AppError::BadRequest(
-        "chrome-cdp now uses chrome-devtools-axi. Command must start with `npx -y chrome-devtools-axi@latest`, `chrome-devtools-axi`, or a documented AXI subcommand such as `open`, `snapshot`, `pages`, `click`, or `stop` after SKILL.md has been read".to_string(),
+        "chrome-cdp uses the bundled raw CDP runner. Command must be a documented CDP subcommand such as `open`, `list`, `snap`, `eval`, `netclear`, `net`, `netget`, `click`, or `stop` after SKILL.md has been read".to_string(),
     ))
 }
 
-fn parse_chat_plus_recorder_action(command: &str) -> Option<&'static str> {
+#[derive(Debug)]
+enum ChatPlusDebugCommand {
+    Cdp {
+        command: String,
+        structured_command: String,
+    },
+    CaptureStart,
+    CaptureClear,
+}
+
+fn parse_chat_plus_debug_command(command: &str) -> Result<Option<ChatPlusDebugCommand>, AppError> {
     let tokens = split_shell_tokens(command);
-    let action = match tokens.as_slice() {
-        [action] => action.as_str(),
-        [prefix, action] if prefix.eq_ignore_ascii_case("recorder") => action.as_str(),
-        _ => return None,
+    let Some(first) = tokens.first() else {
+        return Ok(None);
     };
+    let first = first.to_ascii_lowercase();
 
-    match action.to_ascii_lowercase().as_str() {
-        "install" => Some("install"),
-        "clear" => Some("clear"),
-        "records" => Some("records"),
-        "records-full" => Some("records-full"),
-        "performance" => Some("performance"),
-        _ => None,
+    match first.as_str() {
+        "capture" => parse_chat_plus_capture_command(&tokens),
+        "network" => parse_chat_plus_network_command(&tokens),
+        "launch" | "open" | "list" | "ls" | "netclear" | "network-clear" | "net" | "netget"
+        | "network-get" | "perfnet" | "html" | "snap" | "snapshot" | "evalraw" | "eval"
+        | "shot" | "screenshot" | "nav" | "navigate" | "click" | "clickxy" | "type" | "loadall"
+        | "stop" => Ok(Some(ChatPlusDebugCommand::Cdp {
+            command: cdp_command_from_parts(&tokens)?,
+            structured_command: command.to_string(),
+        })),
+        _ => Ok(None),
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+fn parse_chat_plus_capture_command(
+    tokens: &[String],
+) -> Result<Option<ChatPlusDebugCommand>, AppError> {
+    let Some(action) = tokens.get(1).map(|value| value.to_ascii_lowercase()) else {
+        return Ok(None);
+    };
+    match action.as_str() {
+        "start" | "install" => Ok(Some(ChatPlusDebugCommand::CaptureStart)),
+        "clear" | "reset" => Ok(Some(ChatPlusDebugCommand::CaptureClear)),
+        "list" | "search" => Ok(Some(ChatPlusDebugCommand::Cdp {
+            command: cdp_command_from_parts_with_prefix("net", &tokens[2..])?,
+            structured_command: cdp_command_from_parts(tokens)?,
+        })),
+        "get" => {
+            if tokens.len() < 3 {
+                return Err(AppError::BadRequest(
+                    "capture get requires a CDP request id".to_string(),
+                ));
+            }
+            Ok(Some(ChatPlusDebugCommand::Cdp {
+                command: cdp_command_from_parts_with_prefix("netget", &tokens[2..])?,
+                structured_command: cdp_command_from_parts(tokens)?,
+            }))
+        }
+        "perf" | "performance" => Ok(Some(ChatPlusDebugCommand::Cdp {
+            command: cdp_command_from_parts_with_prefix("perfnet", &tokens[2..])?,
+            structured_command: cdp_command_from_parts(tokens)?,
+        })),
+        _ => Ok(None),
     }
-    encoded
 }
 
-fn is_chrome_devtools_axi_package(token: &str) -> bool {
-    let normalized = normalize_command_token(token);
-    normalized == "chrome-devtools-axi"
-        || normalized == "chrome-devtools-axi.cmd"
-        || normalized == "chrome-devtools-axi.exe"
-        || normalized.starts_with("chrome-devtools-axi@")
+fn parse_chat_plus_network_command(
+    tokens: &[String],
+) -> Result<Option<ChatPlusDebugCommand>, AppError> {
+    let Some(action) = tokens.get(1).map(|value| value.to_ascii_lowercase()) else {
+        return Ok(Some(ChatPlusDebugCommand::Cdp {
+            command: "net".to_string(),
+            structured_command: "network".to_string(),
+        }));
+    };
+    match action.as_str() {
+        "clear" | "start" | "reset" => Ok(Some(ChatPlusDebugCommand::Cdp {
+            command: cdp_command_from_parts_with_prefix("netclear", &tokens[2..])?,
+            structured_command: cdp_command_from_parts(tokens)?,
+        })),
+        "list" | "search" => Ok(Some(ChatPlusDebugCommand::Cdp {
+            command: cdp_command_from_parts_with_prefix("net", &tokens[2..])?,
+            structured_command: cdp_command_from_parts(tokens)?,
+        })),
+        "get" => {
+            if tokens.len() < 3 {
+                return Err(AppError::BadRequest(
+                    "network get requires a CDP request id".to_string(),
+                ));
+            }
+            Ok(Some(ChatPlusDebugCommand::Cdp {
+                command: cdp_command_from_parts_with_prefix("netget", &tokens[2..])?,
+                structured_command: cdp_command_from_parts(tokens)?,
+            }))
+        }
+        "perf" | "performance" => Ok(Some(ChatPlusDebugCommand::Cdp {
+            command: cdp_command_from_parts_with_prefix("perfnet", &tokens[2..])?,
+            structured_command: cdp_command_from_parts(tokens)?,
+        })),
+        _ => Ok(Some(ChatPlusDebugCommand::Cdp {
+            command: cdp_command_from_parts_with_prefix("net", &tokens[1..])?,
+            structured_command: cdp_command_from_parts(tokens)?,
+        })),
+    }
 }
 
-fn is_chrome_axi_cli_flag(command: &str) -> bool {
+fn cdp_command_from_parts_with_prefix(prefix: &str, parts: &[String]) -> Result<String, AppError> {
+    let mut all = Vec::with_capacity(parts.len() + 1);
+    all.push(prefix.to_string());
+    all.extend(parts.iter().cloned());
+    cdp_command_from_parts(&all)
+}
+
+fn cdp_command_from_parts(parts: &[String]) -> Result<String, AppError> {
+    parts
+        .iter()
+        .map(|part| quote_cdp_command_part(part))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|parts| parts.join(" "))
+}
+
+fn quote_cdp_command_part(part: &str) -> Result<String, AppError> {
+    if part.is_empty() {
+        return Ok("\"\"".to_string());
+    }
+    if !part
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch == '\'' || ch == '"')
+    {
+        return Ok(part.to_string());
+    }
+    if !part.contains('"') {
+        return Ok(format!("\"{part}\""));
+    }
+    if !part.contains('\'') {
+        return Ok(format!("'{part}'"));
+    }
+    Err(AppError::BadRequest(
+        "CDP command arguments cannot contain both single and double quotes".to_string(),
+    ))
+}
+
+fn is_chrome_cdp_node_invocation(normalized_program: &str, args: &[String]) -> bool {
+    matches!(normalized_program, "node" | "node.exe")
+        && args
+            .first()
+            .is_some_and(|arg| is_chrome_cdp_script_token(arg))
+}
+
+fn is_chrome_cdp_script_token(token: &str) -> bool {
+    normalize_command_token(token).ends_with("cdp.mjs")
+}
+
+fn is_chrome_cdp_cli_flag(command: &str) -> bool {
     matches!(command, "--help" | "-v" | "-V" | "--version" | "--full")
 }
 
-fn is_chrome_axi_cli_command(command: &str) -> bool {
+fn is_chrome_cdp_cli_command(command: &str) -> bool {
     matches!(
         command,
-        "open"
+        "launch"
+            | "open"
+            | "list"
+            | "ls"
+            | "snap"
             | "snapshot"
             | "screenshot"
+            | "shot"
             | "click"
-            | "fill"
+            | "clickxy"
             | "type"
-            | "press"
-            | "scroll"
-            | "back"
-            | "wait"
             | "eval"
-            | "run"
-            | "hover"
-            | "drag"
-            | "fillform"
-            | "dialog"
-            | "upload"
-            | "pages"
-            | "newpage"
-            | "selectpage"
-            | "closepage"
-            | "resize"
-            | "emulate"
-            | "console"
-            | "console-get"
+            | "html"
+            | "nav"
+            | "navigate"
+            | "net"
             | "network"
+            | "netclear"
+            | "network-clear"
+            | "netget"
             | "network-get"
-            | "lighthouse"
-            | "perf-start"
-            | "perf-stop"
-            | "perf-insight"
-            | "heap"
-            | "start"
+            | "perfnet"
+            | "loadall"
+            | "evalraw"
             | "stop"
+            | "help"
     )
 }
 
-fn find_free_local_port() -> Result<u16, AppError> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn builtin_chrome_axi_home_dir() -> Result<PathBuf, AppError> {
+fn builtin_chrome_cdp_runtime_dir() -> Result<PathBuf, AppError> {
     let dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("mcp-gateway")
         .join("builtin-skills")
         .join("chrome-cdp")
-        .join("axi-home");
+        .join("runtime");
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
-fn builtin_chrome_axi_user_data_dir() -> Result<PathBuf, AppError> {
+fn builtin_chrome_cdp_user_data_dir() -> Result<PathBuf, AppError> {
     let dir = dirs::data_local_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(std::env::temp_dir)
@@ -2588,50 +2504,6 @@ fn builtin_chrome_axi_user_data_dir() -> Result<PathBuf, AppError> {
         .join("chrome-user-data");
     fs::create_dir_all(&dir)?;
     Ok(dir)
-}
-
-fn chrome_axi_runner() -> (String, Vec<String>) {
-    if let Some(command) = find_command_in_path(chrome_axi_command_name()) {
-        return (command.to_string_lossy().to_string(), Vec::new());
-    }
-
-    (
-        npx_command().to_string(),
-        vec!["-y".to_string(), "chrome-devtools-axi@latest".to_string()],
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn chrome_axi_command_name() -> &'static str {
-    "chrome-devtools-axi.cmd"
-}
-
-#[cfg(not(target_os = "windows"))]
-fn chrome_axi_command_name() -> &'static str {
-    "chrome-devtools-axi"
-}
-
-fn find_command_in_path(command: &str) -> Option<PathBuf> {
-    let command_path = Path::new(command);
-    if command_path.is_absolute() && command_path.is_file() {
-        return Some(command_path.to_path_buf());
-    }
-
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(command))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn npx_command() -> &'static str {
-    "npx.cmd"
-}
-
-#[cfg(not(target_os = "windows"))]
-fn npx_command() -> &'static str {
-    "npx"
 }
 
 #[cfg(target_os = "windows")]
@@ -5171,8 +5043,9 @@ mod tests {
         let cdp = builtin_skill_doc_result(tool, "doc", path, "987abc".to_string());
         assert!(!cdp.is_error);
         assert!(cdp.text.contains("# Chrome CDP"));
-        assert!(cdp.text.contains("chrome-devtools-axi"));
-        assert!(!cdp.text.contains("scripts/cdp.mjs launch"));
+        assert!(cdp.text.contains("raw Chrome DevTools Protocol"));
+        assert!(cdp.text.contains("netclear"));
+        assert!(cdp.text.contains("CDP_PROFILE_MODE=persistent"));
 
         let (tool, path) = builtin_skill_doc_read(
             "Get-Content -Raw builtin://chat-plus-adapter-debugger/SKILL.md",
@@ -5182,20 +5055,20 @@ mod tests {
         assert!(!adapter.is_error);
         assert!(adapter.text.contains("# Chat Plus Adapter Debugger"));
         assert!(adapter.text.contains("decorateBubbles"));
-        assert!(adapter.text.contains("recorder install"));
-        assert!(!adapter.text.contains("{{RECORDER_SCRIPT_PATH}}"));
+        assert!(adapter.text.contains("capture start"));
+        assert!(adapter.text.contains("network get <request-id>"));
+        assert!(!adapter.text.contains("recorder-command.mjs"));
         assert!(!adapter
             .text
             .contains("mcp-gateway/crates/gateway-http/builtin-skills"));
-        assert!(adapter.text.contains("recorder-command.mjs"));
-        let recorder_path = adapter
-            .structured
-            .get("runtimeAssets")
-            .and_then(|assets| assets.get("recorderScriptPath"))
-            .and_then(Value::as_str)
-            .expect("recorder script path");
-        assert!(recorder_path.ends_with("recorder-command.mjs"));
-        assert!(Path::new(recorder_path).is_file());
+        assert_eq!(
+            adapter
+                .structured
+                .get("runtimeAssets")
+                .and_then(|assets| assets.get("status"))
+                .and_then(Value::as_str),
+            Some("none")
+        );
     }
 
     #[test]
@@ -5244,52 +5117,47 @@ mod tests {
     }
 
     #[test]
-    fn builtin_chrome_cdp_command_parser_accepts_axi_forms() {
+    fn builtin_chrome_cdp_command_parser_accepts_cdp_forms() {
         assert_eq!(
-            parse_builtin_chrome_axi_args("open https://example.com").expect("parse short"),
+            parse_builtin_chrome_cdp_args("open https://example.com").expect("parse short"),
             vec!["open", "https://example.com"]
         );
         assert_eq!(
-            parse_builtin_chrome_axi_args("npx -y chrome-devtools-axi@latest snapshot --full")
-                .expect("parse npx"),
-            vec!["snapshot", "--full"]
+            parse_builtin_chrome_cdp_args("node cdp.mjs net api/chat").expect("parse node"),
+            vec!["net", "api/chat"]
         );
         assert_eq!(
-            parse_builtin_chrome_axi_args("chrome-devtools-axi click @12").expect("parse package"),
-            vec!["click", "@12"]
+            parse_builtin_chrome_cdp_args("netget 123 --full").expect("parse netget"),
+            vec!["netget", "123", "--full"]
         );
-        assert!(parse_builtin_chrome_axi_args("scripts/cdp.mjs list").is_err());
-        assert!(parse_builtin_chrome_axi_args("npm install").is_err());
+        assert!(parse_builtin_chrome_cdp_args("npm install unrelated-package").is_err());
+        assert!(parse_builtin_chrome_cdp_args("npm install").is_err());
     }
 
     #[test]
-    fn chat_plus_recorder_action_parser_accepts_only_recorder_actions() {
-        assert_eq!(
-            parse_chat_plus_recorder_action("recorder install"),
-            Some("install")
-        );
-        assert_eq!(parse_chat_plus_recorder_action("records"), Some("records"));
-        assert_eq!(
-            parse_chat_plus_recorder_action("recorder records-full"),
-            Some("records-full")
-        );
-        assert_eq!(
-            parse_chat_plus_recorder_action("recorder performance"),
-            Some("performance")
-        );
-        assert_eq!(parse_chat_plus_recorder_action("raw-install"), None);
-        assert_eq!(parse_chat_plus_recorder_action("recorder network"), None);
-        assert_eq!(
-            parse_chat_plus_recorder_action("recorder install extra"),
-            None
-        );
-    }
+    fn chat_plus_debug_command_parser_accepts_cdp_network_aliases() {
+        match parse_chat_plus_debug_command("capture start").expect("parse capture") {
+            Some(ChatPlusDebugCommand::CaptureStart) => {}
+            other => panic!("unexpected capture command: {other:?}"),
+        }
 
-    #[test]
-    fn hex_encode_outputs_lowercase_hex() {
-        assert_eq!(hex_encode(b""), "");
-        assert_eq!(hex_encode(b"Az09"), "417a3039");
-        assert_eq!(hex_encode(&[0, 15, 16, 255]), "000f10ff");
+        match parse_chat_plus_debug_command("network search api chat").expect("parse search") {
+            Some(ChatPlusDebugCommand::Cdp { command, .. }) => {
+                assert_eq!(command, "net api chat");
+            }
+            other => panic!("unexpected network search command: {other:?}"),
+        }
+
+        match parse_chat_plus_debug_command("network get 123 --full").expect("parse get") {
+            Some(ChatPlusDebugCommand::Cdp { command, .. }) => {
+                assert_eq!(command, "netget 123 --full");
+            }
+            other => panic!("unexpected network get command: {other:?}"),
+        }
+
+        assert!(parse_chat_plus_debug_command("unsupported action")
+            .expect("parse unsupported")
+            .is_none());
     }
 
     #[test]

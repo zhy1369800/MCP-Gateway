@@ -23,6 +23,7 @@ This skill is intentionally a small terminal orchestration layer. It follows the
 - On Unix-like systems, commands are run through `sh -lc ...`. Write the `exec` string as POSIX shell code by default.
 - Commands are non-interactive. Do not launch editors, pagers, REPLs, curses/full-screen UIs, or prompts that wait for input.
 - Use `timeoutMs` when a command may take longer than the configured default. Keep it bounded.
+- Treat shell commands as the wrong default for manual file edits. When the task is to create, patch, or rewrite source/config/docs files by hand, prefer the bundled `apply_patch` skill first.
 
 ## Windows PowerShell Style
 
@@ -81,11 +82,40 @@ Use forward-slash paths and quote paths with spaces. Keep `cwd` set to the works
 
 Prefer `rg` and `rg --files` for discovery because they are fast and ignore common generated directories by default. If `rg` is unavailable, use the platform's normal alternative.
 
+## Counting Files And Broad Inventories
+
+When the user asks for file counts, repository size, broad file inventories, or similar numeric summaries, do not count dependency folders, VCS metadata, generated outputs, virtual environments, or caches as meaningful project files. These directories can dominate the result and make the answer misleading.
+
+Prefer commands that respect `.gitignore` and exclude high-volume irrelevant directories before counting:
+
+- Tracked files only: `git ls-files | Measure-Object` on Windows, or `git ls-files | wc -l` on Unix-like systems.
+- All non-ignored files with ripgrep on Windows: `(rg --files -g '!node_modules/**' -g '!.git/**' -g '!target/**' -g '!dist/**' -g '!build/**' -g '!coverage/**' -g '!.next/**' -g '!.nuxt/**' -g '!.turbo/**' -g '!.cache/**' -g '!__pycache__/**' -g '!.pytest_cache/**' -g '!.mypy_cache/**' -g '!.ruff_cache/**' -g '!.venv/**' -g '!venv/**' -g '!env/**' -g '!.tox/**' | Measure-Object).Count`
+- All non-ignored files with ripgrep on Unix-like systems: `rg --files -g '!node_modules/**' -g '!.git/**' -g '!target/**' -g '!dist/**' -g '!build/**' -g '!coverage/**' -g '!.next/**' -g '!.nuxt/**' -g '!.turbo/**' -g '!.cache/**' -g '!__pycache__/**' -g '!.pytest_cache/**' -g '!.mypy_cache/**' -g '!.ruff_cache/**' -g '!.venv/**' -g '!venv/**' -g '!env/**' -g '!.tox/**' | wc -l`
+
+Common directories to exclude from broad counts and inventories include:
+
+- Version control metadata: `.git`, `.svn`, `.hg`
+- JavaScript and frontend dependencies/caches: `node_modules`, `.pnpm-store`, `.yarn`, `.next`, `.nuxt`, `.turbo`, `.parcel-cache`, `bower_components`
+- Build and coverage output: `target`, `dist`, `build`, `out`, `coverage`, `.coverage`, `htmlcov`
+- Python environments and caches: `.venv`, `venv`, `env`, `.tox`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.nox`
+- General tool caches: `.cache`, `.gradle`, `.idea`, `.vscode`, `tmp`, `temp`
+
+Avoid broad recursive commands such as `Get-ChildItem -Recurse`, `find . -type f`, or `du` at the repository root unless they include explicit exclusions or the workspace is already known to be small. If `rg` is unavailable, prefer `git ls-files` for repository counts. For untracked non-ignored files without `rg`, use the platform's recursive listing only with exclusion filters.
+
 ## File Editing
 
-Use the bundled `apply_patch` skill for structured file edits when possible. It gives the gateway a clear set of affected paths before files are changed and avoids fragile shell redirection.
+Use the bundled `apply_patch` skill as the default way to create, modify, or rewrite files by hand. This includes source code, config files, docs, tests, examples, scripts, and small generated fixtures that the agent is authoring directly.
 
-Use shell-based writes only when a formatter, generator, package manager, or project script is the right owner of the output. Avoid ad hoc redirection such as `echo ... > file` for source edits.
+Prefer `apply_patch` because it gives the gateway a clear set of affected paths before files are changed, produces reviewable diffs, and avoids fragile shell redirection or quoting problems.
+
+Use shell-based writes only as a fallback after `apply_patch` is clearly unsuitable or has failed repeatedly, or when an external tool is the correct owner of the output. Valid examples include:
+
+- Running a formatter that rewrites files.
+- Running a code generator, scaffold command, package manager, or project script.
+- Producing binary files or very large mechanical outputs that cannot reasonably be expressed as a patch.
+- Applying an upstream patch file with `git apply` or a dedicated patch tool.
+
+Avoid ad hoc terminal writes such as `echo ... > file`, here-documents, `Set-Content`, `Out-File`, or scripts that manually rewrite source files when `apply_patch` can express the change. If shell-based writing is used as a fallback, explain why `apply_patch` was not sufficient and keep the command narrowly scoped.
 
 ## Safety And Policy
 
