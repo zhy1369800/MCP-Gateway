@@ -112,6 +112,8 @@ pub struct SkillsConfig {
     pub policy: SkillsPolicyConfig,
     #[serde(default)]
     pub execution: SkillsExecutionConfig,
+    #[serde(default)]
+    pub builtin_tools: BuiltinToolsConfig,
 }
 
 impl Default for SkillsConfig {
@@ -122,6 +124,7 @@ impl Default for SkillsConfig {
             roots: default_skills_roots(),
             policy: SkillsPolicyConfig::default(),
             execution: SkillsExecutionConfig::default(),
+            builtin_tools: BuiltinToolsConfig::default(),
         }
     }
 }
@@ -214,6 +217,37 @@ impl Default for SkillsExecutionConfig {
             max_output_bytes: default_skills_max_output_bytes(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinToolsConfig {
+    #[serde(default = "default_builtin_tool_enabled")]
+    pub shell_command: bool,
+    #[serde(default = "default_builtin_tool_enabled")]
+    pub apply_patch: bool,
+    #[serde(default = "default_builtin_tool_enabled")]
+    pub multi_edit_file: bool,
+    #[serde(default = "default_builtin_tool_enabled")]
+    pub chrome_cdp: bool,
+    #[serde(default = "default_builtin_tool_enabled")]
+    pub chat_plus_adapter_debugger: bool,
+}
+
+impl Default for BuiltinToolsConfig {
+    fn default() -> Self {
+        Self {
+            shell_command: default_builtin_tool_enabled(),
+            apply_patch: default_builtin_tool_enabled(),
+            multi_edit_file: default_builtin_tool_enabled(),
+            chrome_cdp: default_builtin_tool_enabled(),
+            chat_plus_adapter_debugger: default_builtin_tool_enabled(),
+        }
+    }
+}
+
+fn default_builtin_tool_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -60,6 +60,14 @@ export interface SkillRootEntry {
   enabled: boolean;
 }
 
+export interface BuiltinToolsConfig {
+  shellCommand: boolean;
+  applyPatch: boolean;
+  multiEditFile: boolean;
+  chromeCdp: boolean;
+  chatPlusAdapterDebugger: boolean;
+}
+
 export interface SkillsConfig {
   enabled: boolean;
   serverName: string;
@@ -67,6 +75,7 @@ export interface SkillsConfig {
   rootEntries?: SkillRootEntry[];
   policy: SkillsPolicyConfig;
   execution: SkillsExecutionConfig;
+  builtinTools: BuiltinToolsConfig;
 }
 
 export interface ServerConfig {

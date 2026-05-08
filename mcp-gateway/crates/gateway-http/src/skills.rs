@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use gateway_core::{
-    assign_child_to_gateway_job, wrap_windows_powershell_command_for_utf8, AppError, ErrorCode,
-    GatewayConfig, SkillCommandRule, SkillPolicyAction, SkillsConfig,
+    assign_child_to_gateway_job, wrap_windows_powershell_command_for_utf8, AppError,
+    BuiltinToolsConfig, ErrorCode, GatewayConfig, SkillCommandRule, SkillPolicyAction,
+    SkillsConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -546,7 +547,7 @@ impl SkillsService {
                 jsonrpc_result(
                     id,
                     json!({
-                        "tools": tool_definitions(&discovered),
+                        "tools": tool_definitions(&discovered, &config.skills.builtin_tools),
                         "skills": summaries
                     }),
                 )
@@ -676,7 +677,7 @@ impl SkillsService {
         config: &GatewayConfig,
     ) -> Result<Vec<SkillSummary>, AppError> {
         let discovered = self.discover_skills(&config.skills).await?;
-        let mut summaries = summarize_builtin_skills();
+        let mut summaries = summarize_builtin_skills(&config.skills.builtin_tools);
         summaries.extend(summarize_discovered_skills(&discovered));
         Ok(summaries)
     }
@@ -763,6 +764,12 @@ impl SkillsService {
         tool: BuiltinTool,
         arguments: Value,
     ) -> Result<ToolResult, AppError> {
+        if !builtin_tools(&config.skills.builtin_tools).contains(&tool) {
+            return Err(AppError::BadRequest(format!(
+                "builtin tool {} is disabled by configuration",
+                tool.name()
+            )));
+        }
         match tool {
             BuiltinTool::ShellCommand => {
                 let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
@@ -826,6 +833,12 @@ impl SkillsService {
         };
 
         if let Some(patch) = extract_apply_patch_from_shell_command(&command_preview) {
+            if !config.skills.builtin_tools.apply_patch {
+                return Err(AppError::BadRequest(
+                    "builtin tool apply_patch is disabled by configuration; cannot execute a patch from shell_command"
+                        .to_string(),
+                ));
+            }
             return self
                 .execute_apply_patch_text(config, patch, &cwd, &command_preview, &call_id)
                 .await;
@@ -2108,8 +2121,8 @@ fn summarize_discovered_skills(skills: &[DiscoveredSkill]) -> Vec<SkillSummary> 
         .collect()
 }
 
-fn summarize_builtin_skills() -> Vec<SkillSummary> {
-    builtin_tools()
+fn summarize_builtin_skills(cfg: &BuiltinToolsConfig) -> Vec<SkillSummary> {
+    builtin_tools(cfg)
         .into_iter()
         .map(|tool| {
             let frontmatter = builtin_skill_frontmatter(tool);
@@ -2124,21 +2137,31 @@ fn summarize_builtin_skills() -> Vec<SkillSummary> {
         .collect()
 }
 
-fn builtin_tools() -> [BuiltinTool; 5] {
-    [
-        BuiltinTool::ShellCommand,
-        BuiltinTool::ApplyPatch,
-        BuiltinTool::MultiEditFile,
-        BuiltinTool::ChromeCdp,
-        BuiltinTool::ChatPlusAdapterDebugger,
-    ]
+fn builtin_tools(cfg: &BuiltinToolsConfig) -> Vec<BuiltinTool> {
+    let mut tools = Vec::with_capacity(5);
+    if cfg.shell_command {
+        tools.push(BuiltinTool::ShellCommand);
+    }
+    if cfg.apply_patch {
+        tools.push(BuiltinTool::ApplyPatch);
+    }
+    if cfg.multi_edit_file {
+        tools.push(BuiltinTool::MultiEditFile);
+    }
+    if cfg.chrome_cdp {
+        tools.push(BuiltinTool::ChromeCdp);
+    }
+    if cfg.chat_plus_adapter_debugger {
+        tools.push(BuiltinTool::ChatPlusAdapterDebugger);
+    }
+    tools
 }
 
-fn tool_definitions(skills: &[DiscoveredSkill]) -> Value {
+fn tool_definitions(skills: &[DiscoveredSkill], cfg: &BuiltinToolsConfig) -> Value {
     let bindings = build_skill_tool_bindings(skills);
     let now = Utc::now().to_rfc3339();
     let os = current_os_label();
-    let mut tools = builtin_tool_definitions(os, &now);
+    let mut tools = builtin_tool_definitions(os, &now, cfg);
 
     tools.extend(bindings.into_iter().map(|(tool_name, skill)| {
         let description = render_skill_tool_description(skill, os, &now);
@@ -2166,9 +2189,12 @@ fn tool_definitions(skills: &[DiscoveredSkill]) -> Value {
     Value::Array(tools)
 }
 
-fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
-    vec![
-        json!({
+fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Vec<Value> {
+    let enabled: Vec<BuiltinTool> = builtin_tools(cfg);
+    let mut defs = Vec::with_capacity(5);
+
+    if enabled.contains(&BuiltinTool::ShellCommand) {
+        defs.push(json!({
             "name": BuiltinTool::ShellCommand.name(),
             "description": render_builtin_tool_description(BuiltinTool::ShellCommand, os, now),
             "inputSchema": {
@@ -2195,8 +2221,10 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     }
                 }
             }
-        }),
-        json!({
+        }));
+    }
+    if enabled.contains(&BuiltinTool::ApplyPatch) {
+        defs.push(json!({
             "name": BuiltinTool::ApplyPatch.name(),
             "description": render_builtin_tool_description(BuiltinTool::ApplyPatch, os, now),
             "inputSchema": {
@@ -2218,8 +2246,10 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     }
                 }
             }
-        }),
-        json!({
+        }));
+    }
+    if enabled.contains(&BuiltinTool::MultiEditFile) {
+        defs.push(json!({
             "name": BuiltinTool::MultiEditFile.name(),
             "description": render_builtin_tool_description(BuiltinTool::MultiEditFile, os, now),
             "inputSchema": {
@@ -2270,8 +2300,10 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     }
                 }
             }
-        }),
-        json!({
+        }));
+    }
+    if enabled.contains(&BuiltinTool::ChromeCdp) {
+        defs.push(json!({
             "name": BuiltinTool::ChromeCdp.name(),
             "description": render_builtin_tool_description(BuiltinTool::ChromeCdp, os, now),
             "inputSchema": {
@@ -2294,8 +2326,10 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     }
                 }
             }
-        }),
-        json!({
+        }));
+    }
+    if enabled.contains(&BuiltinTool::ChatPlusAdapterDebugger) {
+        defs.push(json!({
             "name": BuiltinTool::ChatPlusAdapterDebugger.name(),
             "description": render_builtin_tool_description(BuiltinTool::ChatPlusAdapterDebugger, os, now),
             "inputSchema": {
@@ -2318,8 +2352,9 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
                     }
                 }
             }
-        }),
-    ]
+        }));
+    }
+    defs
 }
 
 fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> String {
@@ -2576,7 +2611,7 @@ fn builtin_skill_doc_arg(arg: &str) -> Option<(BuiltinTool, String)> {
         return None;
     }
 
-    for tool in builtin_tools() {
+    for tool in builtin_tools(&BuiltinToolsConfig::default()) {
         let uri = builtin_skill_uri(tool);
         if candidate.eq_ignore_ascii_case(&uri) {
             return Some((tool, uri));
@@ -5559,7 +5594,7 @@ mod tests {
                 has_scripts: false,
             },
         ];
-        let tools = tool_definitions(&discovered);
+        let tools = tool_definitions(&discovered, &BuiltinToolsConfig::default());
         let shell_tool = tools
             .as_array()
             .and_then(|items| {
@@ -5663,8 +5698,12 @@ mod tests {
         let shell = builtin_skill_doc_result(tool, "doc", path, "abc123".to_string());
         assert!(!shell.is_error);
         assert!(shell.text.contains("# Shell Command"));
-        assert!(shell.text.contains("## Global Search And Discovery Priority"));
-        assert!(shell.text.contains("## Project And Workflow Navigation With Ripgrep"));
+        assert!(shell
+            .text
+            .contains("## Global Search And Discovery Priority"));
+        assert!(shell
+            .text
+            .contains("## Project And Workflow Navigation With Ripgrep"));
         assert!(shell.text.contains("rg --files"));
         assert!(shell.text.contains("Do not use `Get-ChildItem -Recurse`"));
         assert!(shell.text.contains("abc123"));
@@ -6088,5 +6127,60 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn disabled_builtin_tool_not_in_tool_definitions() {
+        let os = "Windows";
+        let now = "2024-01-01T00:00:00Z";
+        let cfg = BuiltinToolsConfig {
+            shell_command: false,
+            apply_patch: true,
+            multi_edit_file: true,
+            chrome_cdp: true,
+            chat_plus_adapter_debugger: true,
+        };
+        let tools = builtin_tool_definitions(os, now, &cfg);
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(!names.contains(&"shell_command"));
+        assert!(names.contains(&"apply_patch"));
+        assert!(names.contains(&"multi_edit_file"));
+    }
+
+    #[test]
+    fn all_disabled_except_one_returns_single_tool() {
+        let os = "Windows";
+        let now = "2024-01-01T00:00:00Z";
+        let cfg = BuiltinToolsConfig {
+            shell_command: false,
+            apply_patch: false,
+            multi_edit_file: false,
+            chrome_cdp: true,
+            chat_plus_adapter_debugger: false,
+        };
+        let tools = builtin_tool_definitions(os, now, &cfg);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0].get("name").and_then(Value::as_str),
+            Some("chrome-cdp")
+        );
+    }
+
+    #[test]
+    fn disabled_tool_rejected_in_execute_builtin_tool() {
+        let all_enabled = BuiltinToolsConfig::default();
+        assert_eq!(builtin_tools(&all_enabled).len(), 5);
+
+        let all_disabled = BuiltinToolsConfig {
+            shell_command: false,
+            apply_patch: false,
+            multi_edit_file: false,
+            chrome_cdp: false,
+            chat_plus_adapter_debugger: false,
+        };
+        assert_eq!(builtin_tools(&all_disabled).len(), 0);
     }
 }

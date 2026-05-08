@@ -14,7 +14,7 @@ MCP Gateway 是一个 MCP（Model Context Protocol）服务器网关。
 - 网关统一转发 `HTTP`：默认`POST /api/v2/mcp/<serverName>`
 - 内置安全认证（Admin Token / MCP Token）
 - `SKILLS` 标签页支持内置 Skill MCP 服务管理
-- 自带 Skill：`shell_command`、`apply_patch`、`chrome-cdp`、`chat-plus-adapter-debugger`
+- 自带 Skill：`shell_command`、`apply_patch`、`multi_edit_file`、`chrome-cdp`、`chat-plus-adapter-debugger`，每个可独立启用/禁用
 - 外部 Skill 根目录管理，支持单独启用/禁用和 `SKILL.md` 校验
 - 访问边界 / 路径守卫（允许访问目录 + 越界策略）
 - 执行限制（超时、最大输出）
@@ -91,7 +91,7 @@ MCP Gateway 是一个 MCP（Model Context Protocol）服务器网关。
 
 1. 打开 `启用内置 SKILL MCP`。
 2. 设置 `Skill 服务名`（默认 `__skills__`）。
-3. 查看自带 Skill：`shell_command`、`apply_patch`、`chrome-cdp`、`chat-plus-adapter-debugger`。
+3. 查看自带 Skill：`shell_command`、`apply_patch`、`multi_edit_file`、`chrome-cdp`、`chat-plus-adapter-debugger`。每个自带 Skill 可单独开关。注意：`apply_patch` 和 `multi_edit_file` 的文档读取依赖 `shell_command`，关闭 `shell_command` 将无法获取 token；如需要这两个工具，建议保持 `shell_command` 启用。
 4. 添加 `外部 Skill 根目录`，检测每个目录下是否直接存在 `SKILL.md`，并只启用需要暴露的根目录。
 5. 配置 `允许访问目录`。启用 Skill MCP 时访问边界为必填；命令执行和文件修改都必须留在允许访问目录内，除非你选择的越界动作允许继续。
 6. 选择越界动作：`allow / confirm / deny`。

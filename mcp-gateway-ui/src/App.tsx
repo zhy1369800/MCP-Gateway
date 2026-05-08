@@ -370,6 +370,13 @@ function ensureSkillsConfig(
       timeoutMs: raw?.execution?.timeoutMs ?? 60000,
       maxOutputBytes: raw?.execution?.maxOutputBytes ?? 131072,
     },
+    builtinTools: {
+      shellCommand: raw?.builtinTools?.shellCommand ?? true,
+      applyPatch: raw?.builtinTools?.applyPatch ?? true,
+      multiEditFile: raw?.builtinTools?.multiEditFile ?? true,
+      chromeCdp: raw?.builtinTools?.chromeCdp ?? true,
+      chatPlusAdapterDebugger: raw?.builtinTools?.chatPlusAdapterDebugger ?? true,
+    },
   };
 }
 
@@ -3016,38 +3023,63 @@ function App() {
                   <div className="built-in-tools-grid">
                     <div className="built-in-tool">
                       <Code2 size={15} />
-                      <div>
+                      <div className="built-in-tool-body">
                         <div className="built-in-tool-name">shell_command</div>
                         <div className="built-in-tool-desc">{t("builtInShellDesc")}</div>
                       </div>
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.shellCommand ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellCommand: !prev.builtinTools.shellCommand } }))}
+                        title={skills.builtinTools.shellCommand ? t("enabledClick") : t("disabledClick")}
+                      />
                     </div>
                     <div className="built-in-tool">
                       <Pencil size={15} />
-                      <div>
+                      <div className="built-in-tool-body">
                         <div className="built-in-tool-name">apply_patch</div>
                         <div className="built-in-tool-desc">{t("builtInPatchDesc")}</div>
                       </div>
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.applyPatch ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, applyPatch: !prev.builtinTools.applyPatch } }))}
+                        title={skills.builtinTools.applyPatch ? t("enabledClick") : t("disabledClick")}
+                      />
                     </div>
                     <div className="built-in-tool">
                       <List size={15} />
-                      <div>
+                      <div className="built-in-tool-body">
                         <div className="built-in-tool-name">multi_edit_file</div>
                         <div className="built-in-tool-desc">{t("builtInMultiEditDesc")}</div>
                       </div>
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.multiEditFile ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, multiEditFile: !prev.builtinTools.multiEditFile } }))}
+                        title={skills.builtinTools.multiEditFile ? t("enabledClick") : t("disabledClick")}
+                      />
                     </div>
                     <div className="built-in-tool">
                       <Globe size={15} />
-                      <div>
+                      <div className="built-in-tool-body">
                         <div className="built-in-tool-name">chrome-cdp</div>
                         <div className="built-in-tool-desc">{t("builtInChromeCdpDesc")}</div>
                       </div>
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.chromeCdp ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, chromeCdp: !prev.builtinTools.chromeCdp } }))}
+                        title={skills.builtinTools.chromeCdp ? t("enabledClick") : t("disabledClick")}
+                      />
                     </div>
                     <div className="built-in-tool">
                       <Code2 size={15} />
-                      <div>
+                      <div className="built-in-tool-body">
                         <div className="built-in-tool-name">chat-plus-adapter-debugger</div>
                         <div className="built-in-tool-desc">{t("builtInChatPlusAdapterDesc")}</div>
                       </div>
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.chatPlusAdapterDebugger ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, chatPlusAdapterDebugger: !prev.builtinTools.chatPlusAdapterDebugger } }))}
+                        title={skills.builtinTools.chatPlusAdapterDebugger ? t("enabledClick") : t("disabledClick")}
+                      />
                     </div>
                   </div>
                 </div>
