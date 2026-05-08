@@ -38,7 +38,7 @@ Prefer `apply_patch` for creating, deleting, moving, or renaming files. Prefer `
 ```
 
 - `path` is the existing file to edit, relative to `cwd` unless absolute.
-- `edits` is an ordered list of replacements applied to the file content in memory.
+- `edits` is an ordered list of replacements applied to the current file content in memory during this call.
 - `old_string` must be exact current file text after normalizing CRLF to LF.
 - `new_string` is the replacement text.
 - `replace_all` replaces every occurrence of `old_string` in the current in-memory state.
@@ -47,11 +47,13 @@ Prefer `apply_patch` for creating, deleting, moving, or renaming files. Prefer `
 ## Rules
 
 1. Read the relevant file content before editing.
-2. Use exact `old_string` text copied from the current file, including indentation.
-3. Keep `old_string` as small as practical while still unique. If it is not unique, either set `replace_all` or provide `startLine`.
-4. Do not set `old_string` equal to `new_string`.
-5. Do not use an empty `old_string`; use `apply_patch` for insert-only changes.
-6. Order edits so a later `old_string` does not target text produced by an earlier `new_string`.
+2. Treat every successful write as immediately committed to disk. If this file was just changed by `multi_edit_file`, `apply_patch`, a formatter, or another tool call, base the next edit on the latest file text, not on an older snapshot.
+3. Use exact `old_string` text copied from the current file, including indentation.
+4. Keep `old_string` as small as practical while still unique. If it is not unique, either set `replace_all` or provide `startLine`.
+5. Do not set `old_string` equal to `new_string`.
+6. Do not use an empty `old_string`; use `apply_patch` for insert-only changes.
+7. Order edits so a later `old_string` does not target text produced by an earlier `new_string`.
+8. For TS, TSX, JS, and JSX template strings, write `${...}` exactly. Do not escape the dollar sign as `\${...}` unless the target source code truly needs a literal `${...}` string.
 
 ## Examples
 
@@ -92,4 +94,4 @@ Rename throughout one file:
 
 ## Result And Events
 
-On success, the result includes a compact delta with byte counts and affected path metadata. The admin event stream records an `editPreview` event before policy confirmation and a `finished` event after completion.
+On success, the result includes a compact delta with byte counts and affected path metadata. It also includes a `warnings` array when the gateway detects likely syntax hazards such as unbalanced delimiters or accidental `\${...}` in TS/JS files. Warnings do not block the write; inspect and verify them before continuing. The admin event stream records an `editPreview` event before policy confirmation and a `finished` event after completion.

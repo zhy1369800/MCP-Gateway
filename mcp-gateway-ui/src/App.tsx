@@ -374,6 +374,7 @@ function ensureSkillsConfig(
       shellCommand: raw?.builtinTools?.shellCommand ?? true,
       applyPatch: raw?.builtinTools?.applyPatch ?? true,
       multiEditFile: raw?.builtinTools?.multiEditFile ?? true,
+      taskPlanning: raw?.builtinTools?.taskPlanning ?? true,
       chromeCdp: raw?.builtinTools?.chromeCdp ?? true,
       chatPlusAdapterDebugger: raw?.builtinTools?.chatPlusAdapterDebugger ?? true,
     },
@@ -3055,6 +3056,18 @@ function App() {
                         className={`toggle-btn ${skills.builtinTools.multiEditFile ? "toggle-on" : "toggle-off"}`}
                         onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, multiEditFile: !prev.builtinTools.multiEditFile } }))}
                         title={skills.builtinTools.multiEditFile ? t("enabledClick") : t("disabledClick")}
+                      />
+                    </div>
+                    <div className="built-in-tool">
+                      <List size={15} />
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">task-planning</div>
+                        <div className="built-in-tool-desc">{t("builtInTaskPlanningDesc")}</div>
+                      </div>
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.taskPlanning ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, taskPlanning: !prev.builtinTools.taskPlanning } }))}
+                        title={skills.builtinTools.taskPlanning ? t("enabledClick") : t("disabledClick")}
                       />
                     </div>
                     <div className="built-in-tool">

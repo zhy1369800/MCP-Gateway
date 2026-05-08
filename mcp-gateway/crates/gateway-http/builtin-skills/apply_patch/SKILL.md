@@ -34,10 +34,11 @@ Use a formatter or project generator instead when the output is mechanical and o
 ## Mandatory Workflow
 
 1. Know the current file text before editing. If the exact target lines are not already in context, use `shell_command` to read a focused region first.
-2. Choose the smallest patch that expresses the requested change. Prefer one or two line replacements over replacing a whole function, array, or repeated rule list.
-3. For `*** Update File`, write a line-level diff. Every code line in the hunk must start with one of: space, `-`, `+`.
-4. Use exact `-` lines copied from the current file. Do not invent old lines from memory.
-5. If the patch fails with `failed to find expected lines`, re-read the relevant file region and retry with a smaller, more accurate hunk. Do not retry by pasting a larger raw code block.
+2. Treat every successful write as immediately committed to disk. If this file was just changed by `apply_patch`, `multi_edit_file`, a formatter, or another tool call, base the next edit on the latest file text, not on an older snapshot.
+3. Choose the smallest patch that expresses the requested change. Prefer one or two line replacements over replacing a whole function, array, or repeated rule list.
+4. For `*** Update File`, write a line-level diff. Every code line in the hunk must start with one of: space, `-`, `+`.
+5. Use exact `-` lines copied from the current file. Do not invent old lines from memory.
+6. If the patch fails with `failed to find expected lines`, `failed to find @@ context`, or `ambiguous patch hunk`, re-read the relevant file region and retry with a smaller, more accurate hunk. Do not retry by pasting a larger raw code block.
 
 ## Scope And Cwd
 
@@ -121,7 +122,7 @@ Write the smallest exact change instead:
 *** End Patch
 ```
 
-For repeated structures such as config rule arrays, use a unique nearby identifier as the `@@` context and change only the fields that actually differ. Do not include dozens of neighboring entries just to edit one entry.
+For repeated structures such as config rule arrays, JSX card grids, or repeated HTML blocks, use a unique nearby identifier as the `@@` context and change only the fields that actually differ. Do not include dozens of neighboring entries just to edit one entry. If the gateway reports `ambiguous patch hunk`, use the returned candidate line numbers to re-read the target area and add a stronger anchor.
 
 `*** Update File` must contain at least one non-empty hunk. Empty update sections are rejected.
 
@@ -129,7 +130,13 @@ The gateway accepts patch text wrapped in a simple heredoc envelope such as `<<'
 
 When locating update hunks, the gateway tries exact matching first, then progressively allows trailing whitespace differences, surrounding whitespace differences, and common Unicode punctuation differences such as typographic dashes and quotes. Use enough context anyway; fuzzy matching is a recovery aid, not a replacement for precise patches.
 
+If an update fails with `failed to find @@ context`, the optional `@@` anchor did not appear in the current file. The gateway will not silently fall back to a full-file search when an anchor is provided.
+
 If an update fails with `failed to find expected lines`, the old `-` and unchanged context lines did not appear as one contiguous sequence in the current file after the optional `@@` context. Re-read the relevant file region and retry with a smaller hunk or more accurate context. Do not respond by pasting a larger raw code block.
+
+If an update fails with `ambiguous patch hunk`, the same old lines matched multiple locations. Re-read one of the candidate line ranges and add unique surrounding context or a better `@@` anchor.
+
+For TS, TSX, JS, and JSX template strings, write `${...}` exactly. Do not escape the dollar sign as `\${...}` unless the target source code truly needs a literal `${...}` string.
 
 This tool does not accept standard unified diff headers such as `--- file` and `+++ file`. It also does not accept prose "search/replace" blocks or bare replacement code. Use only the grammar above.
 
@@ -216,7 +223,7 @@ Append at end of file:
 
 ## Result And Events
 
-On success, the tool result includes a short summary and a compact `delta` with paths, change kinds, byte counts, and whether overwritten content existed. The tool result intentionally does not return full `oldContent` or `newContent` text, because large file contents waste model context. On failure, the result still includes a compact committed delta summary so callers can see whether any earlier file operations were already written. The `delta.exact` flag is `false` when the gateway cannot fully prove the recorded delta, for example after a failed write, unreadable overwritten content, or non-regular file behavior.
+On success, the tool result includes a short summary, a compact `delta` with paths, change kinds, byte counts, and whether overwritten content existed, and a `warnings` array when the gateway detects likely syntax hazards such as unbalanced delimiters or accidental `\${...}` in TS/JS files. Warnings do not block the write; inspect and verify them before continuing. The tool result intentionally does not return full `oldContent` or `newContent` text, because large file contents waste model context. On failure, the result still includes a compact committed delta summary so callers can see whether any earlier file operations were already written. The `delta.exact` flag is `false` when the gateway cannot fully prove the recorded delta, for example after a failed write, unreadable overwritten content, or non-regular file behavior.
 
 The admin event stream at `/api/v2/admin/skills/events?after=<seq>` records patch lifecycle events:
 

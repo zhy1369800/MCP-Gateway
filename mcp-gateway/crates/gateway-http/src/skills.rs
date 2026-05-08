@@ -36,6 +36,8 @@ const BUILTIN_SHELL_COMMAND_SKILL_MD: &str =
 const BUILTIN_APPLY_PATCH_SKILL_MD: &str = include_str!("../builtin-skills/apply_patch/SKILL.md");
 const BUILTIN_MULTI_EDIT_FILE_SKILL_MD: &str =
     include_str!("../builtin-skills/multi_edit_file/SKILL.md");
+const BUILTIN_TASK_PLANNING_SKILL_MD: &str =
+    include_str!("../builtin-skills/task-planning/SKILL.md");
 const BUILTIN_CHROME_CDP_SKILL_MD: &str = include_str!("../builtin-skills/chrome-cdp/SKILL.md");
 const BUILTIN_CHROME_CDP_MJS: &str = include_str!("../builtin-skills/chrome-cdp/scripts/cdp.mjs");
 const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
@@ -275,6 +277,7 @@ enum BuiltinTool {
     ShellCommand,
     ApplyPatch,
     MultiEditFile,
+    TaskPlanning,
     ChromeCdp,
     ChatPlusAdapterDebugger,
 }
@@ -349,6 +352,8 @@ pub struct SkillToolEvent {
     pub changes: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<AppliedPatchDelta>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -362,6 +367,7 @@ struct SkillToolEventData {
     affected_paths: Vec<String>,
     changes: Option<Value>,
     delta: Option<AppliedPatchDelta>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -411,6 +417,7 @@ struct ApplyPatchFailure {
 struct ApplyPatchOutcome {
     summary: PatchSummary,
     delta: AppliedPatchDelta,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -725,6 +732,7 @@ impl SkillsService {
             affected_paths: data.affected_paths,
             changes: data.changes,
             delta: data.delta,
+            warnings: data.warnings,
         })
         .await;
     }
@@ -782,6 +790,10 @@ impl SkillsService {
             BuiltinTool::MultiEditFile => {
                 let args = decode_tool_args::<MultiEditFileArgs>(&arguments)?;
                 self.handle_builtin_multi_edit_file(config, args).await
+            }
+            BuiltinTool::TaskPlanning => {
+                let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
+                self.handle_builtin_task_planning(args).await
             }
             BuiltinTool::ChromeCdp => {
                 let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
@@ -1149,6 +1161,7 @@ impl SkillsService {
                     SkillToolEventData {
                         status: Some("completed".to_string()),
                         delta: Some(outcome.delta.clone()),
+                        warnings: outcome.warnings.clone(),
                         ..SkillToolEventData::default()
                     },
                 )
@@ -1160,7 +1173,8 @@ impl SkillsService {
                         "tool": BuiltinTool::MultiEditFile.name(),
                         "cwd": normalize_display_path(&cwd),
                         "modified": outcome.summary.modified,
-                        "delta": patch_delta_for_model(&outcome.delta)
+                        "delta": patch_delta_for_model(&outcome.delta),
+                        "warnings": outcome.warnings
                     }),
                 ))
             }
@@ -1294,6 +1308,7 @@ impl SkillsService {
                     SkillToolEventData {
                         status: Some("completed".to_string()),
                         delta: Some(outcome.delta.clone()),
+                        warnings: outcome.warnings.clone(),
                         ..SkillToolEventData::default()
                     },
                 )
@@ -1307,7 +1322,8 @@ impl SkillsService {
                         "added": outcome.summary.added,
                         "modified": outcome.summary.modified,
                         "deleted": outcome.summary.deleted,
-                        "delta": patch_delta_for_model(&outcome.delta)
+                        "delta": patch_delta_for_model(&outcome.delta),
+                        "warnings": outcome.warnings
                     }),
                 ))
             }
@@ -1340,6 +1356,43 @@ impl SkillsService {
                 ))
             }
         }
+    }
+
+    async fn handle_builtin_task_planning(
+        &self,
+        args: BuiltinShellArgs,
+    ) -> Result<ToolResult, AppError> {
+        let command_preview = args.exec.trim().to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
+        }
+
+        if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
+            return Ok(builtin_skill_doc_result(
+                tool,
+                &command_preview,
+                matched_path,
+                builtin_skill_token(tool),
+            ));
+        }
+
+        if let Some(result) = validate_skill_token_result(
+            BuiltinTool::TaskPlanning.name(),
+            &builtin_skill_token(BuiltinTool::TaskPlanning),
+            args.skill_token.as_deref(),
+        ) {
+            return Ok(result);
+        }
+
+        Ok(tool_success(
+            "task-planning is an instruction-only skill. Keep the todo list in the conversation, rewrite it as work changes, and omit it after the task is complete; the gateway stores no plan state.".to_string(),
+            json!({
+                "status": "completed",
+                "tool": BuiltinTool::TaskPlanning.name(),
+                "mode": "instruction_only",
+                "stateStored": false
+            }),
+        ))
     }
 
     async fn handle_builtin_chrome_cdp(
@@ -2138,7 +2191,7 @@ fn summarize_builtin_skills(cfg: &BuiltinToolsConfig) -> Vec<SkillSummary> {
 }
 
 fn builtin_tools(cfg: &BuiltinToolsConfig) -> Vec<BuiltinTool> {
-    let mut tools = Vec::with_capacity(5);
+    let mut tools = Vec::with_capacity(6);
     if cfg.shell_command {
         tools.push(BuiltinTool::ShellCommand);
     }
@@ -2147,6 +2200,9 @@ fn builtin_tools(cfg: &BuiltinToolsConfig) -> Vec<BuiltinTool> {
     }
     if cfg.multi_edit_file {
         tools.push(BuiltinTool::MultiEditFile);
+    }
+    if cfg.task_planning {
+        tools.push(BuiltinTool::TaskPlanning);
     }
     if cfg.chrome_cdp {
         tools.push(BuiltinTool::ChromeCdp);
@@ -2191,7 +2247,7 @@ fn tool_definitions(skills: &[DiscoveredSkill], cfg: &BuiltinToolsConfig) -> Val
 
 fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Vec<Value> {
     let enabled: Vec<BuiltinTool> = builtin_tools(cfg);
-    let mut defs = Vec::with_capacity(5);
+    let mut defs = Vec::with_capacity(6);
 
     if enabled.contains(&BuiltinTool::ShellCommand) {
         defs.push(json!({
@@ -2302,6 +2358,27 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
             }
         }));
     }
+    if enabled.contains(&BuiltinTool::TaskPlanning) {
+        defs.push(json!({
+            "name": BuiltinTool::TaskPlanning.name(),
+            "description": render_builtin_tool_description(BuiltinTool::TaskPlanning, os, now),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["exec"],
+                "properties": {
+                    "exec": {
+                        "type": "string",
+                        "description": "Documentation read command. First call must read the complete builtin://task-planning/SKILL.md. This skill is instruction-only and does not execute planning actions."
+                    },
+                    "skillToken": {
+                        "type": "string",
+                        "description": "Required for every non-documentation call. First read the complete builtin://task-planning/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                    }
+                }
+            }
+        }));
+    }
     if enabled.contains(&BuiltinTool::ChromeCdp) {
         defs.push(json!({
             "name": BuiltinTool::ChromeCdp.name(),
@@ -2373,7 +2450,9 @@ fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> St
         BuiltinTool::ApplyPatch | BuiltinTool::MultiEditFile => {
             format!("Before calling `{}`, use `shell_command` to read the complete SKILL.md; this read does not require `skillToken`. Suggested shell `exec`: `{read_cmd}`.", tool.name())
         }
-        BuiltinTool::ChromeCdp | BuiltinTool::ChatPlusAdapterDebugger => {
+        BuiltinTool::TaskPlanning
+        | BuiltinTool::ChromeCdp
+        | BuiltinTool::ChatPlusAdapterDebugger => {
             format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`, using `exec`: `{read_cmd}`.")
         }
     };
@@ -2411,6 +2490,7 @@ fn builtin_skill_md_content(tool: BuiltinTool) -> &'static str {
         BuiltinTool::ShellCommand => BUILTIN_SHELL_COMMAND_SKILL_MD,
         BuiltinTool::ApplyPatch => BUILTIN_APPLY_PATCH_SKILL_MD,
         BuiltinTool::MultiEditFile => BUILTIN_MULTI_EDIT_FILE_SKILL_MD,
+        BuiltinTool::TaskPlanning => BUILTIN_TASK_PLANNING_SKILL_MD,
         BuiltinTool::ChromeCdp => BUILTIN_CHROME_CDP_SKILL_MD,
         BuiltinTool::ChatPlusAdapterDebugger => BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD,
     }
@@ -2901,6 +2981,9 @@ impl BuiltinTool {
             value if value.eq_ignore_ascii_case(Self::MultiEditFile.name()) => {
                 Some(Self::MultiEditFile)
             }
+            value if value.eq_ignore_ascii_case(Self::TaskPlanning.name()) => {
+                Some(Self::TaskPlanning)
+            }
             value if value.eq_ignore_ascii_case(Self::ChromeCdp.name()) => Some(Self::ChromeCdp),
             value if value.eq_ignore_ascii_case(Self::ChatPlusAdapterDebugger.name()) => {
                 Some(Self::ChatPlusAdapterDebugger)
@@ -2914,6 +2997,7 @@ impl BuiltinTool {
             Self::ShellCommand => "shell_command",
             Self::ApplyPatch => "apply_patch",
             Self::MultiEditFile => "multi_edit_file",
+            Self::TaskPlanning => "task-planning",
             Self::ChromeCdp => "chrome-cdp",
             Self::ChatPlusAdapterDebugger => "chat-plus-adapter-debugger",
         }
@@ -4059,6 +4143,7 @@ fn apply_parsed_patch(
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
     let mut delta = AppliedPatchDelta::default();
+    let mut warnings = Vec::new();
 
     for hunk in &parsed.hunks {
         match hunk {
@@ -4091,6 +4176,7 @@ fn apply_parsed_patch(
                     delta.exact = false;
                     return Err(patch_failure(error.into(), &delta));
                 }
+                warnings.extend(collect_edit_warnings(&target, "", &content));
                 delta.changes.push(AppliedPatchChange::Add {
                     path: normalize_display_path(&target),
                     content,
@@ -4150,6 +4236,7 @@ fn apply_parsed_patch(
                     .map_err(|error| patch_failure(error.into(), &delta))?;
                 let updated = apply_update_chunks(&original, chunks, &source)
                     .map_err(|error| patch_failure(error, &delta))?;
+                warnings.extend(collect_edit_warnings(&source, &original, &updated));
                 if let Some(move_path) = move_path {
                     let target = resolve_patch_path(cwd, move_path)
                         .map_err(|error| patch_failure(error, &delta))?;
@@ -4211,6 +4298,7 @@ fn apply_parsed_patch(
             deleted,
         },
         delta,
+        warnings,
     })
 }
 
@@ -4283,11 +4371,18 @@ fn apply_update_chunks(
 
     let mut cursor = 0;
     for chunk in chunks {
-        let context_start = chunk
-            .change_context
-            .as_ref()
-            .and_then(|context| find_context_line(&lines, context, cursor))
-            .map(|index| index + 1);
+        let context_start = if let Some(context) = &chunk.change_context {
+            let Some(index) = find_context_line(&lines, context, cursor) else {
+                return Err(AppError::BadRequest(format!(
+                    "failed to find @@ context in {}: {}",
+                    path.to_string_lossy(),
+                    context
+                )));
+            };
+            Some(index + 1)
+        } else {
+            None
+        };
         let search_start = context_start.unwrap_or(cursor);
         if chunk.old_lines.is_empty() {
             let insert_at = if chunk.is_end_of_file {
@@ -4300,16 +4395,37 @@ fn apply_update_chunks(
             continue;
         }
 
-        let Some(found) =
-            find_line_sequence(&lines, &chunk.old_lines, search_start, chunk.is_end_of_file)
-                .or_else(|| find_line_sequence(&lines, &chunk.old_lines, 0, chunk.is_end_of_file))
-        else {
+        let matches = if chunk.change_context.is_some() {
+            find_line_sequence_matches(&lines, &chunk.old_lines, search_start, chunk.is_end_of_file)
+        } else {
+            let primary = find_line_sequence_matches(
+                &lines,
+                &chunk.old_lines,
+                search_start,
+                chunk.is_end_of_file,
+            );
+            if primary.is_empty() && search_start != 0 {
+                find_line_sequence_matches(&lines, &chunk.old_lines, 0, chunk.is_end_of_file)
+            } else {
+                primary
+            }
+        };
+        let Some(found) = matches.first().copied() else {
             return Err(AppError::BadRequest(format!(
                 "failed to find expected lines in {}:\n{}",
                 path.to_string_lossy(),
                 chunk.old_lines.join("\n")
             )));
         };
+        if matches.len() > 1 {
+            return Err(AppError::BadRequest(format!(
+                "ambiguous patch hunk in {}: expected lines matched {} locations at lines {}. Add a unique @@ context or include more surrounding unchanged lines.\n{}",
+                path.to_string_lossy(),
+                matches.len(),
+                format_line_candidates(&lines, &matches),
+                chunk.old_lines.join("\n")
+            )));
+        }
         let end = found + chunk.old_lines.len();
         lines.splice(found..end, chunk.new_lines.clone());
         cursor = found + chunk.new_lines.len();
@@ -4354,6 +4470,7 @@ fn apply_multi_edit_file(
     }
 
     let updated = restore_line_endings(&updated_lf, line_endings);
+    let warnings = collect_edit_warnings(target, &original, &updated);
     fs::write(target, &updated).map_err(|error| {
         let mut failed_delta = delta.clone();
         failed_delta.exact = false;
@@ -4376,6 +4493,7 @@ fn apply_multi_edit_file(
             deleted: Vec::new(),
         },
         delta: committed_delta,
+        warnings,
     })
 }
 
@@ -4516,6 +4634,171 @@ fn restore_line_endings(content: &str, line_endings: TextLineEndings) -> String 
     }
 }
 
+fn collect_edit_warnings(path: &Path, old_content: &str, new_content: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Some(extension) = path.extension().and_then(OsStr::to_str) else {
+        return warnings;
+    };
+    let extension = extension.to_ascii_lowercase();
+    let is_js_like = matches!(extension.as_str(), "js" | "jsx" | "ts" | "tsx");
+    let is_checked_code = is_js_like || extension == "rs";
+
+    if is_js_like && new_content.contains("\\${") {
+        warnings.push(format!(
+            "{} contains `\\${{`; TS/JS template expressions usually require `${{...}}` without the backslash.",
+            path.to_string_lossy()
+        ));
+    }
+
+    if is_checked_code {
+        let old_issues = bracket_balance_issues(old_content, is_js_like);
+        let new_issues = bracket_balance_issues(new_content, is_js_like);
+        if !new_issues.is_empty() && old_issues != new_issues {
+            warnings.push(format!(
+                "{} may have unbalanced delimiters after edit: {}",
+                path.to_string_lossy(),
+                new_issues.join("; ")
+            ));
+        }
+    }
+
+    warnings
+}
+
+fn bracket_balance_issues(content: &str, js_like: bool) -> Vec<String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ScanState {
+        Code,
+        LineComment,
+        BlockComment,
+        DoubleString,
+        SingleString,
+        TemplateString,
+    }
+
+    let mut state = ScanState::Code;
+    let mut escaped = false;
+    let mut stack = Vec::<(char, usize, usize)>::new();
+    let mut issues = Vec::<String>::new();
+    let mut chars = content.chars().peekable();
+    let mut line = 1usize;
+    let mut column = 0usize;
+
+    while let Some(ch) = chars.next() {
+        column += 1;
+        let next = chars.peek().copied();
+
+        match state {
+            ScanState::Code => match ch {
+                '/' if next == Some('/') => {
+                    chars.next();
+                    column += 1;
+                    state = ScanState::LineComment;
+                }
+                '/' if next == Some('*') => {
+                    chars.next();
+                    column += 1;
+                    state = ScanState::BlockComment;
+                }
+                '"' => {
+                    escaped = false;
+                    state = ScanState::DoubleString;
+                }
+                '\'' if js_like => {
+                    escaped = false;
+                    state = ScanState::SingleString;
+                }
+                '`' if js_like => {
+                    escaped = false;
+                    state = ScanState::TemplateString;
+                }
+                '(' | '[' | '{' => stack.push((ch, line, column)),
+                ')' | ']' | '}' => {
+                    let expected = matching_open_delimiter(ch);
+                    match stack.pop() {
+                        Some((open, _, _)) if open == expected => {}
+                        Some((open, open_line, open_column)) => issues.push(format!(
+                            "line {line}, column {column}: found `{ch}` while `{}` opened at line {open_line}, column {open_column}",
+                            open
+                        )),
+                        None => issues.push(format!(
+                            "line {line}, column {column}: unmatched closing `{ch}`"
+                        )),
+                    }
+                }
+                _ => {}
+            },
+            ScanState::LineComment => {
+                if ch == '\n' {
+                    state = ScanState::Code;
+                }
+            }
+            ScanState::BlockComment => {
+                if ch == '*' && next == Some('/') {
+                    chars.next();
+                    column += 1;
+                    state = ScanState::Code;
+                }
+            }
+            ScanState::DoubleString => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    state = ScanState::Code;
+                }
+            }
+            ScanState::SingleString => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '\'' {
+                    state = ScanState::Code;
+                }
+            }
+            ScanState::TemplateString => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '`' {
+                    state = ScanState::Code;
+                }
+            }
+        }
+
+        if ch == '\n' {
+            line += 1;
+            column = 0;
+            if state == ScanState::LineComment {
+                state = ScanState::Code;
+            }
+        }
+    }
+
+    issues.extend(
+        stack
+            .into_iter()
+            .rev()
+            .map(|(open, open_line, open_column)| {
+                format!("line {open_line}, column {open_column}: unclosed `{open}`")
+            }),
+    );
+    issues.truncate(5);
+    issues
+}
+
+fn matching_open_delimiter(close: char) -> char {
+    match close {
+        ')' => '(',
+        ']' => '[',
+        '}' => '{',
+        other => other,
+    }
+}
+
 fn multi_edit_preview(args: &MultiEditFileArgs) -> String {
     let changes = args
         .edits
@@ -4563,17 +4846,28 @@ fn find_line_sequence(
     start: usize,
     eof: bool,
 ) -> Option<usize> {
+    find_line_sequence_matches(lines, needle, start, eof)
+        .first()
+        .copied()
+}
+
+fn find_line_sequence_matches(
+    lines: &[String],
+    needle: &[String],
+    start: usize,
+    eof: bool,
+) -> Vec<usize> {
     if needle.is_empty() {
-        return Some(start.min(lines.len()));
+        return vec![start.min(lines.len())];
     }
     if needle.len() > lines.len() {
-        return None;
+        return Vec::new();
     }
     let max_start = lines.len() - needle.len();
     let search_start = if eof {
         max_start
     } else if start > max_start {
-        return None;
+        return Vec::new();
     } else {
         start
     };
@@ -4583,20 +4877,49 @@ fn find_line_sequence(
         line_matches_trim,
         line_matches_normalized,
     ] {
+        let mut matches = Vec::new();
+        let mut seen = BTreeSet::new();
         for index in search_start..=max_start {
             if sequence_matches(lines, needle, index, matcher) {
-                return Some(index);
+                matches.push(index);
+                seen.insert(index);
             }
         }
         if eof && start <= max_start && search_start != start {
             for index in start..=max_start {
-                if sequence_matches(lines, needle, index, matcher) {
-                    return Some(index);
+                if !seen.contains(&index) && sequence_matches(lines, needle, index, matcher) {
+                    matches.push(index);
                 }
             }
         }
+        if !matches.is_empty() {
+            return matches;
+        }
     }
-    None
+    Vec::new()
+}
+
+fn format_line_candidates(lines: &[String], matches: &[usize]) -> String {
+    let mut rendered = matches
+        .iter()
+        .take(5)
+        .map(|index| {
+            let line_no = index + 1;
+            let preview = lines
+                .get(*index)
+                .map(|line| line.trim())
+                .unwrap_or_default();
+            if preview.is_empty() {
+                line_no.to_string()
+            } else {
+                format!("{line_no} (`{preview}`)")
+            }
+        })
+        .collect::<Vec<_>>();
+    if matches.len() > rendered.len() {
+        rendered.push(format!("and {} more", matches.len() - rendered.len()));
+    }
+    rendered.join(", ")
 }
 
 fn sequence_matches(
@@ -5682,6 +6005,7 @@ mod tests {
                 "shell_command",
                 "apply_patch",
                 "multi_edit_file",
+                "task-planning",
                 "chrome-cdp",
                 "chat-plus-adapter-debugger",
                 "alpha_skill",
@@ -5731,6 +6055,15 @@ mod tests {
         assert!(multi_edit.text.contains("\"edits\""));
         assert!(multi_edit.text.contains("fed456"));
         assert!(multi_edit.structured.get("skillToken").is_none());
+
+        let (tool, path) = builtin_skill_doc_read("cat builtin://task-planning/SKILL.md")
+            .expect("task-planning doc read");
+        let planning = builtin_skill_doc_result(tool, "doc", path, "plan123".to_string());
+        assert!(!planning.is_error);
+        assert!(planning.text.contains("# Task Planning"));
+        assert!(planning.text.contains("instruction-only"));
+        assert!(planning.text.contains("plan123"));
+        assert!(planning.structured.get("skillToken").is_none());
 
         let (tool, path) = builtin_skill_doc_read("cat builtin://chrome-cdp/SKILL.md")
             .expect("chrome-cdp doc read");
@@ -5957,6 +6290,81 @@ mod tests {
     }
 
     #[test]
+    fn apply_patch_rejects_missing_context_without_global_fallback() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("update.txt");
+        std::fs::write(&target, "alpha\nbeta\n").expect("write update");
+
+        let patch =
+            "*** Begin Patch\n*** Update File: update.txt\n@@ missing-anchor\n-beta\n+gamma\n*** End Patch";
+        let parsed = parse_apply_patch(patch).expect("parse patch");
+        let failure = apply_parsed_patch(&parsed, &sandbox).expect_err("missing context fails");
+        assert!(failure.message.contains("failed to find @@ context"));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read update"),
+            "alpha\nbeta\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn apply_patch_rejects_ambiguous_repeated_hunk_with_candidates() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("App.tsx");
+        std::fs::write(
+            &target,
+            "<div>\n  <Code2 size={15} />\n</div>\n<div>\n  <Code2 size={15} />\n</div>\n",
+        )
+        .expect("write update");
+
+        let patch = "*** Begin Patch\n*** Update File: App.tsx\n@@\n-  <Code2 size={15} />\n+  <Code2 size={16} />\n*** End Patch";
+        let parsed = parse_apply_patch(patch).expect("parse patch");
+        let failure = apply_parsed_patch(&parsed, &sandbox).expect_err("ambiguous hunk fails");
+        assert!(failure.message.contains("ambiguous patch hunk"));
+        assert!(failure.message.contains("lines 2"));
+        assert!(failure.message.contains("5"));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn apply_patch_preserves_template_expression_dollar() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("App.tsx");
+
+        let patch = "*** Begin Patch\n*** Add File: App.tsx\n+const className = `${active ? \"on\" : \"off\"}`;\n*** End Patch";
+        let parsed = parse_apply_patch(patch).expect("parse patch");
+        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
+        assert!(outcome.warnings.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read update"),
+            "const className = `${active ? \"on\" : \"off\"}`;\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn apply_patch_warns_on_escaped_template_expression() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+
+        let patch = "*** Begin Patch\n*** Add File: App.tsx\n+const className = `\\${active}`;\n*** End Patch";
+        let parsed = parse_apply_patch(patch).expect("parse patch");
+        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("`\\${`")));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
     fn apply_patch_add_file_overwrites_like_codex_and_records_delta() {
         let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&sandbox).expect("create sandbox");
@@ -6130,6 +6538,34 @@ mod tests {
     }
 
     #[test]
+    fn multi_edit_file_warns_when_delimiters_become_unbalanced() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-multi-edit-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("lib.rs");
+        std::fs::write(&target, "fn outer() {\n    value();\n}\n").expect("write update");
+
+        let args = MultiEditFileArgs {
+            path: "lib.rs".to_string(),
+            cwd: None,
+            skill_token: None,
+            edits: vec![MultiEditFileEdit {
+                old_string: "    value();\n}".to_string(),
+                new_string: "    value();".to_string(),
+                replace_all: false,
+                start_line: None,
+            }],
+        };
+
+        let outcome = apply_multi_edit_file(&target, &args).expect("apply multi edit");
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unbalanced delimiters")));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
     fn disabled_builtin_tool_not_in_tool_definitions() {
         let os = "Windows";
         let now = "2024-01-01T00:00:00Z";
@@ -6137,6 +6573,7 @@ mod tests {
             shell_command: false,
             apply_patch: true,
             multi_edit_file: true,
+            task_planning: true,
             chrome_cdp: true,
             chat_plus_adapter_debugger: true,
         };
@@ -6158,6 +6595,7 @@ mod tests {
             shell_command: false,
             apply_patch: false,
             multi_edit_file: false,
+            task_planning: false,
             chrome_cdp: true,
             chat_plus_adapter_debugger: false,
         };
@@ -6172,12 +6610,13 @@ mod tests {
     #[test]
     fn disabled_tool_rejected_in_execute_builtin_tool() {
         let all_enabled = BuiltinToolsConfig::default();
-        assert_eq!(builtin_tools(&all_enabled).len(), 5);
+        assert_eq!(builtin_tools(&all_enabled).len(), 6);
 
         let all_disabled = BuiltinToolsConfig {
             shell_command: false,
             apply_patch: false,
             multi_edit_file: false,
+            task_planning: false,
             chrome_cdp: false,
             chat_plus_adapter_debugger: false,
         };

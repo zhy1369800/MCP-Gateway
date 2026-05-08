@@ -229,6 +229,8 @@ pub struct BuiltinToolsConfig {
     #[serde(default = "default_builtin_tool_enabled")]
     pub multi_edit_file: bool,
     #[serde(default = "default_builtin_tool_enabled")]
+    pub task_planning: bool,
+    #[serde(default = "default_builtin_tool_enabled")]
     pub chrome_cdp: bool,
     #[serde(default = "default_builtin_tool_enabled")]
     pub chat_plus_adapter_debugger: bool,
@@ -240,6 +242,7 @@ impl Default for BuiltinToolsConfig {
             shell_command: default_builtin_tool_enabled(),
             apply_patch: default_builtin_tool_enabled(),
             multi_edit_file: default_builtin_tool_enabled(),
+            task_planning: default_builtin_tool_enabled(),
             chrome_cdp: default_builtin_tool_enabled(),
             chat_plus_adapter_debugger: default_builtin_tool_enabled(),
         }

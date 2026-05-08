@@ -64,6 +64,7 @@ export interface BuiltinToolsConfig {
   shellCommand: boolean;
   applyPatch: boolean;
   multiEditFile: boolean;
+  taskPlanning: boolean;
   chromeCdp: boolean;
   chatPlusAdapterDebugger: boolean;
 }
