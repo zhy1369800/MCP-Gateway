@@ -31,7 +31,7 @@ Common use case: convert local `stdio` MCP services into remotely accessible `SS
 
 ![Image two](./image2.png)
 
-The latest SKILLS setup screen shows the Skill MCP toggle, server name, bundled Skills, and external Skill roots. Each external root can be browsed, validated, enabled or disabled, and removed independently.
+The latest SKILLS setup screen shows the external and built-in Skill server names, bundled Skills, and external Skill roots. Each external root can be browsed, validated, enabled or disabled, and removed independently.
 
 ### Image three (Visual policy rule manager)
 
@@ -89,20 +89,21 @@ Example (Playwright MCP):
 
 The `SKILLS` tab is used to enable and manage the built-in Skill MCP service:
 
-1. Turn on `Enable Built-in SKILL MCP`.
-2. Set `Skill Server Name` (default `__skills__`).
-3. Review bundled Skills: `shell_command`, `apply_patch`, `multi_edit_file`, `chrome-cdp`, and `chat-plus-adapter-debugger`. Each can be toggled individually. Note: `apply_patch` and `multi_edit_file` require `shell_command` to read their SKILL.md and obtain the token; if `shell_command` is disabled, those two tools will not function. Keep `shell_command` enabled if you need file editing tools.
-4. Add `External Skill Roots`, validate that `SKILL.md` exists directly in each directory, and enable only the roots you want to expose.
-5. Configure `Allowed Directories`. When Skill MCP is enabled, the access boundary is required; commands and file edits must stay inside the allowed directories unless the selected violation action says otherwise.
+1. Set `External Skill Server Name` (default `__skills__`) and `Built-in Skill Server Name` (default `__builtin_skills__`). These two names must be different.
+2. Review bundled Skills: `shell_command`, `apply_patch`, `multi_edit_file`, `chrome-cdp`, and `chat-plus-adapter-debugger`. Each can be toggled individually. Note: `apply_patch` and `multi_edit_file` require `shell_command` to read their SKILL.md and obtain the token; if `shell_command` is disabled, those two tools will not function. Keep `shell_command` enabled if you need file editing tools.
+3. Add `External Skill Roots`, validate that `SKILL.md` exists directly in each directory, and enable only the roots you want to expose.
+4. Configure `Allowed Directories`. Commands and file edits must stay inside the allowed directories unless the selected violation action says otherwise.
 6. Choose the violation action: `allow / confirm / deny`.
 7. Configure execution limits: `Execution Timeout (ms)` (minimum `1000`) and `Max Output (bytes)` (minimum `1024`).
 8. Manage policy rules in the visual rule manager. Rules support `deny` and `confirm`, command-prefix matching, keyword matching, search, add, edit, copy, and delete. The advanced JSON editor remains available for bulk paste or manual migration.
 9. After running, approve or reject high-risk commands in `Pending Confirmations` or from the confirmation popup.
 
-When gateway is running and SKILLS is enabled, the UI shows:
+When the gateway is running, the UI shows external and built-in Skill endpoints:
 
-- `Skill SSE`: `http://<listenAddress><ssePath>/<skillsServerName>`
-- `Skill HTTP`: `http://<listenAddress><httpPath>/<skillsServerName>`
+- `External Skill SSE`: `http://<listenAddress><ssePath>/<skillsServerName>`
+- `External Skill HTTP`: `http://<listenAddress><httpPath>/<skillsServerName>`
+- `Built-in Skill SSE`: `http://<listenAddress><ssePath>/<builtinServerName>`
+- `Built-in Skill HTTP`: `http://<listenAddress><httpPath>/<builtinServerName>`
 
 ## 3. Recommended Workflow
 

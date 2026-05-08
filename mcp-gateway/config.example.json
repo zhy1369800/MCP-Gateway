@@ -30,8 +30,8 @@
     "maxResponseWaitIterations": 100
   },
   "skills": {
-    "enabled": false,
     "serverName": "__skills__",
+    "builtinServerName": "__builtin_skills__",
     "roots": [],
     "policy": {
       "defaultAction": "allow",

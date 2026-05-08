@@ -1,7 +1,9 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -119,6 +121,7 @@ pub struct SkillsService {
     confirmations: Arc<RwLock<HashMap<String, ConfirmationEntry>>>,
     discovery_cache: Arc<RwLock<Option<SkillDiscoveryCache>>>,
     events: Arc<RwLock<SkillEventStore>>,
+    planning: Arc<RwLock<HashMap<String, PlanningState>>>,
 }
 
 #[derive(Debug, Default)]
@@ -141,6 +144,52 @@ struct SkillDiscoveryCache {
     signature: String,
     discovered: Vec<DiscoveredSkill>,
     expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+enum PlanItemStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanItem {
+    step: String,
+    status: PlanItemStatus,
+}
+
+#[derive(Debug, Clone)]
+struct PlanningState {
+    planning_id: String,
+    plan: Vec<PlanItem>,
+    explanation: Option<String>,
+    consecutive_shell_commands: u32,
+    consecutive_apply_patch_failures: u32,
+    consecutive_multi_edit_file_failures: u32,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Default)]
+struct PlanningSuccessHints {
+    planning_reminder: Option<String>,
+    shell_command_reminder: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanningLookupError {
+    Unknown,
+    Ambiguous,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TaskPlanningAction {
+    Update,
+    SetStatus,
+    Clear,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ToSchema)]
@@ -216,6 +265,8 @@ struct BuiltinShellArgs {
     timeout_ms: Option<u64>,
     #[serde(default)]
     skill_token: Option<String>,
+    #[serde(default)]
+    planning_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +277,8 @@ struct ApplyPatchArgs {
     cwd: Option<String>,
     #[serde(default)]
     skill_token: Option<String>,
+    #[serde(default)]
+    planning_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +288,29 @@ struct MultiEditFileArgs {
     edits: Vec<MultiEditFileEdit>,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    skill_token: Option<String>,
+    #[serde(default)]
+    planning_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskPlanningArgs {
+    #[serde(default)]
+    exec: Option<String>,
+    #[serde(default)]
+    action: Option<TaskPlanningAction>,
+    #[serde(default)]
+    explanation: Option<String>,
+    #[serde(default)]
+    plan: Vec<PlanItem>,
+    #[serde(default)]
+    planning_id: Option<String>,
+    #[serde(default)]
+    item: Option<usize>,
+    #[serde(default)]
+    status: Option<PlanItemStatus>,
     #[serde(default)]
     skill_token: Option<String>,
 }
@@ -291,6 +367,7 @@ struct ConfirmationMetadata {
 }
 
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 enum PatchHunk {
     AddFile {
         path: String,
@@ -504,10 +581,16 @@ impl SkillsService {
     }
 
     pub fn is_skills_server(&self, config: &GatewayConfig, server_name: &str) -> bool {
-        config.skills.enabled && config.skills.server_name == server_name
+        config.skills.server_name == server_name || config.skills.builtin_server_name == server_name
     }
 
-    pub async fn handle_mcp_request(&self, config: &GatewayConfig, request: Value) -> Value {
+    pub async fn handle_mcp_request(
+        &self,
+        config: &GatewayConfig,
+        request: Value,
+        session_id: Option<&str>,
+        server_name: &str,
+    ) -> Value {
         let Some(object) = request.as_object() else {
             return jsonrpc_error(Value::Null, -32600, "invalid request payload", None);
         };
@@ -516,10 +599,6 @@ impl SkillsService {
         let Some(method) = object.get("method").and_then(Value::as_str) else {
             return jsonrpc_error(id, -32600, "missing jsonrpc method", None);
         };
-
-        if !config.skills.enabled {
-            return jsonrpc_error(id, -32001, "skills server is disabled", None);
-        }
 
         match method {
             "initialize" => jsonrpc_result(
@@ -539,27 +618,43 @@ impl SkillsService {
             ),
             "ping" | "notifications/initialized" => jsonrpc_result(id, json!({"ok": true})),
             "tools/list" => {
-                let discovered = match self.discover_skills(&config.skills).await {
-                    Ok(skills) => skills,
-                    Err(error) => {
-                        return jsonrpc_error(
-                            id,
-                            -32603,
-                            "failed to discover skills",
-                            Some(json!({"detail": error.to_string()})),
-                        );
-                    }
+                let is_builtin = server_name == config.skills.builtin_server_name;
+                let (discovered, summaries) = if is_builtin {
+                    (Vec::new(), Vec::new())
+                } else {
+                    let discovered = match self.discover_skills(&config.skills).await {
+                        Ok(skills) => skills,
+                        Err(error) => {
+                            return jsonrpc_error(
+                                id,
+                                -32603,
+                                "failed to discover skills",
+                                Some(json!({"detail": error.to_string()})),
+                            );
+                        }
+                    };
+                    let summaries = summarize_discovered_skills(&discovered);
+                    (discovered, summaries)
                 };
-                let summaries = summarize_discovered_skills(&discovered);
+                let tools = if is_builtin {
+                    Value::Array(builtin_tool_definitions(
+                        std::env::consts::OS,
+                        &Utc::now().to_rfc3339(),
+                        &config.skills.builtin_tools,
+                    ))
+                } else {
+                    external_skill_tool_definitions(&discovered)
+                };
                 jsonrpc_result(
                     id,
                     json!({
-                        "tools": tool_definitions(&discovered, &config.skills.builtin_tools),
+                        "tools": tools,
                         "skills": summaries
                     }),
                 )
             }
             "tools/call" => {
+                let is_builtin = server_name == config.skills.builtin_server_name;
                 let params = object.get("params").cloned().unwrap_or(Value::Null);
                 let tool_params: ToolCallParams = match serde_json::from_value(params) {
                     Ok(value) => value,
@@ -573,7 +668,11 @@ impl SkillsService {
                     }
                 };
 
-                let result = match self.execute_tool_call(config, tool_params).await {
+                let planning_scope = planning_scope_key(session_id);
+                let result = match self
+                    .execute_tool_call(config, tool_params, &planning_scope, is_builtin)
+                    .await
+                {
                     Ok(output) => output,
                     Err(error) => error_to_tool_result(error),
                 };
@@ -741,11 +840,26 @@ impl SkillsService {
         &self,
         config: &GatewayConfig,
         params: ToolCallParams,
+        planning_scope: &str,
+        is_builtin_endpoint: bool,
     ) -> Result<ToolResult, AppError> {
         if let Some(tool) = BuiltinTool::from_name(&params.name) {
-            return self
-                .execute_builtin_tool(config, tool, params.arguments)
-                .await;
+            if is_builtin_endpoint {
+                return self
+                    .execute_builtin_tool(config, tool, params.arguments, planning_scope)
+                    .await;
+            }
+            return Err(AppError::BadRequest(format!(
+                "built-in tool {} is only available on the built-in skills endpoint",
+                params.name
+            )));
+        }
+
+        if is_builtin_endpoint {
+            return Err(AppError::BadRequest(format!(
+                "unknown tool name: {}",
+                params.name
+            )));
         }
 
         let skills = self.discover_skills(&config.skills).await?;
@@ -766,11 +880,190 @@ impl SkillsService {
             .await
     }
 
+    fn planning_enabled(config: &GatewayConfig) -> bool {
+        config.skills.builtin_tools.task_planning
+    }
+
+    async fn check_planning_gate(
+        &self,
+        config: &GatewayConfig,
+        planning_scope: &str,
+        tool: BuiltinTool,
+        planning_id: Option<&str>,
+    ) -> Option<ToolResult> {
+        if !Self::planning_enabled(config) || tool == BuiltinTool::TaskPlanning {
+            return None;
+        }
+
+        let Some(planning_id) = planning_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Some(planning_gate_error(
+                tool,
+                "missing planningId",
+                "Call task-planning with action=\"update\" first, then retry this tool with the returned planningId.",
+                None,
+            ));
+        };
+
+        let guard = self.planning.read().await;
+        let key = match resolve_planning_state_key(&guard, planning_scope, planning_id) {
+            Ok(key) => key,
+            Err(PlanningLookupError::Unknown) => {
+                return Some(planning_gate_error(
+                    tool,
+                    "unknown planningId",
+                    "The supplied planningId is not active. This can happen after all plan items are completed, task-planning clear, or a gateway restart. Call task-planning update again and use the returned planningId.",
+                    Some(planning_id),
+                ));
+            }
+            Err(PlanningLookupError::Ambiguous) => {
+                return Some(planning_gate_error(
+                    tool,
+                    "ambiguous planningId",
+                    "The supplied planningId exists in more than one client/session scope. Call task-planning update again for this request and use the returned planningId.",
+                    Some(planning_id),
+                ));
+            }
+        };
+        let Some(state) = guard.get(&key) else {
+            return Some(planning_gate_error(
+                tool,
+                "unknown planningId",
+                "The supplied planningId is not active. Call task-planning update again and use the returned planningId.",
+                Some(planning_id),
+            ));
+        };
+        debug_assert_eq!(state.planning_id, planning_id);
+        let _active_plan_len = state.plan.len();
+        let _active_explanation = state.explanation.as_deref();
+        let _active_updated_at = state.updated_at;
+
+        None
+    }
+
+    async fn planning_success_hints(
+        &self,
+        config: &GatewayConfig,
+        planning_scope: &str,
+        planning_id: Option<&str>,
+        tool: BuiltinTool,
+        shell_command: Option<&str>,
+    ) -> PlanningSuccessHints {
+        if !Self::planning_enabled(config) {
+            return PlanningSuccessHints::default();
+        }
+        let Some(planning_id) = planning_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return PlanningSuccessHints::default();
+        };
+        let guard = self.planning.read().await;
+        let Ok(key) = resolve_planning_state_key(&guard, planning_scope, planning_id) else {
+            return PlanningSuccessHints::default();
+        };
+        drop(guard);
+
+        let mut guard = self.planning.write().await;
+        let Some(state) = guard.get_mut(&key) else {
+            return PlanningSuccessHints::default();
+        };
+
+        state.consecutive_apply_patch_failures = 0;
+        state.consecutive_multi_edit_file_failures = 0;
+        let shell_command_reminder = if tool == BuiltinTool::ShellCommand {
+            if shell_command.is_some_and(shell_command_starts_with_rg) {
+                state.consecutive_shell_commands = 0;
+                None
+            } else {
+                state.consecutive_shell_commands =
+                    state.consecutive_shell_commands.saturating_add(1);
+                if state.consecutive_shell_commands >= 3 {
+                    Some(format!(
+                    "This planningId has used shell_command {} times in a row without a plan update. Consider combining related commands into one shell call, reading multiple files in one pass when useful, and preferring efficient search commands such as `rg` and `rg --files` when exploring the codebase.",
+                    state.consecutive_shell_commands
+                ))
+                } else {
+                    None
+                }
+            }
+        } else {
+            state.consecutive_shell_commands = 0;
+            None
+        };
+
+        let planning_reminder = if let Some((idx, item)) = current_plan_item(&state.plan) {
+            Some(format!(
+                "Current plan item #{idx} is in_progress: \"{}\". If this tool completed that item, call task-planning with {{\"action\":\"set_status\",\"planningId\":\"{}\",\"status\":\"completed\"}}; otherwise keep reusing the same planningId.",
+                item.step, state.planning_id
+            ))
+        } else {
+            Some(format!(
+                "No plan item is currently in_progress for planningId {}. If work moved to a specific item, call task-planning with {{\"action\":\"set_status\",\"planningId\":\"{}\",\"item\":<1-based item number>,\"status\":\"in_progress\"}}.",
+                state.planning_id, state.planning_id
+            ))
+        };
+
+        PlanningSuccessHints {
+            planning_reminder,
+            shell_command_reminder,
+        }
+    }
+
+    async fn planning_edit_failure_reminder(
+        &self,
+        config: &GatewayConfig,
+        planning_scope: &str,
+        planning_id: Option<&str>,
+        tool: BuiltinTool,
+    ) -> Option<String> {
+        if !Self::planning_enabled(config) {
+            return None;
+        }
+        let planning_id = planning_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let guard = self.planning.read().await;
+        let key = resolve_planning_state_key(&guard, planning_scope, planning_id).ok()?;
+        drop(guard);
+
+        let mut guard = self.planning.write().await;
+        let state = guard.get_mut(&key)?;
+        state.consecutive_shell_commands = 0;
+
+        let (tool_name, count) = match tool {
+            BuiltinTool::ApplyPatch => {
+                state.consecutive_apply_patch_failures =
+                    state.consecutive_apply_patch_failures.saturating_add(1);
+                state.consecutive_multi_edit_file_failures = 0;
+                (
+                    BuiltinTool::ApplyPatch.name(),
+                    state.consecutive_apply_patch_failures,
+                )
+            }
+            BuiltinTool::MultiEditFile => {
+                state.consecutive_multi_edit_file_failures =
+                    state.consecutive_multi_edit_file_failures.saturating_add(1);
+                state.consecutive_apply_patch_failures = 0;
+                (
+                    BuiltinTool::MultiEditFile.name(),
+                    state.consecutive_multi_edit_file_failures,
+                )
+            }
+            _ => return None,
+        };
+
+        if count >= 3 {
+            Some(format!(
+                "{tool_name} has failed {count} times in a row for this planningId. Consider switching write strategy: use the other edit tool, simplify the patch, inspect the exact file content first, or use shell_command with a focused script when structured edits keep failing."
+            ))
+        } else {
+            None
+        }
+    }
+
     async fn execute_builtin_tool(
         &self,
         config: &GatewayConfig,
         tool: BuiltinTool,
         arguments: Value,
+        planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         if !builtin_tools(&config.skills.builtin_tools).contains(&tool) {
             return Err(AppError::BadRequest(format!(
@@ -781,27 +1074,32 @@ impl SkillsService {
         match tool {
             BuiltinTool::ShellCommand => {
                 let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
-                self.handle_builtin_shell_command(config, args).await
+                self.handle_builtin_shell_command(config, args, planning_scope)
+                    .await
             }
             BuiltinTool::ApplyPatch => {
                 let args = decode_tool_args::<ApplyPatchArgs>(&arguments)?;
-                self.handle_builtin_apply_patch(config, args).await
+                self.handle_builtin_apply_patch(config, args, planning_scope)
+                    .await
             }
             BuiltinTool::MultiEditFile => {
                 let args = decode_tool_args::<MultiEditFileArgs>(&arguments)?;
-                self.handle_builtin_multi_edit_file(config, args).await
+                self.handle_builtin_multi_edit_file(config, args, planning_scope)
+                    .await
             }
             BuiltinTool::TaskPlanning => {
-                let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
-                self.handle_builtin_task_planning(args).await
+                let args = decode_tool_args::<TaskPlanningArgs>(&arguments)?;
+                self.handle_builtin_task_planning(args, planning_scope)
+                    .await
             }
             BuiltinTool::ChromeCdp => {
                 let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
-                self.handle_builtin_chrome_cdp(config, args).await
+                self.handle_builtin_chrome_cdp(config, args, planning_scope)
+                    .await
             }
             BuiltinTool::ChatPlusAdapterDebugger => {
                 let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
-                self.handle_builtin_chat_plus_adapter_debugger(config, args)
+                self.handle_builtin_chat_plus_adapter_debugger(config, args, planning_scope)
                     .await
             }
         }
@@ -811,6 +1109,7 @@ impl SkillsService {
         &self,
         config: &GatewayConfig,
         args: BuiltinShellArgs,
+        planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
         let command_preview = args.exec.trim().to_string();
@@ -824,6 +1123,7 @@ impl SkillsService {
                 &command_preview,
                 matched_path,
                 builtin_skill_token(tool),
+                Self::planning_enabled(config),
             ));
         }
 
@@ -832,6 +1132,18 @@ impl SkillsService {
             &builtin_skill_token(BuiltinTool::ShellCommand),
             args.skill_token.as_deref(),
         ) {
+            return Ok(result);
+        }
+
+        if let Some(result) = self
+            .check_planning_gate(
+                config,
+                planning_scope,
+                BuiltinTool::ShellCommand,
+                args.planning_id.as_deref(),
+            )
+            .await
+        {
             return Ok(result);
         }
 
@@ -852,7 +1164,15 @@ impl SkillsService {
                 ));
             }
             return self
-                .execute_apply_patch_text(config, patch, &cwd, &command_preview, &call_id)
+                .execute_apply_patch_text(
+                    config,
+                    patch,
+                    &cwd,
+                    &command_preview,
+                    &call_id,
+                    planning_scope,
+                    args.planning_id.as_deref(),
+                )
                 .await;
         }
 
@@ -959,7 +1279,7 @@ impl SkillsService {
         configure_skill_command(&mut command);
 
         let disable_truncation = should_disable_output_truncation(&program, &command_args);
-        let output = execute_skill_command(
+        let output = match execute_skill_command(
             &mut command,
             timeout_ms,
             max_output_bytes,
@@ -977,7 +1297,11 @@ impl SkillsService {
                 kind: "stderrDelta",
             }),
         )
-        .await?;
+        .await
+        {
+            Ok(output) => output,
+            Err(error) => return Err(error),
+        };
         let duration_ms = started.elapsed().as_millis() as u64;
         let stdout = output.stdout.text;
         let stderr = output.stderr.text;
@@ -1012,7 +1336,18 @@ impl SkillsService {
         let output_text = command_output_text(&stdout, &stderr);
 
         if output.status.success() {
-            Ok(tool_success(output_text, structured))
+            Ok(tool_success_with_planning_reminder(
+                output_text,
+                structured,
+                self.planning_success_hints(
+                    config,
+                    planning_scope,
+                    args.planning_id.as_deref(),
+                    BuiltinTool::ShellCommand,
+                    Some(&command_preview),
+                )
+                .await,
+            ))
         } else {
             Ok(tool_error(
                 command_failure_text(exit_code, &stdout, &stderr),
@@ -1025,6 +1360,7 @@ impl SkillsService {
         &self,
         config: &GatewayConfig,
         args: ApplyPatchArgs,
+        planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
         if let Some(result) = validate_skill_token_result(
@@ -1035,20 +1371,41 @@ impl SkillsService {
             return Ok(result);
         }
 
+        if let Some(result) = self
+            .check_planning_gate(
+                config,
+                planning_scope,
+                BuiltinTool::ApplyPatch,
+                args.planning_id.as_deref(),
+            )
+            .await
+        {
+            return Ok(result);
+        }
+
         let cwd =
             match resolve_builtin_cwd(BuiltinTool::ApplyPatch, &config.skills, args.cwd.as_deref())
             {
                 Ok(cwd) => cwd,
                 Err(result) => return Ok(result),
             };
-        self.execute_apply_patch_text(config, args.patch, &cwd, "apply_patch", &call_id)
-            .await
+        self.execute_apply_patch_text(
+            config,
+            args.patch,
+            &cwd,
+            "apply_patch",
+            &call_id,
+            planning_scope,
+            args.planning_id.as_deref(),
+        )
+        .await
     }
 
     async fn handle_builtin_multi_edit_file(
         &self,
         config: &GatewayConfig,
         args: MultiEditFileArgs,
+        planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
         if let Some(result) = validate_skill_token_result(
@@ -1056,6 +1413,18 @@ impl SkillsService {
             &builtin_skill_token(BuiltinTool::MultiEditFile),
             args.skill_token.as_deref(),
         ) {
+            return Ok(result);
+        }
+
+        if let Some(result) = self
+            .check_planning_gate(
+                config,
+                planning_scope,
+                BuiltinTool::MultiEditFile,
+                args.planning_id.as_deref(),
+            )
+            .await
+        {
             return Ok(result);
         }
 
@@ -1166,7 +1535,7 @@ impl SkillsService {
                     },
                 )
                 .await;
-                Ok(tool_success(
+                Ok(tool_success_with_planning_reminder(
                     text,
                     json!({
                         "status": "completed",
@@ -1176,6 +1545,14 @@ impl SkillsService {
                         "delta": patch_delta_for_model(&outcome.delta),
                         "warnings": outcome.warnings
                     }),
+                    self.planning_success_hints(
+                        config,
+                        planning_scope,
+                        args.planning_id.as_deref(),
+                        BuiltinTool::MultiEditFile,
+                        None,
+                    )
+                    .await,
                 ))
             }
             Err(failure) => {
@@ -1190,7 +1567,7 @@ impl SkillsService {
                     },
                 )
                 .await;
-                Ok(tool_error(
+                Ok(tool_error_with_edit_failure_reminder(
                     failure.message.clone(),
                     json!({
                         "status": "failed",
@@ -1199,11 +1576,19 @@ impl SkillsService {
                         "message": failure.message,
                         "delta": patch_delta_for_model(&failure.delta)
                     }),
+                    self.planning_edit_failure_reminder(
+                        config,
+                        planning_scope,
+                        args.planning_id.as_deref(),
+                        BuiltinTool::MultiEditFile,
+                    )
+                    .await,
                 ))
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_apply_patch_text(
         &self,
         config: &GatewayConfig,
@@ -1211,6 +1596,8 @@ impl SkillsService {
         cwd: &Path,
         raw_command: &str,
         call_id: &str,
+        planning_scope: &str,
+        planning_id: Option<&str>,
     ) -> Result<ToolResult, AppError> {
         let patch_preview = patch.trim().to_string();
         if patch_preview.is_empty() {
@@ -1313,7 +1700,7 @@ impl SkillsService {
                     },
                 )
                 .await;
-                Ok(tool_success(
+                Ok(tool_success_with_planning_reminder(
                     text,
                     json!({
                         "status": "completed",
@@ -1325,6 +1712,14 @@ impl SkillsService {
                         "delta": patch_delta_for_model(&outcome.delta),
                         "warnings": outcome.warnings
                     }),
+                    self.planning_success_hints(
+                        config,
+                        planning_scope,
+                        planning_id,
+                        BuiltinTool::ApplyPatch,
+                        None,
+                    )
+                    .await,
                 ))
             }
             Err(failure) => {
@@ -1339,7 +1734,7 @@ impl SkillsService {
                     },
                 )
                 .await;
-                Ok(tool_error(
+                Ok(tool_error_with_edit_failure_reminder(
                     format!(
                         "{}\nCommitted patch delta exact: {}\nCommitted changes: {}",
                         failure.message,
@@ -1353,6 +1748,13 @@ impl SkillsService {
                         "message": failure.message,
                         "delta": patch_delta_for_model(&failure.delta)
                     }),
+                    self.planning_edit_failure_reminder(
+                        config,
+                        planning_scope,
+                        planning_id,
+                        BuiltinTool::ApplyPatch,
+                    )
+                    .await,
                 ))
             }
         }
@@ -1360,20 +1762,31 @@ impl SkillsService {
 
     async fn handle_builtin_task_planning(
         &self,
-        args: BuiltinShellArgs,
+        args: TaskPlanningArgs,
+        planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
-        let command_preview = args.exec.trim().to_string();
-        if command_preview.is_empty() {
-            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-        }
+        if let Some(exec) = args.exec.as_deref() {
+            let command_preview = exec.trim().to_string();
+            if command_preview.is_empty() {
+                return Err(AppError::BadRequest("exec cannot be empty".to_string()));
+            }
 
-        if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-            return Ok(builtin_skill_doc_result(
-                tool,
-                &command_preview,
-                matched_path,
-                builtin_skill_token(tool),
-            ));
+            if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
+                return Ok(builtin_skill_doc_result(
+                    tool,
+                    &command_preview,
+                    matched_path,
+                    builtin_skill_token(tool),
+                    true,
+                ));
+            }
+
+            if args.action.is_none() {
+                return Err(AppError::BadRequest(
+                    "task-planning exec is only for reading SKILL.md; use action=\"update\", action=\"set_status\", or action=\"clear\" for plan state"
+                        .to_string(),
+                ));
+            }
         }
 
         if let Some(result) = validate_skill_token_result(
@@ -1384,21 +1797,237 @@ impl SkillsService {
             return Ok(result);
         }
 
-        Ok(tool_success(
-            "task-planning is an instruction-only skill. Keep the todo list in the conversation, rewrite it as work changes, and omit it after the task is complete; the gateway stores no plan state.".to_string(),
-            json!({
-                "status": "completed",
-                "tool": BuiltinTool::TaskPlanning.name(),
-                "mode": "instruction_only",
-                "stateStored": false
-            }),
-        ))
+        match args.action.unwrap_or(TaskPlanningAction::Update) {
+            TaskPlanningAction::Update => {
+                validate_plan_items(&args.plan)?;
+                let planning_id = planning_id_for_plan(&args.plan);
+                let key = planning_state_key(planning_scope, &planning_id);
+                let now = Utc::now();
+                let mut guard = self.planning.write().await;
+                let all_completed = plan_all_completed(&args.plan);
+                if all_completed {
+                    guard.remove(&key);
+                    return Ok(tool_success(
+                        "Plan completed".to_string(),
+                        json!({
+                            "status": "completed",
+                            "tool": BuiltinTool::TaskPlanning.name(),
+                            "planning": {
+                                "active": false,
+                                "completed": true,
+                                "planningId": planning_id,
+                                "updatedAt": now,
+                                "explanation": args.explanation,
+                                "plan": args.plan
+                            }
+                        }),
+                    ));
+                }
+                guard.insert(
+                    key,
+                    PlanningState {
+                        planning_id: planning_id.clone(),
+                        plan: args.plan.clone(),
+                        explanation: args.explanation.clone(),
+                        consecutive_shell_commands: 0,
+                        consecutive_apply_patch_failures: 0,
+                        consecutive_multi_edit_file_failures: 0,
+                        updated_at: now,
+                    },
+                );
+                Ok(tool_success(
+                    "Plan updated".to_string(),
+                    json!({
+                        "status": "completed",
+                        "tool": BuiltinTool::TaskPlanning.name(),
+                        "planning": {
+                            "active": true,
+                            "planningId": planning_id,
+                            "needsUpdate": false,
+                            "updatedAt": now,
+                            "explanation": args.explanation,
+                            "plan": args.plan
+                        }
+                    }),
+                ))
+            }
+            TaskPlanningAction::SetStatus => {
+                let planning_id = args
+                    .planning_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        AppError::BadRequest(
+                            "task-planning set_status requires planningId".to_string(),
+                        )
+                    })?;
+                let status = args.status.clone().ok_or_else(|| {
+                    AppError::BadRequest("task-planning set_status requires status".to_string())
+                })?;
+                let now = Utc::now();
+                let mut guard = self.planning.write().await;
+                let key = resolve_planning_state_key(&guard, planning_scope, planning_id).map_err(
+                    |error| match error {
+                        PlanningLookupError::Unknown => AppError::BadRequest(format!(
+                            "task-planning planningId is not active: {planning_id}"
+                        )),
+                        PlanningLookupError::Ambiguous => AppError::BadRequest(format!(
+                            "task-planning planningId is active in more than one client/session scope: {planning_id}"
+                        )),
+                    },
+                )?;
+                let state = guard.get_mut(&key).ok_or_else(|| {
+                    AppError::BadRequest(format!(
+                        "task-planning planningId is not active: {planning_id}"
+                    ))
+                })?;
+                state.consecutive_shell_commands = 0;
+                state.consecutive_apply_patch_failures = 0;
+                state.consecutive_multi_edit_file_failures = 0;
+                let item_index = match args.item {
+                    Some(item) if item == 0 || item > state.plan.len() => {
+                        return Err(AppError::BadRequest(format!(
+                            "task-planning item must be between 1 and {}",
+                            state.plan.len()
+                        )));
+                    }
+                    Some(item) => item - 1,
+                    None => state
+                        .plan
+                        .iter()
+                        .position(|item| item.status == PlanItemStatus::InProgress)
+                        .ok_or_else(|| {
+                            AppError::BadRequest(
+                                "task-planning set_status without item requires one in_progress plan item"
+                                    .to_string(),
+                            )
+                        })?,
+                };
+                state.plan[item_index].status = status;
+                let auto_started_item = if state.plan[item_index].status
+                    == PlanItemStatus::Completed
+                    && current_plan_item(&state.plan).is_none()
+                {
+                    next_pending_item_index(&state.plan, item_index).map(|next_index| {
+                        state.plan[next_index].status = PlanItemStatus::InProgress;
+                        (next_index, state.plan[next_index].step.clone())
+                    })
+                } else {
+                    None
+                };
+                validate_plan_items(&state.plan)?;
+                state.updated_at = now;
+                let plan = state.plan.clone();
+                let explanation = state.explanation.clone();
+                let step = plan[item_index].step.clone();
+                let updated_status = plan[item_index].status.clone();
+                if plan_all_completed(&plan) {
+                    guard.remove(&key);
+                    return Ok(tool_success(
+                        "Plan completed".to_string(),
+                        json!({
+                            "status": "completed",
+                            "tool": BuiltinTool::TaskPlanning.name(),
+                            "planning": {
+                                "active": false,
+                                "completed": true,
+                                "planningId": planning_id,
+                                "updatedAt": now,
+                                "updatedItem": {
+                                    "item": item_index + 1,
+                                    "step": step,
+                                    "status": updated_status
+                                },
+                                "explanation": explanation,
+                                "plan": plan
+                            }
+                        }),
+                    ));
+                }
+
+                let text = if let Some((next_index, next_step)) = auto_started_item.as_ref() {
+                    format!(
+                        "Plan item updated; start plan item #{}: {}",
+                        next_index + 1,
+                        next_step
+                    )
+                } else {
+                    "Plan item updated".to_string()
+                };
+                let next_item = auto_started_item.map(|(next_index, next_step)| {
+                    json!({
+                        "item": next_index + 1,
+                        "step": next_step,
+                        "status": PlanItemStatus::InProgress
+                    })
+                });
+                Ok(tool_success(
+                    text,
+                    json!({
+                        "status": "completed",
+                        "tool": BuiltinTool::TaskPlanning.name(),
+                        "planning": {
+                            "active": true,
+                            "planningId": planning_id,
+                            "updatedAt": now,
+                            "updatedItem": {
+                                "item": item_index + 1,
+                                "step": step,
+                                "status": updated_status
+                            },
+                            "nextItem": next_item,
+                            "explanation": explanation,
+                            "plan": plan
+                        }
+                    }),
+                ))
+            }
+            TaskPlanningAction::Clear => {
+                let mut guard = self.planning.write().await;
+                let removed = if let Some(planning_id) = args
+                    .planning_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    match resolve_planning_state_key(&guard, planning_scope, planning_id) {
+                        Ok(key) => guard.remove(&key).is_some(),
+                        Err(PlanningLookupError::Unknown) => false,
+                        Err(PlanningLookupError::Ambiguous) => {
+                            return Err(AppError::BadRequest(format!(
+                                "task-planning planningId is active in more than one client/session scope: {planning_id}"
+                            )));
+                        }
+                    }
+                } else {
+                    let prefix = planning_scope_prefix(planning_scope);
+                    let before = guard.len();
+                    guard.retain(|key, _| !key.starts_with(&prefix));
+                    guard.len() != before
+                };
+
+                Ok(tool_success(
+                    "Plan cleared".to_string(),
+                    json!({
+                        "status": "completed",
+                        "tool": BuiltinTool::TaskPlanning.name(),
+                        "planning": {
+                            "active": false,
+                            "removed": removed,
+                            "planningId": args.planning_id
+                        }
+                    }),
+                ))
+            }
+        }
     }
 
     async fn handle_builtin_chrome_cdp(
         &self,
         config: &GatewayConfig,
         args: BuiltinShellArgs,
+        planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let command_preview = args.exec.trim().to_string();
         if command_preview.is_empty() {
@@ -1411,6 +2040,7 @@ impl SkillsService {
                 &command_preview,
                 matched_path,
                 builtin_skill_token(tool),
+                Self::planning_enabled(config),
             ));
         }
 
@@ -1422,16 +2052,32 @@ impl SkillsService {
             return Ok(result);
         }
 
+        if let Some(result) = self
+            .check_planning_gate(
+                config,
+                planning_scope,
+                BuiltinTool::ChromeCdp,
+                args.planning_id.as_deref(),
+            )
+            .await
+        {
+            return Ok(result);
+        }
+
         self.execute_builtin_chrome_cdp_command(
             config,
             BuiltinTool::ChromeCdp.name(),
             &command_preview,
             &command_preview,
             args.timeout_ms,
+            planning_scope,
+            args.planning_id.as_deref(),
+            BuiltinTool::ChromeCdp,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_builtin_chrome_cdp_command(
         &self,
         config: &GatewayConfig,
@@ -1439,6 +2085,9 @@ impl SkillsService {
         command_preview: &str,
         structured_command: &str,
         timeout_ms: Option<u64>,
+        planning_scope: &str,
+        planning_id: Option<&str>,
+        planning_tool: BuiltinTool,
     ) -> Result<ToolResult, AppError> {
         let cdp_args = parse_builtin_chrome_cdp_args(command_preview)?;
         let cdp_script = materialize_builtin_chrome_cdp_script()?;
@@ -1517,7 +2166,18 @@ impl SkillsService {
         let output_text = command_output_text(&stdout, &stderr);
 
         if output.status.success() {
-            Ok(tool_success(output_text, structured))
+            Ok(tool_success_with_planning_reminder(
+                output_text,
+                structured,
+                self.planning_success_hints(
+                    config,
+                    planning_scope,
+                    planning_id,
+                    planning_tool,
+                    None,
+                )
+                .await,
+            ))
         } else {
             Ok(tool_error(
                 command_failure_text(exit_code, &stdout, &stderr),
@@ -1530,6 +2190,7 @@ impl SkillsService {
         &self,
         config: &GatewayConfig,
         args: BuiltinShellArgs,
+        planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let command_preview = args.exec.trim().to_string();
         if command_preview.is_empty() {
@@ -1542,6 +2203,7 @@ impl SkillsService {
                 &command_preview,
                 matched_path,
                 builtin_skill_token(doc_tool),
+                Self::planning_enabled(config),
             ));
         }
 
@@ -1569,6 +2231,18 @@ impl SkillsService {
             ));
         };
 
+        if let Some(result) = self
+            .check_planning_gate(
+                config,
+                planning_scope,
+                BuiltinTool::ChatPlusAdapterDebugger,
+                args.planning_id.as_deref(),
+            )
+            .await
+        {
+            return Ok(result);
+        }
+
         match debug_command {
             ChatPlusDebugCommand::Cdp {
                 command,
@@ -1580,6 +2254,9 @@ impl SkillsService {
                     &command,
                     &structured_command,
                     args.timeout_ms,
+                    planning_scope,
+                    args.planning_id.as_deref(),
+                    BuiltinTool::ChatPlusAdapterDebugger,
                 )
                 .await
             }
@@ -1590,6 +2267,9 @@ impl SkillsService {
                     "netclear",
                     &command_preview,
                     args.timeout_ms,
+                    planning_scope,
+                    args.planning_id.as_deref(),
+                    BuiltinTool::ChatPlusAdapterDebugger,
                 )
                 .await
             }
@@ -2062,12 +2742,211 @@ fn tool_success(text: String, structured: Value) -> ToolResult {
     }
 }
 
+fn tool_success_with_planning_reminder(
+    text: String,
+    mut structured: Value,
+    hints: PlanningSuccessHints,
+) -> ToolResult {
+    if hints.planning_reminder.is_none() && hints.shell_command_reminder.is_none() {
+        return tool_success(text, structured);
+    };
+
+    if let Value::Object(fields) = &mut structured {
+        if let Some(planning_reminder) = hints.planning_reminder {
+            fields.insert(
+                "planningReminder".to_string(),
+                Value::String(planning_reminder),
+            );
+        }
+        if let Some(shell_command_reminder) = hints.shell_command_reminder {
+            fields.insert(
+                "shellCommandReminder".to_string(),
+                Value::String(shell_command_reminder),
+            );
+        }
+    }
+
+    tool_success(text, structured)
+}
+
 fn tool_error(text: String, structured: Value) -> ToolResult {
     ToolResult {
         text,
         structured,
         is_error: true,
     }
+}
+
+fn tool_error_with_edit_failure_reminder(
+    text: String,
+    mut structured: Value,
+    edit_failure_reminder: Option<String>,
+) -> ToolResult {
+    if let Some(edit_failure_reminder) = edit_failure_reminder {
+        if let Value::Object(fields) = &mut structured {
+            fields.insert(
+                "editFailureReminder".to_string(),
+                Value::String(edit_failure_reminder),
+            );
+        }
+    }
+
+    tool_error(text, structured)
+}
+
+fn planning_scope_key(session_id: Option<&str>) -> String {
+    session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("session:{value}"))
+        .unwrap_or_else(|| "session:default".to_string())
+}
+
+fn planning_scope_prefix(scope: &str) -> String {
+    format!("{scope}::planning::")
+}
+
+fn planning_state_key(scope: &str, planning_id: &str) -> String {
+    format!("{}{}", planning_scope_prefix(scope), planning_id)
+}
+
+fn resolve_planning_state_key(
+    states: &HashMap<String, PlanningState>,
+    scope: &str,
+    planning_id: &str,
+) -> Result<String, PlanningLookupError> {
+    let exact_key = planning_state_key(scope, planning_id);
+    if states.contains_key(&exact_key) {
+        return Ok(exact_key);
+    }
+
+    let matches: Vec<&String> = states
+        .iter()
+        .filter_map(|(key, state)| {
+            if state.planning_id == planning_id {
+                Some(key)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    match matches.as_slice() {
+        [] => Err(PlanningLookupError::Unknown),
+        [key] => Ok((*key).clone()),
+        _ => Err(PlanningLookupError::Ambiguous),
+    }
+}
+
+fn planning_id_for_plan(plan: &[PlanItem]) -> String {
+    let mut hasher = DefaultHasher::new();
+    "task-planning-v2".hash(&mut hasher);
+    for item in plan {
+        item.step.trim().hash(&mut hasher);
+    }
+    format!("plan-{:016x}", hasher.finish())
+}
+
+fn plan_all_completed(plan: &[PlanItem]) -> bool {
+    !plan.is_empty()
+        && plan
+            .iter()
+            .all(|item| item.status == PlanItemStatus::Completed)
+}
+
+fn current_plan_item(plan: &[PlanItem]) -> Option<(usize, &PlanItem)> {
+    plan.iter()
+        .enumerate()
+        .find(|(_, item)| item.status == PlanItemStatus::InProgress)
+        .map(|(idx, item)| (idx + 1, item))
+}
+
+fn next_pending_item_index(plan: &[PlanItem], after_index: usize) -> Option<usize> {
+    plan.iter()
+        .enumerate()
+        .skip(after_index.saturating_add(1))
+        .find(|(_, item)| item.status == PlanItemStatus::Pending)
+        .map(|(idx, _)| idx)
+        .or_else(|| {
+            plan.iter()
+                .enumerate()
+                .find(|(_, item)| item.status == PlanItemStatus::Pending)
+                .map(|(idx, _)| idx)
+        })
+}
+
+fn shell_command_starts_with_rg(command: &str) -> bool {
+    let trimmed = command.trim_start();
+    trimmed == "rg"
+        || trimmed.starts_with("rg ")
+        || trimmed.starts_with("rg\t")
+        || trimmed == "rg.exe"
+        || trimmed.starts_with("rg.exe ")
+        || trimmed.starts_with("rg.exe\t")
+}
+
+fn validate_plan_items(plan: &[PlanItem]) -> Result<(), AppError> {
+    if plan.is_empty() {
+        return Err(AppError::BadRequest(
+            "task-planning update requires at least one plan item".to_string(),
+        ));
+    }
+    if plan.len() > 50 {
+        return Err(AppError::BadRequest(
+            "task-planning plan cannot contain more than 50 items".to_string(),
+        ));
+    }
+
+    let mut in_progress = 0usize;
+    for (idx, item) in plan.iter().enumerate() {
+        if item.step.trim().is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "task-planning plan item {} has an empty step",
+                idx + 1
+            )));
+        }
+        if item.step.chars().count() > 500 {
+            return Err(AppError::BadRequest(format!(
+                "task-planning plan item {} is too long; keep steps under 500 characters",
+                idx + 1
+            )));
+        }
+        if item.status == PlanItemStatus::InProgress {
+            in_progress += 1;
+        }
+    }
+    if in_progress > 1 {
+        return Err(AppError::BadRequest(
+            "task-planning plan can have at most one in_progress item".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn planning_gate_error(
+    tool: BuiltinTool,
+    reason: &str,
+    next_step: &str,
+    planning_id: Option<&str>,
+) -> ToolResult {
+    tool_error(
+        format!(
+            "{} requires an active task-planning state before real builtin tool calls. {next_step}",
+            tool.name()
+        ),
+        json!({
+            "status": "blocked",
+            "tool": tool.name(),
+            "reason": reason,
+            "planningRequired": true,
+            "planningId": planning_id,
+            "nextStep": next_step
+        }),
+    )
+}
+
+fn planning_gate_instructions() -> &'static str {
+    "## Planning Gate\n\nWhen the bundled `task-planning` skill is enabled, real builtin tool calls are gated by an active plan. Before using this skill for any non-documentation action, call `task-planning` with `action: \"update\"` and a concise todo list. The gateway returns a content-derived `planningId`. Pass it as `planningId` on subsequent builtin tool calls. Reuse the same planningId across multiple tool calls while working through the plan. Successful builtin tool results may include a single `planningReminder` for the current `in_progress` item. If that item is done, use `task-planning` with `action: \"set_status\"`, the active `planningId`, and `status: \"completed\"`; do not resend the full plan for simple status changes. Use full `update` only when the plan steps or approach change. When all plan items are updated to `completed`, that planningId is closed and can no longer be used for tool calls. Documentation reads of SKILL.md files do not require planning fields."
 }
 
 fn confirmation_rejected_result(confirmation_id: &str, timed_out: bool) -> ToolResult {
@@ -2213,35 +3092,36 @@ fn builtin_tools(cfg: &BuiltinToolsConfig) -> Vec<BuiltinTool> {
     tools
 }
 
-fn tool_definitions(skills: &[DiscoveredSkill], cfg: &BuiltinToolsConfig) -> Value {
+fn external_skill_tool_definitions(skills: &[DiscoveredSkill]) -> Value {
     let bindings = build_skill_tool_bindings(skills);
     let now = Utc::now().to_rfc3339();
     let os = current_os_label();
-    let mut tools = builtin_tool_definitions(os, &now, cfg);
+    let tools: Vec<Value> = bindings
+        .into_iter()
+        .map(|(tool_name, skill)| {
+            let description = render_skill_tool_description(skill, os, &now);
+            json!({
+                "name": tool_name,
+                "description": description,
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["exec"],
+                    "properties": {
+                        "exec": {
+                            "type": "string",
+                            "description": "Shell command string for this skill."
+                        },
+                        "skillToken": {
+                            "type": "string",
+                            "description": "Required skill token."
+                        },
 
-    tools.extend(bindings.into_iter().map(|(tool_name, skill)| {
-        let description = render_skill_tool_description(skill, os, &now);
-        json!({
-            "name": tool_name,
-            "description": description,
-            "inputSchema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["exec"],
-                "properties": {
-                    "exec": {
-                        "type": "string",
-                        "description": "Shell command string for this skill. Main uses: read full markdown files with full paths (for example `cat D:/.../SKILL.md` or `Get-Content -Raw D:/.../SKILL.md`) and run scripts after SKILL.md has been read."
-                    },
-                    "skillToken": {
-                        "type": "string",
-                        "description": "Required for every non-documentation call. First read this skill's complete SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
-            }
+            })
         })
-    }));
-
+        .collect();
     Value::Array(tools)
 }
 
@@ -2252,7 +3132,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::ShellCommand) {
         defs.push(json!({
             "name": BuiltinTool::ShellCommand.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ShellCommand, os, now),
+            "description": render_builtin_tool_description(BuiltinTool::ShellCommand, os, now, cfg.task_planning),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -2282,7 +3162,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::ApplyPatch) {
         defs.push(json!({
             "name": BuiltinTool::ApplyPatch.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ApplyPatch, os, now),
+            "description": render_builtin_tool_description(BuiltinTool::ApplyPatch, os, now, cfg.task_planning),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -2307,7 +3187,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::MultiEditFile) {
         defs.push(json!({
             "name": BuiltinTool::MultiEditFile.name(),
-            "description": render_builtin_tool_description(BuiltinTool::MultiEditFile, os, now),
+            "description": render_builtin_tool_description(BuiltinTool::MultiEditFile, os, now, cfg.task_planning),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -2361,19 +3241,62 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::TaskPlanning) {
         defs.push(json!({
             "name": BuiltinTool::TaskPlanning.name(),
-            "description": render_builtin_tool_description(BuiltinTool::TaskPlanning, os, now),
+            "description": render_builtin_tool_description(BuiltinTool::TaskPlanning, os, now, cfg.task_planning),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["exec"],
+                "required": [],
                 "properties": {
                     "exec": {
                         "type": "string",
-                        "description": "Documentation read command. First call must read the complete builtin://task-planning/SKILL.md. This skill is instruction-only and does not execute planning actions."
+                        "description": "Documentation read command. First call may read the complete builtin://task-planning/SKILL.md without skillToken."
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["update", "set_status", "clear"],
+                        "description": "Use update to create or replace the full plan, set_status for concise item status changes, and clear to remove active plan state."
+                    },
+                    "explanation": {
+                        "type": "string",
+                        "description": "Optional short reason for this plan update."
+                    },
+                    "plan": {
+                        "type": "array",
+                        "description": "Required for action=update. Concise todo list for the current task.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["step", "status"],
+                            "properties": {
+                                "step": {
+                                    "type": "string",
+                                    "description": "One task step."
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Step state. At most one item may be in_progress."
+                                }
+                            }
+                        }
+                    },
+                    "planningId": {
+                        "type": "string",
+                        "description": "Required for action=set_status. Optional for action=clear. If omitted for clear, all active plans for this client/session are cleared."
+                    },
+                    "item": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based plan item number for action=set_status. If omitted, the current in_progress item is updated."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "Required for action=set_status. New state for the selected item."
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. First read the complete builtin://task-planning/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                        "description": "Required for action=update, action=set_status, or action=clear. First read the complete builtin://task-planning/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Documentation reads do not require it."
                     }
                 }
             }
@@ -2382,7 +3305,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::ChromeCdp) {
         defs.push(json!({
             "name": BuiltinTool::ChromeCdp.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ChromeCdp, os, now),
+            "description": render_builtin_tool_description(BuiltinTool::ChromeCdp, os, now, cfg.task_planning),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -2408,7 +3331,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::ChatPlusAdapterDebugger) {
         defs.push(json!({
             "name": BuiltinTool::ChatPlusAdapterDebugger.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ChatPlusAdapterDebugger, os, now),
+            "description": render_builtin_tool_description(BuiltinTool::ChatPlusAdapterDebugger, os, now, cfg.task_planning),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -2431,10 +3354,43 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
             }
         }));
     }
+    if cfg.task_planning {
+        for def in &mut defs {
+            add_planning_gate_schema(def);
+        }
+    }
     defs
 }
 
-fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> String {
+fn add_planning_gate_schema(def: &mut Value) {
+    let Some(name) = def.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    if name == BuiltinTool::TaskPlanning.name() {
+        return;
+    }
+    let Some(properties) = def
+        .get_mut("inputSchema")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    properties.insert(
+        "planningId".to_string(),
+        json!({
+            "type": "string",
+            "description": "Required for non-documentation calls when task-planning is enabled. Use the planningId returned by task-planning update."
+        }),
+    );
+}
+
+fn render_builtin_tool_description(
+    tool: BuiltinTool,
+    os: &str,
+    now: &str,
+    planning_enabled: bool,
+) -> String {
     let frontmatter = builtin_skill_frontmatter(tool);
     let skill_uri = builtin_skill_uri(tool);
     let skill_root_uri = builtin_skill_uri_root(tool);
@@ -2462,7 +3418,7 @@ fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> St
         format!("---\n{}\n---", frontmatter.block.trim())
     };
 
-    format!(
+    let mut description = format!(
         "Bundled skill: {}.\nMANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this bundled skill for any real action, you MUST first read its full SKILL.md. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. {read_requirement} The SKILL.md response includes the required `skillToken` only inside the returned markdown content. You must obtain it by reading the complete SKILL.md document; this SKILL.md read is the one call that does not need `skillToken`. Do not use regex, grep, Select-String, line ranges, or other partial-read tricks to fetch only the token. Every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call; a rejected call fails and must be retried with the correct token. The gateway serves bundled SKILL.md reads from embedded content, so this direct documentation read does not require a workspace `cwd`.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill URI: {skill_root_uri}.\nSKILL.md URI: {skill_uri}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
         frontmatter.name,
         frontmatter.name,
@@ -2477,7 +3433,12 @@ fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> St
             frontmatter.metadata.trim()
         },
         frontmatter_block
-    )
+    );
+    if planning_enabled && tool != BuiltinTool::TaskPlanning {
+        description.push_str("\n\n");
+        description.push_str(planning_gate_instructions());
+    }
+    description
 }
 
 fn builtin_skill_frontmatter(tool: BuiltinTool) -> ParsedFrontmatter {
@@ -2527,8 +3488,9 @@ fn builtin_skill_doc_result(
     command: &str,
     matched_path: String,
     token: String,
+    planning_enabled: bool,
 ) -> ToolResult {
-    let mut text = render_builtin_skill_md(tool);
+    let mut text = render_builtin_skill_md(tool, planning_enabled);
     text.push_str(&format!(
         "\n\n[skillToken]\nUse this exact skillToken for subsequent non-documentation calls to `{}`: {}\n",
         tool.name(),
@@ -2548,8 +3510,13 @@ fn builtin_skill_doc_result(
     )
 }
 
-fn render_builtin_skill_md(tool: BuiltinTool) -> String {
-    builtin_skill_md_content(tool).to_string()
+fn render_builtin_skill_md(tool: BuiltinTool, planning_enabled: bool) -> String {
+    let mut content = builtin_skill_md_content(tool).to_string();
+    if planning_enabled && tool != BuiltinTool::TaskPlanning {
+        content.push_str("\n\n");
+        content.push_str(planning_gate_instructions());
+    }
+    content
 }
 
 fn materialize_builtin_chrome_cdp_script() -> Result<PathBuf, AppError> {
@@ -3742,7 +4709,7 @@ fn resolve_builtin_cwd(
     if allowed_roots.is_empty() {
         return Err(cwd_error_result(
             tool,
-            "skills enabled requires at least one allowed directory",
+            "skills requires at least one allowed directory",
             cwd,
             None,
             allowed_dirs,
@@ -5893,38 +6860,13 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_use_metadata_name_and_exec_schema() {
-        let discovered = vec![
-            DiscoveredSkill {
-                skill: "alpha".to_string(),
-                frontmatter_name: "Alpha Skill".to_string(),
-                description: "A".to_string(),
-                frontmatter_metadata: r#"{"tags":["alpha"]}"#.to_string(),
-                frontmatter_block:
-                    "name: Alpha Skill\ndescription: A\nmetadata:\n  tags:\n    - alpha".to_string(),
-                root: PathBuf::from("C:/skills"),
-                path: PathBuf::from("C:/skills/alpha"),
-                has_scripts: true,
-            },
-            DiscoveredSkill {
-                skill: "beta".to_string(),
-                frontmatter_name: "Beta Skill".to_string(),
-                description: "B".to_string(),
-                frontmatter_metadata: "none".to_string(),
-                frontmatter_block: "name: Beta Skill\ndescription: B".to_string(),
-                root: PathBuf::from("C:/skills"),
-                path: PathBuf::from("C:/skills/beta"),
-                has_scripts: false,
-            },
-        ];
-        let tools = tool_definitions(&discovered, &BuiltinToolsConfig::default());
+    fn builtin_tool_definitions_include_shell_command_description() {
+        let os = current_os_label();
+        let now = Utc::now().to_rfc3339();
+        let tools = builtin_tool_definitions(os, &now, &BuiltinToolsConfig::default());
         let shell_tool = tools
-            .as_array()
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|item| item.get("name").and_then(Value::as_str) == Some("shell_command"))
-            })
+            .iter()
+            .find(|item| item.get("name").and_then(Value::as_str) == Some("shell_command"))
             .expect("shell command tool exists");
         let shell_description = shell_tool
             .get("description")
@@ -5943,12 +6885,8 @@ mod tests {
         assert!(!shell_description.contains("Prefer fast discovery commands"));
 
         let patch_tool = tools
-            .as_array()
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|item| item.get("name").and_then(Value::as_str) == Some("apply_patch"))
-            })
+            .iter()
+            .find(|item| item.get("name").and_then(Value::as_str) == Some("apply_patch"))
             .expect("apply patch tool exists");
         let patch_description = patch_tool
             .get("description")
@@ -5958,47 +6896,10 @@ mod tests {
         assert!(patch_description.contains("Front matter summary:"));
         assert!(!patch_description.contains("Minimal replacement:"));
 
-        let alpha_tool = tools
-            .as_array()
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|item| item.get("name").and_then(Value::as_str) == Some("alpha_skill"))
-            })
-            .expect("alpha skill tool exists");
-        let exec_schema = alpha_tool
-            .get("inputSchema")
-            .and_then(|schema| schema.get("properties"))
-            .and_then(|props| props.get("exec"))
-            .expect("exec schema is present");
-        assert_eq!(
-            exec_schema.get("type").and_then(Value::as_str),
-            Some("string")
-        );
-
-        let description = alpha_tool
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("tool description");
-        assert!(description.contains("MANDATORY BEFORE USE"));
-        assert!(description.contains("you MUST first call this skill tool"));
-        assert!(description.contains("returned markdown content"));
-        assert!(!description.contains("structuredContent.skillToken"));
-        assert!(description.contains("Current OS:"));
-        assert!(description.contains("Current datetime:"));
-        assert!(description.contains("SKILL.md"));
-        assert!(description.contains("Front matter summary:"));
-        assert!(description.contains("name: Alpha Skill"));
-        assert!(description.contains("metadata: {\"tags\":[\"alpha\"]}"));
-        assert!(description.contains("Front matter raw (YAML):"));
-        assert!(description.contains("metadata:"));
-
-        let names = tools
-            .as_array()
-            .expect("tools array")
+        let names: Vec<&str> = tools
             .iter()
             .filter_map(|item| item.get("name").and_then(Value::as_str))
-            .collect::<Vec<_>>();
+            .collect();
         assert_eq!(
             names,
             vec![
@@ -6007,9 +6908,7 @@ mod tests {
                 "multi_edit_file",
                 "task-planning",
                 "chrome-cdp",
-                "chat-plus-adapter-debugger",
-                "alpha_skill",
-                "beta_skill"
+                "chat-plus-adapter-debugger"
             ]
         );
     }
@@ -6019,7 +6918,7 @@ mod tests {
         let (tool, path) =
             builtin_skill_doc_read("Get-Content -Raw builtin://shell_command/SKILL.md")
                 .expect("shell doc read");
-        let shell = builtin_skill_doc_result(tool, "doc", path, "abc123".to_string());
+        let shell = builtin_skill_doc_result(tool, "doc", path, "abc123".to_string(), false);
         assert!(!shell.is_error);
         assert!(shell.text.contains("# Shell Command"));
         assert!(shell
@@ -6039,7 +6938,7 @@ mod tests {
 
         let (tool, path) = builtin_skill_doc_read("cat builtin://apply_patch/SKILL.md")
             .expect("apply_patch doc read");
-        let patch = builtin_skill_doc_result(tool, "doc", path, "def456".to_string());
+        let patch = builtin_skill_doc_result(tool, "doc", path, "def456".to_string(), false);
         assert!(!patch.is_error);
         assert!(patch.text.contains("# Apply Patch"));
         assert!(patch.text.contains("*** Update File: path/to/file"));
@@ -6049,7 +6948,7 @@ mod tests {
 
         let (tool, path) = builtin_skill_doc_read("cat builtin://multi_edit_file/SKILL.md")
             .expect("multi_edit_file doc read");
-        let multi_edit = builtin_skill_doc_result(tool, "doc", path, "fed456".to_string());
+        let multi_edit = builtin_skill_doc_result(tool, "doc", path, "fed456".to_string(), false);
         assert!(!multi_edit.is_error);
         assert!(multi_edit.text.contains("# Multi Edit File"));
         assert!(multi_edit.text.contains("\"edits\""));
@@ -6058,16 +6957,16 @@ mod tests {
 
         let (tool, path) = builtin_skill_doc_read("cat builtin://task-planning/SKILL.md")
             .expect("task-planning doc read");
-        let planning = builtin_skill_doc_result(tool, "doc", path, "plan123".to_string());
+        let planning = builtin_skill_doc_result(tool, "doc", path, "plan123".to_string(), true);
         assert!(!planning.is_error);
         assert!(planning.text.contains("# Task Planning"));
-        assert!(planning.text.contains("instruction-only"));
+        assert!(planning.text.contains("planningId"));
         assert!(planning.text.contains("plan123"));
         assert!(planning.structured.get("skillToken").is_none());
 
         let (tool, path) = builtin_skill_doc_read("cat builtin://chrome-cdp/SKILL.md")
             .expect("chrome-cdp doc read");
-        let cdp = builtin_skill_doc_result(tool, "doc", path, "987abc".to_string());
+        let cdp = builtin_skill_doc_result(tool, "doc", path, "987abc".to_string(), false);
         assert!(!cdp.is_error);
         assert!(cdp.text.contains("# Chrome CDP"));
         assert!(cdp.text.contains("Chrome DevTools Protocol over WebSocket"));
@@ -6078,7 +6977,7 @@ mod tests {
             "Get-Content -Raw builtin://chat-plus-adapter-debugger/SKILL.md",
         )
         .expect("chat-plus adapter debugger doc read");
-        let adapter = builtin_skill_doc_result(tool, "doc", path, "654fed".to_string());
+        let adapter = builtin_skill_doc_result(tool, "doc", path, "654fed".to_string(), false);
         assert!(!adapter.is_error);
         assert!(adapter.text.contains("# Chat Plus Adapter Debugger"));
         assert!(adapter.text.contains("decorateBubbles"));
@@ -6196,9 +7095,8 @@ mod tests {
         std::fs::write(&update_path, "alpha\nbeta\n").expect("write update");
         std::fs::write(&delete_path, "remove me\n").expect("write delete");
 
-        let patch = format!(
-            "*** Begin Patch\n*** Update File: update.txt\n@@\n alpha\n-beta\n+gamma\n*** Add File: added.txt\n+new file\n*** Delete File: delete.txt\n*** End Patch"
-        );
+        let patch = "*** Begin Patch\n*** Update File: update.txt\n@@\n alpha\n-beta\n+gamma\n*** Add File: added.txt\n+new file\n*** Delete File: delete.txt\n*** End Patch"
+            .to_string();
         let parsed = parse_apply_patch(&patch).expect("parse patch");
         let affected = patch_affected_paths(&parsed, &sandbox).expect("affected paths");
         assert_eq!(affected.len(), 3);
@@ -6440,6 +7338,7 @@ mod tests {
             path: "update.txt".to_string(),
             cwd: None,
             skill_token: None,
+            planning_id: None,
             edits: vec![
                 MultiEditFileEdit {
                     old_string: "alpha".to_string(),
@@ -6490,6 +7389,7 @@ mod tests {
             path: "update.txt".to_string(),
             cwd: None,
             skill_token: None,
+            planning_id: None,
             edits: vec![MultiEditFileEdit {
                 old_string: "beta".to_string(),
                 new_string: "BETA".to_string(),
@@ -6520,6 +7420,7 @@ mod tests {
             path: "update.txt".to_string(),
             cwd: None,
             skill_token: None,
+            planning_id: None,
             edits: vec![MultiEditFileEdit {
                 old_string: "alpha\nbeta".to_string(),
                 new_string: "ALPHA\nBETA".to_string(),
@@ -6548,6 +7449,7 @@ mod tests {
             path: "lib.rs".to_string(),
             cwd: None,
             skill_token: None,
+            planning_id: None,
             edits: vec![MultiEditFileEdit {
                 old_string: "    value();\n}".to_string(),
                 new_string: "    value();".to_string(),
@@ -6621,5 +7523,306 @@ mod tests {
             chat_plus_adapter_debugger: false,
         };
         assert_eq!(builtin_tools(&all_disabled).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn task_planning_update_returns_stable_content_derived_id() {
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let token = builtin_skill_token(BuiltinTool::TaskPlanning);
+        let args = json!({
+            "action": "update",
+            "explanation": "test",
+            "plan": [
+                {"step": "Inspect", "status": "completed"},
+                {"step": "Implement", "status": "in_progress"}
+            ],
+            "skillToken": token
+        });
+
+        let first = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                args.clone(),
+                "session:a",
+            )
+            .await
+            .expect("first planning update");
+        let second = service
+            .execute_builtin_tool(&config, BuiltinTool::TaskPlanning, args, "session:a")
+            .await
+            .expect("second planning update");
+        let planning_id = first.structured["planning"]["planningId"]
+            .as_str()
+            .expect("planning id")
+            .to_string();
+        let status_update = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "set_status",
+                    "planningId": planning_id.clone(),
+                    "status": "completed",
+                    "skillToken": token
+                }),
+                "session:a",
+            )
+            .await
+            .expect("completed planning update");
+
+        let first_plan = &first.structured["planning"];
+        let second_plan = &second.structured["planning"];
+        let completed_plan = &status_update.structured["planning"];
+        assert_eq!(first_plan["planningId"], second_plan["planningId"]);
+        assert_eq!(first_plan["planningId"], completed_plan["planningId"]);
+        assert_eq!(completed_plan["active"], false);
+        assert_eq!(completed_plan["completed"], true);
+    }
+
+    #[tokio::test]
+    async fn planning_gate_allows_reusing_id_across_tool_calls_until_completed() {
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let scope = "session:gate";
+
+        let missing = service
+            .check_planning_gate(&config, scope, BuiltinTool::ShellCommand, None)
+            .await
+            .expect("missing planning should be blocked");
+        assert!(missing.is_error);
+        assert_eq!(missing.structured["reason"], "missing planningId");
+
+        let token = builtin_skill_token(BuiltinTool::TaskPlanning);
+        let updated = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "update",
+                    "plan": [
+                        {"step": "Inspect", "status": "in_progress"},
+                        {"step": "Verify", "status": "pending"}
+                    ],
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("planning update");
+        let planning_id = updated.structured["planning"]["planningId"]
+            .as_str()
+            .expect("planning id")
+            .to_string();
+
+        assert!(service
+            .check_planning_gate(
+                &config,
+                scope,
+                BuiltinTool::ShellCommand,
+                Some(&planning_id),
+            )
+            .await
+            .is_none());
+
+        assert!(service
+            .check_planning_gate(
+                &config,
+                scope,
+                BuiltinTool::ShellCommand,
+                Some(&planning_id),
+            )
+            .await
+            .is_none());
+
+        assert!(service
+            .check_planning_gate(
+                &config,
+                "session:changed",
+                BuiltinTool::ShellCommand,
+                Some(&planning_id),
+            )
+            .await
+            .is_none());
+
+        let planning_reminder = service
+            .planning_success_hints(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ShellCommand,
+                Some("Get-ChildItem"),
+            )
+            .await
+            .planning_reminder
+            .expect("planning reminder");
+        assert!(planning_reminder.contains("Current plan item #1"));
+        assert!(planning_reminder.contains("\"action\":\"set_status\""));
+
+        let reminder = tool_success_with_planning_reminder(
+            "done".to_string(),
+            json!({"status": "completed"}),
+            PlanningSuccessHints {
+                planning_reminder: Some(planning_reminder),
+                shell_command_reminder: None,
+            },
+        );
+        assert_eq!(reminder.text, "done");
+        assert!(reminder.structured.get("planningUpdateRequired").is_none());
+        assert!(reminder.structured["planningReminder"].is_string());
+        assert!(reminder.structured.get("shellCommandReminder").is_none());
+
+        let second_shell = service
+            .planning_success_hints(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ShellCommand,
+                Some("Get-ChildItem"),
+            )
+            .await;
+        assert!(second_shell.shell_command_reminder.is_none());
+        let third_shell = service
+            .planning_success_hints(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ShellCommand,
+                Some("Get-ChildItem"),
+            )
+            .await;
+        assert!(third_shell.shell_command_reminder.is_some());
+        let reset_by_rg = service
+            .planning_success_hints(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ShellCommand,
+                Some("rg --files"),
+            )
+            .await;
+        assert!(reset_by_rg.shell_command_reminder.is_none());
+        let after_rg_shell = service
+            .planning_success_hints(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ShellCommand,
+                Some("Get-ChildItem"),
+            )
+            .await;
+        assert!(after_rg_shell.shell_command_reminder.is_none());
+        let reset_by_patch = service
+            .planning_success_hints(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ApplyPatch,
+                None,
+            )
+            .await;
+        assert!(reset_by_patch.shell_command_reminder.is_none());
+
+        assert!(service
+            .planning_edit_failure_reminder(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ApplyPatch,
+            )
+            .await
+            .is_none());
+        assert!(service
+            .planning_edit_failure_reminder(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ApplyPatch,
+            )
+            .await
+            .is_none());
+        let edit_failure_reminder = service
+            .planning_edit_failure_reminder(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::ApplyPatch,
+            )
+            .await
+            .expect("third edit failure reminder");
+        assert!(edit_failure_reminder.contains("apply_patch has failed 3 times"));
+        assert!(service
+            .planning_edit_failure_reminder(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::MultiEditFile,
+            )
+            .await
+            .is_none());
+        let edit_error = tool_error_with_edit_failure_reminder(
+            "failed".to_string(),
+            json!({"status": "failed"}),
+            Some(edit_failure_reminder),
+        );
+        assert!(edit_error.structured["editFailureReminder"].is_string());
+
+        let completed_first = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "set_status",
+                    "planningId": planning_id.clone(),
+                    "status": "completed",
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("complete current item");
+        assert_eq!(
+            completed_first.structured["planning"]["nextItem"]["item"],
+            2
+        );
+        assert_eq!(
+            completed_first.structured["planning"]["plan"][1]["status"],
+            "in_progress"
+        );
+        assert!(service
+            .check_planning_gate(
+                &config,
+                scope,
+                BuiltinTool::ShellCommand,
+                Some(&planning_id),
+            )
+            .await
+            .is_none());
+
+        service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "set_status",
+                    "planningId": planning_id.clone(),
+                    "status": "completed",
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("complete final item");
+        let closed = service
+            .check_planning_gate(
+                &config,
+                scope,
+                BuiltinTool::ShellCommand,
+                Some(&planning_id),
+            )
+            .await
+            .expect("completed planning id should be closed");
+        assert_eq!(closed.structured["reason"], "unknown planningId");
     }
 }

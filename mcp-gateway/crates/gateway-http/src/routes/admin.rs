@@ -334,7 +334,7 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
         mcp_servers.insert(server.name.clone(), Value::Object(entry));
     }
 
-    if cfg.skills.enabled {
+    {
         let url = format!(
             "{}{}{}",
             base_url,
@@ -348,7 +348,7 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
         let mut entry = serde_json::Map::new();
         entry.insert(
             "name".to_string(),
-            Value::String("Built-in Skills MCP".to_string()),
+            Value::String("External Skills MCP".to_string()),
         );
         entry.insert(
             "type".to_string(),
@@ -364,6 +364,40 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
         }
 
         mcp_servers.insert(cfg.skills.server_name.clone(), Value::Object(entry));
+
+        // Built-in skills MCP entry
+        let builtin_url = format!(
+            "{}{}{}",
+            base_url,
+            cfg.transport
+                .streamable_http
+                .base_path
+                .trim_end_matches('/'),
+            format_args!("/{}", cfg.skills.builtin_server_name)
+        );
+
+        let mut builtin_entry = serde_json::Map::new();
+        builtin_entry.insert(
+            "name".to_string(),
+            Value::String("Built-in Skills MCP".to_string()),
+        );
+        builtin_entry.insert(
+            "type".to_string(),
+            Value::String("streamable-http".to_string()),
+        );
+        builtin_entry.insert("url".to_string(), Value::String(builtin_url));
+
+        if cfg.security.mcp.enabled {
+            builtin_entry.insert(
+                "headers".to_string(),
+                json!({"Authorization": format!("Bearer {}", cfg.security.mcp.token)}),
+            );
+        }
+
+        mcp_servers.insert(
+            cfg.skills.builtin_server_name.clone(),
+            Value::Object(builtin_entry),
+        );
     }
 
     Ok(response::ok(
@@ -378,10 +412,6 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
 )]
 pub async fn get_skills(State(state): State<AppState>) -> ApiResult<Vec<SkillSummary>> {
     let cfg = state.config_service.get_config().await;
-    if !cfg.skills.enabled {
-        return Ok(response::ok(Vec::new()));
-    }
-
     let skills = state
         .skills
         .list_skills_for_admin(&cfg)

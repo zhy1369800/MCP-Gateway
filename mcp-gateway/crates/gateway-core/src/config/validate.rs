@@ -82,14 +82,33 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
             "skills.serverName cannot contain path separators".to_string(),
         ));
     }
-    if cfg
-        .servers
-        .iter()
-        .any(|server| server.name == cfg.skills.server_name)
+    if cfg.skills.builtin_server_name.trim().is_empty() {
+        return Err(AppError::Validation(
+            "skills.builtinServerName cannot be empty".to_string(),
+        ));
+    }
+    if cfg.skills.builtin_server_name.contains('/') || cfg.skills.builtin_server_name.contains('\\')
     {
+        return Err(AppError::Validation(
+            "skills.builtinServerName cannot contain path separators".to_string(),
+        ));
+    }
+    if cfg.skills.server_name == cfg.skills.builtin_server_name {
+        return Err(AppError::Validation(
+            "skills.serverName and skills.builtinServerName must be different".to_string(),
+        ));
+    }
+    if cfg.servers.iter().any(|server| {
+        server.name == cfg.skills.server_name || server.name == cfg.skills.builtin_server_name
+    }) {
+        let conflicting = if cfg.servers.iter().any(|s| s.name == cfg.skills.server_name) {
+            &cfg.skills.server_name
+        } else {
+            &cfg.skills.builtin_server_name
+        };
         return Err(AppError::Validation(format!(
-            "skills.serverName conflicts with existing server: {}",
-            cfg.skills.server_name
+            "skills server name conflicts with existing server: {}",
+            conflicting
         )));
     }
     if cfg.skills.execution.timeout_ms < 1000 {
@@ -102,17 +121,7 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
             "skills.execution.maxOutputBytes must be >= 1024".to_string(),
         ));
     }
-    if cfg.skills.enabled && cfg.skills.policy.path_guard.whitelist_dirs.is_empty() {
-        return Err(AppError::Validation(
-            "skills.enabled=true requires at least one skills.policy.pathGuard.whitelistDirs entry"
-                .to_string(),
-        ));
-    }
-    if cfg.skills.enabled && !cfg.skills.policy.path_guard.enabled {
-        return Err(AppError::Validation(
-            "skills.enabled=true requires skills.policy.pathGuard.enabled=true".to_string(),
-        ));
-    }
+
     for dir in &cfg.skills.policy.path_guard.whitelist_dirs {
         let path = Path::new(dir);
         if !path.is_absolute() {
@@ -120,9 +129,9 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
                 "skills.policy.pathGuard.whitelistDirs must be absolute paths: {dir}"
             )));
         }
-        if cfg.skills.enabled && (!path.exists() || !path.is_dir()) {
+        if !path.exists() || !path.is_dir() {
             return Err(AppError::Validation(format!(
-                "skills.policy.pathGuard.whitelistDirs must be existing directories when skills are enabled: {dir}"
+                "skills.policy.pathGuard.whitelistDirs must be existing directories: {dir}"
             )));
         }
     }

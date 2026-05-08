@@ -341,8 +341,8 @@ function ensureSkillsConfig(
   }
 
   return {
-    enabled: raw?.enabled ?? false,
     serverName: raw?.serverName?.trim() || "__skills__",
+    builtinServerName: raw?.builtinServerName?.trim() || "__builtin_skills__",
     roots: rootEntries.filter((entry) => entry.enabled).map((entry) => entry.path),
     rootEntries,
     policy: {
@@ -383,9 +383,6 @@ function ensureSkillsConfig(
 
 function normalizeSkillsForSubmit(input: SkillsConfig, fallbackRules: SkillCommandRule[]): SkillsConfig {
   const normalized = ensureSkillsConfig(input, fallbackRules);
-  if (!normalized.enabled) {
-    return normalized;
-  }
   return {
     ...normalized,
     policy: {
@@ -396,13 +393,6 @@ function normalizeSkillsForSubmit(input: SkillsConfig, fallbackRules: SkillComma
       },
     },
   };
-}
-
-function hasRequiredSkillAllowedDirectory(input: SkillsConfig): boolean {
-  if (!input.enabled) {
-    return true;
-  }
-  return input.policy.pathGuard.whitelistDirs.some((item) => item.trim().length > 0);
 }
 
 function formatTime(value: string): string {
@@ -738,27 +728,6 @@ function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: {
   );
 }
 
-function InfoDialog({ open, title, message, onClose, t }: {
-  open: boolean;
-  title: string;
-  message: string;
-  onClose: () => void;
-  t: ReturnType<typeof useT>;
-}) {
-  if (!open) return null;
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">{title}</div>
-        <div className="modal-body">{message}</div>
-        <div className="modal-footer">
-          <button className="btn btn-start" onClick={onClose}>{t("confirm")}</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function skillPreviewLabel(kind: string | undefined, t: ReturnType<typeof useT>): string {
   if (kind === "patch") return t("patchPreview");
   if (kind === "edit") return t("editPreview");
@@ -997,6 +966,7 @@ function SkillPolicyRulesEditor({
   jsonDraft,
   jsonError,
   onStartAdd,
+  onResetToDefault,
   onEdit,
   onCopy,
   onDelete,
@@ -1015,6 +985,7 @@ function SkillPolicyRulesEditor({
   jsonDraft: string;
   jsonError: string | null;
   onStartAdd: () => void;
+  onResetToDefault: () => void;
   onEdit: (rule: SkillCommandRule) => void;
   onCopy: (rule: SkillCommandRule) => void;
   onDelete: (id: string) => void;
@@ -1070,6 +1041,9 @@ function SkillPolicyRulesEditor({
           <button className="btn btn-sm" onClick={onStartAdd}>
             <Plus size={13} />
             {t("skillsRuleAdd")}
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={onResetToDefault}>
+            {t("skillsRuleResetDefault")}
           </button>
         </div>
       </div>
@@ -1579,7 +1553,7 @@ function App() {
   }>({
     open: false, kind: "roots", id: ""
   });
-  const [skillsAccessRequiredOpen, setSkillsAccessRequiredOpen] = useState(false);
+
   const knownPendingIdsRef = useRef<Set<string>>(new Set());
   const dismissedPopupIdsRef = useRef<Set<string>>(new Set());
   const pendingFetchSeqRef = useRef(0);
@@ -2032,7 +2006,7 @@ function App() {
     const fetchSeq = pendingFetchSeqRef.current + 1;
     pendingFetchSeqRef.current = fetchSeq;
 
-    if (!running || !skills.enabled) {
+    if (!running) {
       if (fetchSeq !== pendingFetchSeqRef.current) return "idle";
       setSkillPending([]);
       setActiveSkillPopupId(null);
@@ -2071,10 +2045,10 @@ function App() {
       setError(String(error));
       return "error";
     }
-  }, [apiClient, running, skills.enabled]);
+  }, [apiClient, running]);
 
   usePolling(fetchSkillPending, {
-    enabled: running && skills.enabled,
+    enabled: running,
     activeMs: 3000,
     idleMs: 10000,
     errorMs: 5000,
@@ -2371,15 +2345,7 @@ function App() {
     return createEditableConfigFingerprint(snapshot);
   };
 
-  const ensureSkillsAccessReady = () => {
-    const normalized = normalizeSkillsForSubmit(skills, defaultSkillRules);
-    if (hasRequiredSkillAllowedDirectory(normalized)) {
-      return true;
-    }
-    setActiveTab("skills");
-    setSkillsAccessRequiredOpen(true);
-    return false;
-  };
+  const ensureSkillsAccessReady = () => true;
 
   const handleStart = async () => {
     if (skillsRulesError) {
@@ -2617,6 +2583,8 @@ function App() {
   const baseUrl = listen.startsWith("http") ? listen : `http://${listen}`;
   const skillHttpUrl = `${baseUrl}${httpPath}/${skills.serverName}`;
   const skillSseUrl = `${baseUrl}${ssePath}/${skills.serverName}`;
+  const builtinSkillHttpUrl = `${baseUrl}${httpPath}/${skills.builtinServerName}`;
+  const builtinSkillSseUrl = `${baseUrl}${ssePath}/${skills.builtinServerName}`;
   const runtimeLoading = !localRuntimeSummary && !localRuntimeDetectFailed;
   const runtimeCards = useMemo(() => ([
     {
@@ -2976,32 +2944,6 @@ function App() {
 
               <div className="skills-redesign">
                 <div className="skills-top-row">
-                  <div className="skills-switch-card">
-                    <label className="field-label" htmlFor="skills-enabled-toggle">{t("skillsEnable")}</label>
-                    <div className="skills-switch-track">
-                      <button
-                        id="skills-enabled-toggle"
-                        className={`toggle-btn ${skills.enabled ? "toggle-on" : "toggle-off"}`}
-                        onClick={() =>
-                          setSkills((prev) => {
-                            const nextEnabled = !prev.enabled;
-                            return {
-                              ...prev,
-                              enabled: nextEnabled,
-                              policy: nextEnabled
-                                ? {
-                                    ...prev.policy,
-                                    pathGuard: { ...prev.policy.pathGuard, enabled: true },
-                                  }
-                                : prev.policy,
-                            };
-                          })
-                        }
-                        aria-label={t("skillsEnable")}
-                        title={t("skillsEnable")}
-                      />
-                    </div>
-                  </div>
                   <div className="skills-input-card">
                     <label className="field-label" htmlFor="skills-server-name">{t("skillsServerName")}</label>
                     <input
@@ -3010,6 +2952,16 @@ function App() {
                       value={skills.serverName}
                       onChange={(e) => setSkills((prev) => ({ ...prev, serverName: e.target.value }))}
                       placeholder="__skills__"
+                    />
+                  </div>
+                  <div className="skills-input-card">
+                    <label className="field-label" htmlFor="skills-builtin-server-name">{t("skillsBuiltinServerName")}</label>
+                    <input
+                      id="skills-builtin-server-name"
+                      className="form-input"
+                      value={skills.builtinServerName}
+                      onChange={(e) => setSkills((prev) => ({ ...prev, builtinServerName: e.target.value }))}
+                      placeholder="__builtin_skills__"
                     />
                   </div>
                 </div>
@@ -3109,7 +3061,8 @@ function App() {
                   enableToggle
                   t={t}
                 />
-                {running && skills.enabled && skills.serverName.trim() && (
+                {running && skills.serverName.trim() && (
+                  <>
                   <div className="server-row-endpoints skills-endpoints">
                     <div className="endpoint-item">
                       <span className="endpoint-label">{t("skillSseEndpoint")}</span>
@@ -3126,6 +3079,23 @@ function App() {
                       </button>
                     </div>
                   </div>
+                  <div className="server-row-endpoints skills-endpoints">
+                    <div className="endpoint-item">
+                      <span className="endpoint-label">{t("builtinSkillSseEndpoint")}</span>
+                      <code className="endpoint-url">{builtinSkillSseUrl}</code>
+                      <button className="btn-icon" title={t("copyBuiltinSkillSse")} onClick={() => handleCopy(skills.builtinServerName, "sse", builtinSkillSseUrl, "builtin-skills-sse")}>
+                        {copied === "builtin-skills-sse" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                      </button>
+                    </div>
+                    <div className="endpoint-item">
+                      <span className="endpoint-label">{t("builtinSkillHttpEndpoint")}</span>
+                      <code className="endpoint-url">{builtinSkillHttpUrl}</code>
+                      <button className="btn-icon" title={t("copyBuiltinSkillHttp")} onClick={() => handleCopy(skills.builtinServerName, "streamable-http", builtinSkillHttpUrl, "builtin-skills-http")}>
+                        {copied === "builtin-skills-http" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                      </button>
+                    </div>
+                  </div>
+                  </>
                 )}
               </div>
             </section>
@@ -3236,6 +3206,9 @@ function App() {
                 jsonDraft={skillsRulesDraft}
                 jsonError={skillsRulesError}
                 onStartAdd={startAddSkillRule}
+                onResetToDefault={() => {
+                  getDefaultSkillRules().then((rules) => syncSkillRules(rules));
+                }}
                 onEdit={editSkillRule}
                 onCopy={copySkillRule}
                 onDelete={deleteSkillRule}
@@ -3360,13 +3333,7 @@ function App() {
         onConfirm={confirmSkillDirDelete}
         t={t}
       />
-      <InfoDialog
-        open={skillsAccessRequiredOpen}
-        title={t("skillsAccessRequiredTitle")}
-        message={t("skillsAccessRequiredMsg")}
-        onClose={() => setSkillsAccessRequiredOpen(false)}
-        t={t}
-      />
+
     </div>
   );
 }

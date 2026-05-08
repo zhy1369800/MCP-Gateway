@@ -70,8 +70,8 @@ export interface BuiltinToolsConfig {
 }
 
 export interface SkillsConfig {
-  enabled: boolean;
   serverName: string;
+  builtinServerName: string;
   roots: string[];
   rootEntries?: SkillRootEntry[];
   policy: SkillsPolicyConfig;

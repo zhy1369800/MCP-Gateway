@@ -102,10 +102,10 @@ impl Default for GatewayConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_skills_server_name")]
     pub server_name: String,
+    #[serde(default = "default_builtin_skills_server_name")]
+    pub builtin_server_name: String,
     #[serde(default = "default_skills_roots")]
     pub roots: Vec<String>,
     #[serde(default)]
@@ -119,8 +119,8 @@ pub struct SkillsConfig {
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             server_name: default_skills_server_name(),
+            builtin_server_name: default_builtin_skills_server_name(),
             roots: default_skills_roots(),
             policy: SkillsPolicyConfig::default(),
             execution: SkillsExecutionConfig::default(),
@@ -426,6 +426,10 @@ fn default_server_enabled() -> bool {
 
 fn default_skills_server_name() -> String {
     "__skills__".to_string()
+}
+
+fn default_builtin_skills_server_name() -> String {
+    "__builtin_skills__".to_string()
 }
 
 fn default_skills_roots() -> Vec<String> {
@@ -1420,6 +1424,10 @@ pub fn normalize_config_in_place(cfg: &mut GatewayConfig) {
     cfg.skills.server_name = cfg.skills.server_name.trim().to_string();
     if cfg.skills.server_name.is_empty() {
         cfg.skills.server_name = default_skills_server_name();
+    }
+    cfg.skills.builtin_server_name = cfg.skills.builtin_server_name.trim().to_string();
+    if cfg.skills.builtin_server_name.is_empty() {
+        cfg.skills.builtin_server_name = default_builtin_skills_server_name();
     }
 
     cfg.skills.roots = cfg

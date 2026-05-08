@@ -3,7 +3,7 @@ use crate::error::AppError;
 #[cfg(target_os = "windows")]
 mod imp {
     use std::mem::zeroed;
-    use std::ptr::{null, null_mut};
+    use std::ptr::null;
     use std::sync::OnceLock;
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -49,7 +49,7 @@ mod imp {
     pub fn assign_child_to_gateway_job(pid: u32) -> Result<(), AppError> {
         let job = ensure_gateway_job()?;
         let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
-        if process == null_mut() {
+        if process.is_null() {
             return Err(last_os_error(
                 "failed to open child process for Windows job",
             ));
@@ -82,7 +82,7 @@ mod imp {
 
     fn create_gateway_job() -> Result<JobHandle, AppError> {
         let handle = unsafe { CreateJobObjectW(null(), null()) };
-        if handle == null_mut() {
+        if handle.is_null() {
             return Err(last_os_error("failed to create Windows job"));
         }
 
