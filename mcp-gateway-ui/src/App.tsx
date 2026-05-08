@@ -751,6 +751,12 @@ function InfoDialog({ open, title, message, onClose, t }: {
   );
 }
 
+function skillPreviewLabel(kind: string | undefined, t: ReturnType<typeof useT>): string {
+  if (kind === "patch") return t("patchPreview");
+  if (kind === "edit") return t("editPreview");
+  return t("commandPreview");
+}
+
 function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
   pending: SkillConfirmation[];
   busyIds: Set<string>;
@@ -785,7 +791,7 @@ function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
               </div>
             </div>
             <div className="skill-confirm-row">
-              <span className="field-label">{item.kind === "patch" ? t("patchPreview") : t("commandPreview")}</span>
+              <span className="field-label">{skillPreviewLabel(item.kind, t)}</span>
               <code className="skill-command">{item.preview || item.rawCommand}</code>
             </div>
             {item.cwd && (
@@ -847,7 +853,7 @@ function SkillConfirmationPopup({
             {showDisplayName && <span className="skill-script">{displayName}</span>}
           </div>
           <div className="skill-confirm-row" style={{ marginTop: 10 }}>
-            <span className="field-label">{item.kind === "patch" ? t("patchPreview") : t("commandPreview")}</span>
+            <span className="field-label">{skillPreviewLabel(item.kind, t)}</span>
             <code className="skill-command">{item.preview || item.rawCommand}</code>
           </div>
           {item.cwd && (
@@ -3020,6 +3026,13 @@ function App() {
                       <div>
                         <div className="built-in-tool-name">apply_patch</div>
                         <div className="built-in-tool-desc">{t("builtInPatchDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <List size={15} />
+                      <div>
+                        <div className="built-in-tool-name">multi_edit_file</div>
+                        <div className="built-in-tool-desc">{t("builtInMultiEditDesc")}</div>
                       </div>
                     </div>
                     <div className="built-in-tool">

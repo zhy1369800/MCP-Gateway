@@ -27,6 +27,8 @@ Use this bundled skill for manual source edits when the desired change can be ex
 - Move a file while updating its content.
 - Keep edits small enough that the before/after intent is obvious.
 
+Use `multi_edit_file` instead when the task is many exact replacements inside one existing file and a Codex-style patch would be noisy.
+
 Use a formatter or project generator instead when the output is mechanical and owned by project tooling. Use `shell_command` for discovery, tests, builds, and generated commands.
 
 ## Mandatory Workflow

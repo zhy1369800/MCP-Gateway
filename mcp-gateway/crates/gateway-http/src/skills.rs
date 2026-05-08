@@ -33,6 +33,8 @@ include!(concat!(env!("OUT_DIR"), "/bundled_tools.rs"));
 const BUILTIN_SHELL_COMMAND_SKILL_MD: &str =
     include_str!("../builtin-skills/shell_command/SKILL.md");
 const BUILTIN_APPLY_PATCH_SKILL_MD: &str = include_str!("../builtin-skills/apply_patch/SKILL.md");
+const BUILTIN_MULTI_EDIT_FILE_SKILL_MD: &str =
+    include_str!("../builtin-skills/multi_edit_file/SKILL.md");
 const BUILTIN_CHROME_CDP_SKILL_MD: &str = include_str!("../builtin-skills/chrome-cdp/SKILL.md");
 const BUILTIN_CHROME_CDP_MJS: &str = include_str!("../builtin-skills/chrome-cdp/scripts/cdp.mjs");
 const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
@@ -223,6 +225,29 @@ struct ApplyPatchArgs {
     skill_token: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MultiEditFileArgs {
+    path: String,
+    edits: Vec<MultiEditFileEdit>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    skill_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiEditFileEdit {
+    #[serde(alias = "oldString")]
+    old_string: String,
+    #[serde(alias = "newString")]
+    new_string: String,
+    #[serde(default, alias = "replaceAll")]
+    replace_all: bool,
+    #[serde(default, alias = "startLine")]
+    start_line: Option<usize>,
+}
+
 #[derive(Debug)]
 struct ToolResult {
     text: String,
@@ -248,6 +273,7 @@ struct CommandInvocation {
 enum BuiltinTool {
     ShellCommand,
     ApplyPatch,
+    MultiEditFile,
     ChromeCdp,
     ChatPlusAdapterDebugger,
 }
@@ -746,6 +772,10 @@ impl SkillsService {
                 let args = decode_tool_args::<ApplyPatchArgs>(&arguments)?;
                 self.handle_builtin_apply_patch(config, args).await
             }
+            BuiltinTool::MultiEditFile => {
+                let args = decode_tool_args::<MultiEditFileArgs>(&arguments)?;
+                self.handle_builtin_multi_edit_file(config, args).await
+            }
             BuiltinTool::ChromeCdp => {
                 let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
                 self.handle_builtin_chrome_cdp(config, args).await
@@ -988,6 +1018,163 @@ impl SkillsService {
             };
         self.execute_apply_patch_text(config, args.patch, &cwd, "apply_patch", &call_id)
             .await
+    }
+
+    async fn handle_builtin_multi_edit_file(
+        &self,
+        config: &GatewayConfig,
+        args: MultiEditFileArgs,
+    ) -> Result<ToolResult, AppError> {
+        let call_id = Uuid::new_v4().to_string();
+        if let Some(result) = validate_skill_token_result(
+            BuiltinTool::MultiEditFile.name(),
+            &builtin_skill_token(BuiltinTool::MultiEditFile),
+            args.skill_token.as_deref(),
+        ) {
+            return Ok(result);
+        }
+
+        let cwd = match resolve_builtin_cwd(
+            BuiltinTool::MultiEditFile,
+            &config.skills,
+            args.cwd.as_deref(),
+        ) {
+            Ok(cwd) => cwd,
+            Err(result) => return Ok(result),
+        };
+
+        let target = resolve_patch_path(&cwd, &args.path)?;
+        let affected_paths = vec![target.clone()];
+        let preview = multi_edit_preview(&args);
+        self.record_tool_event_data(
+            &call_id,
+            BuiltinTool::MultiEditFile.name(),
+            "editPreview",
+            SkillToolEventData {
+                cwd: Some(normalize_display_path(&cwd)),
+                preview: Some(truncate_preview(&preview, 4000)),
+                affected_paths: affected_paths
+                    .iter()
+                    .map(|path| normalize_display_path(path))
+                    .collect(),
+                changes: Some(multi_edit_preview_changes(&args)),
+                ..SkillToolEventData::default()
+            },
+        )
+        .await;
+
+        let access_decision = evaluate_paths_policy(&config.skills, &affected_paths);
+        match access_decision {
+            PolicyDecision::Deny(reason) => {
+                return Ok(tool_error(
+                    mcp_gateway_policy_denied_text(&reason),
+                    json!({
+                        "status": "blocked",
+                        "reason": reason,
+                        "tool": BuiltinTool::MultiEditFile.name(),
+                        "cwd": normalize_display_path(&cwd),
+                        "policyAction": "deny",
+                        "policyHelp": mcp_gateway_policy_denied_help(),
+                        "affectedPaths": affected_paths.iter().map(|path| normalize_display_path(path)).collect::<Vec<_>>()
+                    }),
+                ));
+            }
+            PolicyDecision::Confirm(reason) => {
+                let metadata = ConfirmationMetadata {
+                    kind: "edit".to_string(),
+                    cwd: normalize_display_path(&cwd),
+                    affected_paths: affected_paths
+                        .iter()
+                        .map(|path| normalize_display_path(path))
+                        .collect(),
+                    preview: truncate_preview(&preview, 4000),
+                };
+                let confirmation_id = match self
+                    .create_confirmation_with_metadata(
+                        "builtin:multi_edit_file",
+                        "Multi Edit File",
+                        &[String::from("multi_edit_file")],
+                        &preview,
+                        &reason,
+                        metadata,
+                    )
+                    .await
+                {
+                    CreateConfirmationResult::Created(c) | CreateConfirmationResult::Reused(c) => {
+                        c.id
+                    }
+                    CreateConfirmationResult::AlreadyTimedOut(id) => id,
+                };
+
+                match self
+                    .wait_for_confirmation_decision(
+                        &confirmation_id,
+                        Self::CONFIRMATION_DECISION_TIMEOUT,
+                        Duration::from_millis(250),
+                    )
+                    .await
+                {
+                    ConfirmationWaitOutcome::Approved => {}
+                    ConfirmationWaitOutcome::Rejected => {
+                        return Ok(confirmation_rejected_result(&confirmation_id, false));
+                    }
+                    ConfirmationWaitOutcome::TimedOut => {
+                        return Ok(confirmation_rejected_result(&confirmation_id, true));
+                    }
+                }
+            }
+            PolicyDecision::Allow => {}
+        }
+
+        match apply_multi_edit_file(&target, &args) {
+            Ok(outcome) => {
+                let text = patch_summary_text(&outcome.summary);
+                self.record_tool_event_data(
+                    &call_id,
+                    BuiltinTool::MultiEditFile.name(),
+                    "finished",
+                    SkillToolEventData {
+                        status: Some("completed".to_string()),
+                        delta: Some(outcome.delta.clone()),
+                        ..SkillToolEventData::default()
+                    },
+                )
+                .await;
+                Ok(tool_success(
+                    text,
+                    json!({
+                        "status": "completed",
+                        "tool": BuiltinTool::MultiEditFile.name(),
+                        "cwd": normalize_display_path(&cwd),
+                        "modified": outcome.summary.modified,
+                        "delta": patch_delta_for_model(&outcome.delta)
+                    }),
+                ))
+            }
+            Err(failure) => {
+                self.record_tool_event_data(
+                    &call_id,
+                    BuiltinTool::MultiEditFile.name(),
+                    "finished",
+                    SkillToolEventData {
+                        status: Some("failed".to_string()),
+                        delta: Some(failure.delta.clone()),
+                        ..SkillToolEventData::default()
+                    },
+                )
+                .await;
+                Ok(tool_error(
+                    failure.message.clone(),
+                    json!({
+                        "status": "failed",
+                        "tool": BuiltinTool::MultiEditFile.name(),
+                        "cwd": normalize_display_path(&cwd),
+                        "message": failure.message,
+                        "delta": patch_delta_for_model(&failure.delta)
+                    }),
+                ))
+            }
+        }
     }
 
     async fn execute_apply_patch_text(
@@ -1937,10 +2124,11 @@ fn summarize_builtin_skills() -> Vec<SkillSummary> {
         .collect()
 }
 
-fn builtin_tools() -> [BuiltinTool; 4] {
+fn builtin_tools() -> [BuiltinTool; 5] {
     [
         BuiltinTool::ShellCommand,
         BuiltinTool::ApplyPatch,
+        BuiltinTool::MultiEditFile,
         BuiltinTool::ChromeCdp,
         BuiltinTool::ChatPlusAdapterDebugger,
     ]
@@ -2032,6 +2220,58 @@ fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
             }
         }),
         json!({
+            "name": BuiltinTool::MultiEditFile.name(),
+            "description": render_builtin_tool_description(BuiltinTool::MultiEditFile, os, now),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "edits"],
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the existing file to modify, relative to cwd unless absolute."
+                    },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "Ordered exact string replacements. All edits are validated and applied in memory before the file is written once.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["old_string", "new_string"],
+                            "properties": {
+                                "old_string": {
+                                    "type": "string",
+                                    "description": "Exact text to replace. Must match the current file after LF normalization."
+                                },
+                                "new_string": {
+                                    "type": "string",
+                                    "description": "Replacement text. Must be different from old_string."
+                                },
+                                "replace_all": {
+                                    "type": "boolean",
+                                    "description": "Replace every occurrence of old_string in the current in-memory file state. Defaults to false."
+                                },
+                                "startLine": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Optional 1-based hint for the expected starting line. Used to choose the closest match when old_string is not globally unique."
+                                }
+                            }
+                        }
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Concrete working directory for relative paths. It must be inside one configured allowed directory. Required when more than one allowed directory exists; do not omit it in that case."
+                    },
+                    "skillToken": {
+                        "type": "string",
+                        "description": "Required for every multi_edit_file call. First read the complete builtin://multi_edit_file/SKILL.md with shell_command without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                    }
+                }
+            }
+        }),
+        json!({
             "name": BuiltinTool::ChromeCdp.name(),
             "description": render_builtin_tool_description(BuiltinTool::ChromeCdp, os, now),
             "inputSchema": {
@@ -2095,8 +2335,8 @@ fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> St
         BuiltinTool::ShellCommand => {
             format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Suggested `exec`: `{read_cmd}`.")
         }
-        BuiltinTool::ApplyPatch => {
-            format!("Before calling `apply_patch`, use `shell_command` to read the complete SKILL.md; this read does not require `skillToken`. Suggested shell `exec`: `{read_cmd}`.")
+        BuiltinTool::ApplyPatch | BuiltinTool::MultiEditFile => {
+            format!("Before calling `{}`, use `shell_command` to read the complete SKILL.md; this read does not require `skillToken`. Suggested shell `exec`: `{read_cmd}`.", tool.name())
         }
         BuiltinTool::ChromeCdp | BuiltinTool::ChatPlusAdapterDebugger => {
             format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`, using `exec`: `{read_cmd}`.")
@@ -2135,6 +2375,7 @@ fn builtin_skill_md_content(tool: BuiltinTool) -> &'static str {
     match tool {
         BuiltinTool::ShellCommand => BUILTIN_SHELL_COMMAND_SKILL_MD,
         BuiltinTool::ApplyPatch => BUILTIN_APPLY_PATCH_SKILL_MD,
+        BuiltinTool::MultiEditFile => BUILTIN_MULTI_EDIT_FILE_SKILL_MD,
         BuiltinTool::ChromeCdp => BUILTIN_CHROME_CDP_SKILL_MD,
         BuiltinTool::ChatPlusAdapterDebugger => BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD,
     }
@@ -2622,6 +2863,9 @@ impl BuiltinTool {
                 Some(Self::ShellCommand)
             }
             value if value.eq_ignore_ascii_case(Self::ApplyPatch.name()) => Some(Self::ApplyPatch),
+            value if value.eq_ignore_ascii_case(Self::MultiEditFile.name()) => {
+                Some(Self::MultiEditFile)
+            }
             value if value.eq_ignore_ascii_case(Self::ChromeCdp.name()) => Some(Self::ChromeCdp),
             value if value.eq_ignore_ascii_case(Self::ChatPlusAdapterDebugger.name()) => {
                 Some(Self::ChatPlusAdapterDebugger)
@@ -2634,6 +2878,7 @@ impl BuiltinTool {
         match self {
             Self::ShellCommand => "shell_command",
             Self::ApplyPatch => "apply_patch",
+            Self::MultiEditFile => "multi_edit_file",
             Self::ChromeCdp => "chrome-cdp",
             Self::ChatPlusAdapterDebugger => "chat-plus-adapter-debugger",
         }
@@ -4038,6 +4283,239 @@ fn apply_update_chunks(
     Ok(format!("{}\n", lines.join("\n")))
 }
 
+fn apply_multi_edit_file(
+    target: &Path,
+    args: &MultiEditFileArgs,
+) -> Result<ApplyPatchOutcome, ApplyPatchFailure> {
+    let delta = AppliedPatchDelta::default();
+    if target.is_dir() {
+        return Err(patch_failure(
+            AppError::BadRequest(format!(
+                "multi_edit_file target is a directory: {}",
+                target.to_string_lossy()
+            )),
+            &delta,
+        ));
+    }
+    if args.edits.is_empty() {
+        return Err(patch_failure(
+            AppError::BadRequest("edits cannot be empty".to_string()),
+            &delta,
+        ));
+    }
+
+    let original =
+        fs::read_to_string(target).map_err(|error| patch_failure(error.into(), &delta))?;
+    let line_endings = detect_text_line_endings(&original);
+    let original_lf = normalize_to_lf(&original);
+    let updated_lf = apply_multi_edits_to_lf_content(&original_lf, &args.edits, target)
+        .map_err(|error| patch_failure(error, &delta))?;
+
+    if updated_lf == original_lf {
+        return Err(patch_failure(
+            AppError::BadRequest("multi_edit_file produced no changes".to_string()),
+            &delta,
+        ));
+    }
+
+    let updated = restore_line_endings(&updated_lf, line_endings);
+    fs::write(target, &updated).map_err(|error| {
+        let mut failed_delta = delta.clone();
+        failed_delta.exact = false;
+        patch_failure(error.into(), &failed_delta)
+    })?;
+
+    let mut committed_delta = AppliedPatchDelta::default();
+    committed_delta.changes.push(AppliedPatchChange::Update {
+        path: normalize_display_path(target),
+        move_path: None,
+        old_content: original,
+        new_content: updated,
+        overwritten_move_content: None,
+    });
+
+    Ok(ApplyPatchOutcome {
+        summary: PatchSummary {
+            added: Vec::new(),
+            modified: vec![args.path.clone()],
+            deleted: Vec::new(),
+        },
+        delta: committed_delta,
+    })
+}
+
+fn apply_multi_edits_to_lf_content(
+    original_lf: &str,
+    edits: &[MultiEditFileEdit],
+    path: &Path,
+) -> Result<String, AppError> {
+    let mut content = original_lf.to_string();
+    let mut applied_new_strings = Vec::<String>::new();
+
+    for (index, edit) in edits.iter().enumerate() {
+        let old_string = normalize_to_lf(&edit.old_string);
+        let new_string = normalize_to_lf(&edit.new_string);
+
+        if old_string.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "edit {} for {} has empty old_string; use apply_patch or write tooling for insert-only changes",
+                index + 1,
+                path.to_string_lossy()
+            )));
+        }
+        if old_string == new_string {
+            return Err(AppError::BadRequest(format!(
+                "edit {} for {} has identical old_string and new_string",
+                index + 1,
+                path.to_string_lossy()
+            )));
+        }
+        for previous_new_string in &applied_new_strings {
+            if previous_new_string.contains(&old_string) {
+                return Err(AppError::BadRequest(format!(
+                    "edit {} old_string is a substring of a previous new_string; split or reorder edits to avoid re-editing generated content",
+                    index + 1
+                )));
+            }
+        }
+
+        if edit.replace_all {
+            let matches = content.match_indices(&old_string).count();
+            if matches == 0 {
+                return Err(AppError::BadRequest(format!(
+                    "edit {} failed: old_string not found in {}",
+                    index + 1,
+                    path.to_string_lossy()
+                )));
+            }
+            content = content.replace(&old_string, &new_string);
+            applied_new_strings.push(new_string);
+            continue;
+        }
+
+        let matches = content
+            .match_indices(&old_string)
+            .map(|(byte_index, _)| byte_index)
+            .collect::<Vec<_>>();
+        let Some(found) = select_multi_edit_match(&content, &old_string, &matches, edit.start_line)
+        else {
+            return Err(AppError::BadRequest(format!(
+                "edit {} failed: old_string not found in {}",
+                index + 1,
+                path.to_string_lossy()
+            )));
+        };
+
+        if matches.len() > 1 && edit.start_line.is_none() {
+            return Err(AppError::BadRequest(format!(
+                "edit {} found {} matches in {}; set replace_all=true or provide startLine to disambiguate",
+                index + 1,
+                matches.len(),
+                path.to_string_lossy()
+            )));
+        }
+
+        let end = found + old_string.len();
+        content.replace_range(found..end, &new_string);
+        applied_new_strings.push(new_string);
+    }
+
+    Ok(content)
+}
+
+fn select_multi_edit_match(
+    content: &str,
+    old_string: &str,
+    matches: &[usize],
+    start_line: Option<usize>,
+) -> Option<usize> {
+    if matches.is_empty() {
+        return None;
+    }
+    if matches.len() == 1 || start_line.is_none() {
+        return matches.first().copied();
+    }
+
+    let expected = start_line.unwrap_or(1);
+    let old_line_count = old_string.split('\n').count().max(1);
+    matches.iter().copied().min_by_key(|byte_index| {
+        let actual_line = line_number_at_byte_index(content, *byte_index);
+        let distance_to_start = actual_line.abs_diff(expected);
+        let distance_to_end = actual_line.abs_diff(expected.saturating_add(old_line_count - 1));
+        distance_to_start.min(distance_to_end)
+    })
+}
+
+fn line_number_at_byte_index(content: &str, byte_index: usize) -> usize {
+    content[..byte_index.min(content.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextLineEndings {
+    Lf,
+    Crlf,
+}
+
+fn detect_text_line_endings(content: &str) -> TextLineEndings {
+    let crlf_count = content.match_indices("\r\n").count();
+    let lf_count = content.bytes().filter(|byte| *byte == b'\n').count();
+    if crlf_count > lf_count.saturating_sub(crlf_count) {
+        TextLineEndings::Crlf
+    } else {
+        TextLineEndings::Lf
+    }
+}
+
+fn normalize_to_lf(content: &str) -> String {
+    content.replace("\r\n", "\n")
+}
+
+fn restore_line_endings(content: &str, line_endings: TextLineEndings) -> String {
+    match line_endings {
+        TextLineEndings::Lf => content.to_string(),
+        TextLineEndings::Crlf => content.replace('\n', "\r\n"),
+    }
+}
+
+fn multi_edit_preview(args: &MultiEditFileArgs) -> String {
+    let changes = args
+        .edits
+        .iter()
+        .enumerate()
+        .map(|(index, edit)| {
+            format!(
+                "{}. oldBytes={} newBytes={} replaceAll={} startLine={}",
+                index + 1,
+                edit.old_string.len(),
+                edit.new_string.len(),
+                edit.replace_all,
+                edit.start_line
+                    .map(|line| line.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("multi_edit_file {}\n{}", args.path, changes)
+}
+
+fn multi_edit_preview_changes(args: &MultiEditFileArgs) -> Value {
+    json!({
+        "kind": "multiEdit",
+        "path": args.path,
+        "edits": args.edits.iter().map(|edit| json!({
+            "oldBytes": edit.old_string.len(),
+            "newBytes": edit.new_string.len(),
+            "replaceAll": edit.replace_all,
+            "startLine": edit.start_line
+        })).collect::<Vec<_>>()
+    })
+}
+
 fn find_context_line(lines: &[String], context: &str, start: usize) -> Option<usize> {
     let needle = vec![context.to_string()];
     find_line_sequence(lines, &needle, start, false)
@@ -5168,6 +5646,7 @@ mod tests {
             vec![
                 "shell_command",
                 "apply_patch",
+                "multi_edit_file",
                 "chrome-cdp",
                 "chat-plus-adapter-debugger",
                 "alpha_skill",
@@ -5184,7 +5663,8 @@ mod tests {
         let shell = builtin_skill_doc_result(tool, "doc", path, "abc123".to_string());
         assert!(!shell.is_error);
         assert!(shell.text.contains("# Shell Command"));
-        assert!(shell.text.contains("## High-Priority Command Choices"));
+        assert!(shell.text.contains("## Global Search And Discovery Priority"));
+        assert!(shell.text.contains("## Project And Workflow Navigation With Ripgrep"));
         assert!(shell.text.contains("rg --files"));
         assert!(shell.text.contains("Do not use `Get-ChildItem -Recurse`"));
         assert!(shell.text.contains("abc123"));
@@ -5203,6 +5683,15 @@ mod tests {
         assert!(patch.text.contains("does not accept standard unified diff"));
         assert!(patch.text.contains("def456"));
         assert!(patch.structured.get("skillToken").is_none());
+
+        let (tool, path) = builtin_skill_doc_read("cat builtin://multi_edit_file/SKILL.md")
+            .expect("multi_edit_file doc read");
+        let multi_edit = builtin_skill_doc_result(tool, "doc", path, "fed456".to_string());
+        assert!(!multi_edit.is_error);
+        assert!(multi_edit.text.contains("# Multi Edit File"));
+        assert!(multi_edit.text.contains("\"edits\""));
+        assert!(multi_edit.text.contains("fed456"));
+        assert!(multi_edit.structured.get("skillToken").is_none());
 
         let (tool, path) = builtin_skill_doc_read("cat builtin://chrome-cdp/SKILL.md")
             .expect("chrome-cdp doc read");
@@ -5489,6 +5978,114 @@ mod tests {
         let failure = apply_parsed_patch(&parsed, &sandbox).expect_err("delete should fail");
         assert_eq!(failure.delta.changes.len(), 1);
         assert!(sandbox.join("added.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn multi_edit_file_applies_multiple_edits_with_single_write() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-multi-edit-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("update.txt");
+        std::fs::write(&target, "alpha\nbeta\nbeta\ngamma\n").expect("write update");
+
+        let args = MultiEditFileArgs {
+            path: "update.txt".to_string(),
+            cwd: None,
+            skill_token: None,
+            edits: vec![
+                MultiEditFileEdit {
+                    old_string: "alpha".to_string(),
+                    new_string: "ALPHA".to_string(),
+                    replace_all: false,
+                    start_line: None,
+                },
+                MultiEditFileEdit {
+                    old_string: "beta".to_string(),
+                    new_string: "BETA".to_string(),
+                    replace_all: false,
+                    start_line: Some(3),
+                },
+            ],
+        };
+
+        let outcome = apply_multi_edit_file(&target, &args).expect("apply multi edit");
+        assert_eq!(outcome.summary.modified, vec!["update.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read update"),
+            "ALPHA\nbeta\nBETA\ngamma\n"
+        );
+        match outcome.delta.changes.as_slice() {
+            [AppliedPatchChange::Update {
+                path,
+                old_content,
+                new_content,
+                ..
+            }] => {
+                assert!(Path::new(path).ends_with("update.txt"));
+                assert_eq!(old_content, "alpha\nbeta\nbeta\ngamma\n");
+                assert_eq!(new_content, "ALPHA\nbeta\nBETA\ngamma\n");
+            }
+            other => panic!("unexpected delta: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn multi_edit_file_rejects_ambiguous_edit_without_writing() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-multi-edit-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("update.txt");
+        std::fs::write(&target, "alpha\nbeta\nbeta\n").expect("write update");
+
+        let args = MultiEditFileArgs {
+            path: "update.txt".to_string(),
+            cwd: None,
+            skill_token: None,
+            edits: vec![MultiEditFileEdit {
+                old_string: "beta".to_string(),
+                new_string: "BETA".to_string(),
+                replace_all: false,
+                start_line: None,
+            }],
+        };
+
+        let failure =
+            apply_multi_edit_file(&target, &args).expect_err("ambiguous edit should fail");
+        assert!(failure.message.contains("found 2 matches"));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read update"),
+            "alpha\nbeta\nbeta\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn multi_edit_file_preserves_crlf_line_endings() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-multi-edit-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("update.txt");
+        std::fs::write(&target, "alpha\r\nbeta\r\n").expect("write update");
+
+        let args = MultiEditFileArgs {
+            path: "update.txt".to_string(),
+            cwd: None,
+            skill_token: None,
+            edits: vec![MultiEditFileEdit {
+                old_string: "alpha\nbeta".to_string(),
+                new_string: "ALPHA\nBETA".to_string(),
+                replace_all: false,
+                start_line: None,
+            }],
+        };
+
+        apply_multi_edit_file(&target, &args).expect("apply multi edit");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read update"),
+            "ALPHA\r\nBETA\r\n"
+        );
 
         let _ = std::fs::remove_dir_all(&sandbox);
     }

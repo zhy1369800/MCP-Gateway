@@ -22,14 +22,40 @@ Use this bundled skill when the task is best handled by a terminal command: list
 
 This skill is intentionally a small terminal orchestration layer. It follows the same practical pattern used by coding agents such as Codex: keep commands non-interactive, keep the working directory explicit, prefer fast search/read tools, stream output back to the model, and let policy decide whether sensitive commands are allowed, denied, or require user confirmation.
 
-## High-Priority Command Choices
+## Global Search And Discovery Priority
 
-- Use `rg --files` first for file discovery, broad inventories, and file counts.
-- Use `rg -n "pattern" path` first for text/code search.
+- Treat `rg` as the default first tool for all project exploration and narrowing work, including project structure, file discovery, code navigation, symbol lookup, call-site discovery, config lookup, workflow tracing, tests, routes, error messages, broad inventories, and "where is this implemented?" questions.
+- Use `rg` to locate candidate files and line numbers before reading file contents. Do not read many whole files to discover where something lives.
+- Use `rg --files` first for project structure, file discovery, broad inventories, and file counts.
+- Use `rg -n "pattern" path` first for text/code search, workflow tracing, symbol references, config keys, routes, CLI commands, and error strings.
+- Use `rg -n -m 20 "pattern" path` when the initial result could be large.
+- Use `rg --files | rg "name-or-extension"` for fast filename narrowing.
 - Use `git ls-files` for "tracked files only" counts or inventories.
 - Use `Get-ChildItem` only for simple, shallow Windows directory listings, for example `Get-ChildItem -Name` or `Get-ChildItem -Name -Filter *.rs`.
 - Do not use `Get-ChildItem -Recurse`, `find . -type f`, `dir /s`, `ls -R`, or `du` for repository-wide discovery, search, inventories, or counts unless the command includes explicit exclusions and `rg` is unavailable.
 - Never treat dependency folders, VCS metadata, generated outputs, virtual environments, or caches as meaningful project files in broad counts.
+
+If `rg` is not found, use `git ls-files` for tracked-file discovery before falling back to platform recursive listings. When falling back to recursive listings, include explicit exclusions for dependency folders, VCS metadata, generated outputs, virtual environments, and caches.
+
+## Project And Workflow Navigation With Ripgrep
+
+Use `rg` as the main project navigation tool, not just as a project-structure tool and not only as a code-search tool. The normal investigation loop is:
+
+1. Start with `rg --files` when you need the project shape, likely directories, file names, or extension distribution.
+2. Search names, strings, routes, config keys, error text, workflow steps, CLI commands, tests, or public API shapes with `rg -n`.
+3. Narrow by directory, extension, or file name when the result is broad.
+4. Read only the few matching files or line ranges after the likely location is known.
+5. Repeat with nearby identifiers from those results until the implementation path is clear.
+
+Prefer this pattern over opening many files and scanning them manually. Reading file contents is for understanding confirmed candidates; `rg` is for finding those candidates.
+
+Useful patterns:
+
+- Find symbol references: `rg -n "SkillConfirmation|handle_builtin_shell_command" crates`
+- Find routes, commands, or config keys: `rg -n "tools/call|skillToken|allowedDirs" .`
+- Find likely files first, then search inside them: `rg --files | rg "skill|tool|config"`
+- Limit noisy searches: `rg -n -m 20 "pattern" path`
+- Search specific file types: `rg -n "pattern" -g "*.rs" -g "*.ts" .`
 
 ## Operating Model
 
@@ -54,7 +80,7 @@ External programs are still called directly from PowerShell:
 - `npm run lint`
 - `rg -n "pattern" src`
 
-Prefer native PowerShell cmdlets and parameters for shallow filesystem operations. For search, discovery, broad inventories, and counts, use `rg` first.
+Prefer native PowerShell cmdlets and parameters for shallow filesystem operations. For codebase navigation, search, discovery, feature tracing, broad inventories, and counts, use `rg` first.
 
 - List files: `Get-ChildItem -Name`, `Get-ChildItem -Name -Filter *.js`
 - List a specific directory: `Get-ChildItem -LiteralPath "D:\path with spaces" -Name`
@@ -91,6 +117,9 @@ Use forward-slash paths and quote paths with spaces. Keep `cwd` set to the works
 
 - Discover files: `rg --files`
 - Search code/text: `rg "pattern" path`
+- Search with line numbers: `rg -n "functionName|StructName|configKey" src`
+- Find definitions and call sites before reading files: `rg -n "handleFoo|FooConfig|foo_enabled" src`
+- Locate likely files by name: `rg --files | rg "skills|gateway|config"`
 - Count project files: `(rg --files <exclusions> | Measure-Object).Count`
 - List files on Windows: `Get-ChildItem -Name -Filter *.js`
 - Read files on Windows: `Get-Content -LiteralPath path -TotalCount 200`
@@ -123,11 +152,11 @@ Do not use broad recursive commands such as `Get-ChildItem -Recurse`, `find . -t
 
 ## File Editing
 
-Use the bundled `apply_patch` skill as the default way to create, modify, or rewrite files by hand. This includes source code, config files, docs, tests, examples, scripts, and small generated fixtures that the agent is authoring directly.
+Use bundled editing skills as the default way to create, modify, or rewrite files by hand. Use `multi_edit_file` for multiple exact replacements inside one existing file. Use `apply_patch` for adding, deleting, moving, or small focused line-level patches.
 
-Prefer `apply_patch` because it gives the gateway a clear set of affected paths before files are changed, produces reviewable diffs, and avoids fragile shell redirection or quoting problems.
+Prefer these editing skills because they give the gateway a clear set of affected paths before files are changed, produce reviewable deltas, and avoid fragile shell redirection or quoting problems.
 
-Use shell-based writes only as a fallback after `apply_patch` is clearly unsuitable or has failed repeatedly, or when an external tool is the correct owner of the output. Valid examples include:
+Use shell-based writes only as a fallback after the bundled editing skills are clearly unsuitable or have failed repeatedly, or when an external tool is the correct owner of the output. Valid examples include:
 
 - Running a formatter that rewrites files.
 - Running a code generator, scaffold command, package manager, or project script.
@@ -135,7 +164,7 @@ Use shell-based writes only as a fallback after `apply_patch` is clearly unsuita
 - Applying an upstream patch file with `git apply` or a dedicated patch tool.
 - Performing a large, repetitive, structure-preserving migration that is safer as a small script than as a huge hand-written patch.
 
-Avoid ad hoc terminal writes such as `echo ... > file`, here-documents, `Set-Content`, `Out-File`, or scripts that manually rewrite source files when `apply_patch` can express the change. If shell-based writing is used as a fallback, explain why `apply_patch` was not sufficient and keep the command narrowly scoped.
+Avoid ad hoc terminal writes such as `echo ... > file`, here-documents, `Set-Content`, `Out-File`, or scripts that manually rewrite source files when `multi_edit_file` or `apply_patch` can express the change. If shell-based writing is used as a fallback, explain why the bundled editing skills were not sufficient and keep the command narrowly scoped.
 
 For batch edits to structured files, use structured APIs where practical. Use a JSON parser for JSON instead of regex. For code files, prefer narrow block-aware transformations, generated code followed by the project formatter, or project-owned tooling. Avoid broad regex replacements over Rust, JSON, YAML, TOML, or source files unless the pattern is tightly scoped, verified against current content, and followed by targeted validation.
 
@@ -181,10 +210,11 @@ If a command fails, use the exit code and stderr/stdout to decide the next step.
 ## Recommended Workflow
 
 1. Establish the workspace with `cwd`.
-2. Inspect before changing: `git status --short`, `rg --files`, targeted file reads.
-3. Use the narrowest command that answers the question.
-4. Prefer `apply_patch` for manual source edits.
-5. For large mechanical migrations, use a narrowly scoped script only after reading the current target content; prefer structured parsers over regex.
-6. Inspect the relevant diff with `git diff -- path` or `git diff --stat`.
-7. Run the smallest meaningful verification command after changes.
-8. Report what changed and what verification passed or could not be run.
+2. Inspect before changing: `git status --short`, then use `rg`/`rg --files` to locate relevant files, symbols, call sites, config keys, and line numbers.
+3. Read only the targeted files or line ranges that `rg` identified. Avoid reading broad file contents as a discovery strategy.
+4. Use the narrowest command that answers the question.
+5. Prefer `apply_patch` for manual source edits.
+6. For large mechanical migrations, use a narrowly scoped script only after reading the current target content; prefer structured parsers over regex.
+7. Inspect the relevant diff with `git diff -- path` or `git diff --stat`.
+8. Run the smallest meaningful verification command after changes.
+9. Report what changed and what verification passed or could not be run.
