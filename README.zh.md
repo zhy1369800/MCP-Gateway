@@ -14,11 +14,12 @@ MCP Gateway 是一个 MCP（Model Context Protocol）服务器网关。
 - 网关统一转发 `HTTP`：默认`POST /api/v2/mcp/<serverName>`
 - 内置安全认证（Admin Token / MCP Token）
 - `SKILLS` 标签页支持内置 Skill MCP 服务管理
-- Skill 根目录校验（检测 `SKILL.md`）
-- 路径守卫（白名单目录 + 越界策略）
+- 自带 Skill：`shell_command`、`apply_patch`、`chrome-cdp`、`chat-plus-adapter-debugger`
+- 外部 Skill 根目录管理，支持单独启用/禁用和 `SKILL.md` 校验
+- 访问边界 / 路径守卫（允许访问目录 + 越界策略）
 - 执行限制（超时、最大输出）
-- 策略规则（`allow / confirm / deny`）
-- 待确认命令审批（Approve / Reject）
+- 可视化策略规则管理（`拒绝 / 需要确认`、搜索、新增、编辑、复制、删除）
+- 待确认命令审批（Approve / Reject）与确认弹窗
 
 ## 界面预览
 
@@ -26,13 +27,17 @@ MCP Gateway 是一个 MCP（Model Context Protocol）服务器网关。
 
 ![本地 MCP 网关主界面](./image.png)
 
-### Image two（SKILLS 基础配置）
+### Image two（SKILLS 设置、自带 Skill 与外部根目录）
 
 ![Image two](./image2.png)
 
-### Image three（策略规则与待确认命令）
+最新版 SKILLS 设置页展示了 Skill MCP 开关、Skill 服务名、自带 Skill 列表，以及外部 Skill 根目录。每个外部根目录都可以单独浏览、检测、启用/禁用和删除。
+
+### Image three（可视化策略规则管理）
 
 ![Image three](./image3.png)
+
+最新版策略页已从旧版“仅 JSON 规则说明”升级为可视化规则管理。规则按处理动作分组，可按命令、关键词或说明搜索，并支持在界面中新增、编辑、复制和删除。
 
 ## 1. MCP 标签页怎么填
 
@@ -86,11 +91,13 @@ MCP Gateway 是一个 MCP（Model Context Protocol）服务器网关。
 
 1. 打开 `启用内置 SKILL MCP`。
 2. 设置 `Skill 服务名`（默认 `__skills__`）。
-3. 添加 `Skill 根目录`，并确保目录下存在 `SKILL.md`。
-4. 可选开启 `路径守卫`，填写绝对路径白名单，并选择越界动作：`allow / confirm / deny`。
-5. 设置执行限制：`执行超时（毫秒）`（最小 `1000`）和 `最大输出（字节）`（最小 `1024`）。
-6. 在 `策略规则` 中维护 JSON 规则（`id/action/commandTree/contains/reason`）。
-7. 运行后可在 `待确认命令` 中审批高风险命令。
+3. 查看自带 Skill：`shell_command`、`apply_patch`、`chrome-cdp`、`chat-plus-adapter-debugger`。
+4. 添加 `外部 Skill 根目录`，检测每个目录下是否直接存在 `SKILL.md`，并只启用需要暴露的根目录。
+5. 配置 `允许访问目录`。启用 Skill MCP 时访问边界为必填；命令执行和文件修改都必须留在允许访问目录内，除非你选择的越界动作允许继续。
+6. 选择越界动作：`allow / confirm / deny`。
+7. 设置执行限制：`执行超时（毫秒）`（最小 `1000`）和 `最大输出（字节）`（最小 `1024`）。
+8. 在可视化规则管理中维护策略规则。规则支持 `拒绝` 和 `需要确认`，可按命令开头匹配、关键词匹配，并支持搜索、新增、编辑、复制、删除；高级 JSON 编辑仍保留，用于批量粘贴或手工迁移。
+9. 运行后可在 `待确认命令` 中审批高风险命令，也可以通过确认弹窗直接处理。
 
 当网关运行且 SKILLS 已启用时，界面会展示：
 

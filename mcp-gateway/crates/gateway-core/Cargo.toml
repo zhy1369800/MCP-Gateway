@@ -16,6 +16,7 @@ thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 utoipa.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

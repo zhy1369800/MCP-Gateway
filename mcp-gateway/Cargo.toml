@@ -31,4 +31,5 @@ tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 utoipa = { version = "5.2", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "8.1", features = ["axum"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 tempfile = "3.13"

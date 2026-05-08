@@ -19,6 +19,8 @@ import {
   Trash2,
   ChevronDown,
   ChevronRight,
+  Search,
+  X,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
@@ -222,6 +224,29 @@ function describeSkillRuleMatch(rule: SkillCommandRule, t: ReturnType<typeof use
     parts.push(`${t("skillsRuleContainsLabel")} ${rule.contains.join(", ")}`);
   }
   return parts.length > 0 ? parts.join(" · ") : t("skillsRuleNoCondition");
+}
+
+function skillRuleMatchesSearch(rule: SkillCommandRule, query: string, t: ReturnType<typeof useT>): boolean {
+  const tokens = query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((item) => item.length > 0);
+
+  if (tokens.length === 0) return true;
+
+  const haystack = [
+    rule.id,
+    rule.action,
+    rule.action === "allow" ? t("policyAllow") : rule.action === "confirm" ? t("policyConfirm") : t("policyDeny"),
+    argsToStr(rule.commandTree),
+    rule.commandTree.join(" "),
+    rule.contains.join(" "),
+    rule.reason,
+    describeSkillRuleMatch(rule, t),
+  ].join("\n").toLowerCase();
+
+  return tokens.every((token) => haystack.includes(token));
 }
 
 function groupSkillRules(rules: SkillCommandRule[]): SkillRuleGroup[] {
@@ -986,7 +1011,14 @@ function SkillPolicyRulesEditor({
   onJsonChange: (value: string) => void;
   t: ReturnType<typeof useT>;
 }) {
-  const groupedRules = groupSkillRules(rules);
+  const [ruleSearch, setRuleSearch] = useState("");
+  const normalizedRuleSearch = ruleSearch.trim();
+  const filteredRules = useMemo(
+    () => rules.filter((rule) => skillRuleMatchesSearch(rule, normalizedRuleSearch, t)),
+    [normalizedRuleSearch, rules, t],
+  );
+  const groupedRules = groupSkillRules(filteredRules);
+  const hasRuleSearch = normalizedRuleSearch.length > 0;
   const showCommandInput = form.matchType === "commandTree" || form.matchType === "both";
   const showContainsInput = form.matchType === "contains" || form.matchType === "both";
   const actionLabel = (action: SkillPolicyAction) => {
@@ -1002,11 +1034,41 @@ function SkillPolicyRulesEditor({
           <div className="skills-rules-title">{t("skillsRulesVisualTitle")}</div>
           <div className="json-hint">{t("skillsRulesVisualHint")}</div>
         </div>
-        <button className="btn btn-sm" onClick={onStartAdd}>
-          <Plus size={13} />
-          {t("skillsRuleAdd")}
-        </button>
+        <div className="skills-rules-toolbar-actions">
+          <label className="skills-rules-search" aria-label={t("skillsRulesSearchLabel")}>
+            <Search size={14} />
+            <input
+              value={ruleSearch}
+              onChange={(event) => setRuleSearch(event.target.value)}
+              placeholder={t("skillsRulesSearchPlaceholder")}
+            />
+            {hasRuleSearch && (
+              <button
+                className="skills-rules-search-clear"
+                type="button"
+                title={t("skillsRulesSearchClear")}
+                onClick={() => setRuleSearch("")}
+              >
+                <X size={13} />
+              </button>
+            )}
+          </label>
+          <button className="btn btn-sm" onClick={onStartAdd}>
+            <Plus size={13} />
+            {t("skillsRuleAdd")}
+          </button>
+        </div>
       </div>
+
+      {hasRuleSearch && (
+        <div className="skills-rules-search-meta">
+          {filteredRules.length === 0
+            ? t("skillsRulesSearchNoResults")
+            : t("skillsRulesSearchResults")
+              .replace("{shown}", String(filteredRules.length))
+              .replace("{total}", String(rules.length))}
+        </div>
+      )}
 
       {formOpen && (
         <div className="skills-rule-form">
@@ -1119,7 +1181,9 @@ function SkillPolicyRulesEditor({
             </div>
 
             {group.rules.length === 0 ? (
-              <div className="skills-rule-empty">{t("skillsRulesGroupEmpty")}</div>
+              <div className="skills-rule-empty">
+                {hasRuleSearch ? t("skillsRulesSearchGroupEmpty") : t("skillsRulesGroupEmpty")}
+              </div>
             ) : (
               <div className="skills-rule-list">
                 {group.rules.map((rule) => (
@@ -2956,6 +3020,20 @@ function App() {
                       <div>
                         <div className="built-in-tool-name">apply_patch</div>
                         <div className="built-in-tool-desc">{t("builtInPatchDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <Globe size={15} />
+                      <div>
+                        <div className="built-in-tool-name">chrome-cdp</div>
+                        <div className="built-in-tool-desc">{t("builtInChromeCdpDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <Code2 size={15} />
+                      <div>
+                        <div className="built-in-tool-name">chat-plus-adapter-debugger</div>
+                        <div className="built-in-tool-desc">{t("builtInChatPlusAdapterDesc")}</div>
                       </div>
                     </div>
                   </div>

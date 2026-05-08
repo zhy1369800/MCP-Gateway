@@ -898,11 +898,81 @@ html, body {
   gap: 14px;
 }
 
+.skills-rules-toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .skills-rules-title {
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 650;
   margin-bottom: 3px;
+}
+
+.skills-rules-search {
+  width: min(300px, 38vw);
+  min-width: 220px;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.skills-rules-search:hover {
+  background: var(--bg-hover);
+}
+
+.skills-rules-search:focus-within {
+  border-color: var(--border-focus);
+  background: var(--bg-primary);
+}
+
+.skills-rules-search input {
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.skills-rules-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.skills-rules-search-clear {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.skills-rules-search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.skills-rules-search-meta {
+  margin-top: -4px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .skills-rule-form {
@@ -1717,6 +1787,13 @@ html, body {
   .skills-rules-toolbar {
     flex-direction: column;
     align-items: stretch;
+  }
+  .skills-rules-toolbar-actions {
+    justify-content: stretch;
+  }
+  .skills-rules-search {
+    width: 100%;
+    min-width: 0;
   }
   .skills-rule-choice-grid {
     grid-template-columns: 1fr;

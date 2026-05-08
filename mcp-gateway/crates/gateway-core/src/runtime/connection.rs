@@ -7,6 +7,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 
 use crate::error::AppError;
+use crate::process_job::assign_child_to_gateway_job;
 use crate::terminal::wrap_windows_powershell_command_for_utf8;
 
 use super::auth::{AuthOrchestrator, AuthSignalSource, PreparedServerLaunch, RuntimeAuthState};
@@ -70,6 +71,9 @@ impl ProcessConnection {
             });
             AppError::Upstream(message)
         })?;
+        if let Some(pid) = child.id() {
+            let _ = assign_child_to_gateway_job(pid);
+        }
 
         let stdin = child
             .stdin

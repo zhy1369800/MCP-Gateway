@@ -1,5 +1,6 @@
 pub mod config;
 pub mod error;
+pub mod process_job;
 pub mod runtime;
 pub mod terminal;
 
@@ -12,6 +13,7 @@ pub use config::{
     TokenScope, TransportConfig,
 };
 pub use error::{AppError, ErrorCode};
+pub use process_job::{assign_child_to_gateway_job, enable_gateway_process_job};
 pub use runtime::{AuthOrchestrator, AuthSessionStatus, ProcessManager, ServerAuthState};
 pub use terminal::{
     detect_terminal_encoding_status, is_powershell_like_command,

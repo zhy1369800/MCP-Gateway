@@ -1,4 +1,4 @@
-// ── 中英文翻译字典 ─────────────────────────────────────────────────
+﻿// ── 中英文翻译字典 ─────────────────────────────────────────────────
 export type Lang = "zh" | "en";
 
 const translations = {
@@ -52,7 +52,9 @@ const translations = {
     builtInToolsTitle: "自带 Skill",
     builtInToolsHint: "启用后默认提供命令行和文件改写能力，无需额外下载。",
     builtInShellDesc: "在允许目录内执行终端命令，命中策略时进入确认队列。",
-    builtInPatchDesc: "应用补丁内容，支持新增、删除、修改和移动文件。",
+    builtInPatchDesc: "在允许目录内新增、删除、修改或移动文件。",
+    builtInChromeCdpDesc: "操控浏览器页面，用于调试、自动化与数据抓取。",
+    builtInChatPlusAdapterDesc: "Chat Plus 站点 adapter 编写、修复和审查工作流规则。",
     skillsRoots: "外部 Skill 根目录",
     skillsRootsHint: "可选：仅检测该目录下是否存在 SKILL.md（不递归）",
     skillsPathGuard: "可访问目录",
@@ -82,6 +84,12 @@ const translations = {
     skillsRulesJsonError: "命令规则 JSON 无效，请检查格式",
     skillsRulesVisualTitle: "可视化规则管理",
     skillsRulesVisualHint: "按自然语言维护命令策略；系统会自动保存为兼容配置。",
+    skillsRulesSearchLabel: "搜索策略规则",
+    skillsRulesSearchPlaceholder: "搜索命令、关键词或说明",
+    skillsRulesSearchClear: "清空搜索",
+    skillsRulesSearchResults: "已显示 {shown} / {total} 条匹配规则",
+    skillsRulesSearchNoResults: "没有找到匹配的策略规则",
+    skillsRulesSearchGroupEmpty: "当前搜索无匹配规则",
     skillsRuleAdd: "新增规则",
     skillsRuleAddTitle: "新增策略规则",
     skillsRuleEditTitle: "编辑策略规则",
@@ -290,7 +298,9 @@ const translations = {
     builtInToolsTitle: "Bundled Skills",
     builtInToolsHint: "When enabled, the gateway provides terminal commands and file editing without extra downloads.",
     builtInShellDesc: "Run terminal commands inside allowed directories; matched policy rules go to confirmation.",
-    builtInPatchDesc: "Apply patch content to add, delete, update, or move files.",
+    builtInPatchDesc: "Add, delete, update, or move files inside allowed directories.",
+    builtInChromeCdpDesc: "Control browser pages for debugging, automation, and data capture.",
+    builtInChatPlusAdapterDesc: "Workflow rules for writing, fixing, and reviewing Chat Plus site adapters.",
     skillsRoots: "External Skill Roots",
     skillsRootsHint: "Optional: only check SKILL.md directly in this directory (non-recursive)",
     skillsPathGuard: "Allowed Directories",
@@ -320,6 +330,12 @@ const translations = {
     skillsRulesJsonError: "Invalid command rules JSON",
     skillsRulesVisualTitle: "Visual Rule Manager",
     skillsRulesVisualHint: "Manage command policy in plain language. The app still saves compatible configuration.",
+    skillsRulesSearchLabel: "Search policy rules",
+    skillsRulesSearchPlaceholder: "Search commands, keywords, or reasons",
+    skillsRulesSearchClear: "Clear search",
+    skillsRulesSearchResults: "Showing {shown} of {total} matching rules",
+    skillsRulesSearchNoResults: "No matching policy rules found",
+    skillsRulesSearchGroupEmpty: "No matches in this search",
     skillsRuleAdd: "Add Rule",
     skillsRuleAddTitle: "Add Policy Rule",
     skillsRuleEditTitle: "Edit Policy Rule",

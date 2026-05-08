@@ -14,11 +14,12 @@ Common use case: convert local `stdio` MCP services into remotely accessible `SS
 - Unified `HTTP` forwarding: default `POST /api/v2/mcp/<serverName>`
 - Built-in authentication (`Admin Token` / `MCP Token`)
 - Built-in Skill MCP management in the `SKILLS` tab
-- Skill root directory validation (checks for `SKILL.md`)
-- Path guard (whitelist directories + out-of-scope policy)
+- Bundled Skills: `shell_command`, `apply_patch`, `chrome-cdp`, and `chat-plus-adapter-debugger`
+- External Skill root management with per-root enable switches and `SKILL.md` validation
+- Access boundary / path guard (allowed directories + out-of-scope policy)
 - Execution limits (timeout, max output)
-- Policy rules (`allow / confirm / deny`)
-- Pending command approval (`Approve / Reject`)
+- Visual policy rule manager (`deny / confirm`, search, add, edit, copy, delete)
+- Pending command approval (`Approve / Reject`) with confirmation popup
 
 ## UI Preview
 
@@ -26,13 +27,17 @@ Common use case: convert local `stdio` MCP services into remotely accessible `SS
 
 ![Local MCP Gateway Main UI](./image.png)
 
-### Image two (SKILLS basic settings)
+### Image two (SKILLS setup, bundled skills, and external roots)
 
 ![Image two](./image2.png)
 
-### Image three (Policy rules and pending commands)
+The latest SKILLS setup screen shows the Skill MCP toggle, server name, bundled Skills, and external Skill roots. Each external root can be browsed, validated, enabled or disabled, and removed independently.
+
+### Image three (Visual policy rule manager)
 
 ![Image three](./image3.png)
+
+The latest policy screen replaces the old rules-only explanation with a visual manager. Rules are grouped by action, searchable by command, keyword, or reason, and can be added, edited, copied, or deleted from the UI.
 
 ## 1. MCP Tab Configuration
 
@@ -86,11 +91,13 @@ The `SKILLS` tab is used to enable and manage the built-in Skill MCP service:
 
 1. Turn on `Enable Built-in SKILL MCP`.
 2. Set `Skill Server Name` (default `__skills__`).
-3. Add `Skill Roots`, and ensure `SKILL.md` exists directly in those directories.
-4. Optionally enable `Path Guard`, add absolute whitelist directories, and choose violation action: `allow / confirm / deny`.
-5. Configure execution limits: `Execution Timeout (ms)` (minimum `1000`) and `Max Output (bytes)` (minimum `1024`).
-6. Maintain JSON policy rules in `Policy Rules` (`id/action/commandTree/contains/reason`).
-7. After running, approve or reject high-risk commands in `Pending Confirmations`.
+3. Review bundled Skills: `shell_command`, `apply_patch`, `chrome-cdp`, and `chat-plus-adapter-debugger`.
+4. Add `External Skill Roots`, validate that `SKILL.md` exists directly in each directory, and enable only the roots you want to expose.
+5. Configure `Allowed Directories`. When Skill MCP is enabled, the access boundary is required; commands and file edits must stay inside the allowed directories unless the selected violation action says otherwise.
+6. Choose the violation action: `allow / confirm / deny`.
+7. Configure execution limits: `Execution Timeout (ms)` (minimum `1000`) and `Max Output (bytes)` (minimum `1024`).
+8. Manage policy rules in the visual rule manager. Rules support `deny` and `confirm`, command-prefix matching, keyword matching, search, add, edit, copy, and delete. The advanced JSON editor remains available for bulk paste or manual migration.
+9. After running, approve or reject high-risk commands in `Pending Confirmations` or from the confirmation popup.
 
 When gateway is running and SKILLS is enabled, the UI shows:
 

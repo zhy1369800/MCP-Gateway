@@ -1,14 +1,15 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use gateway_core::{
-    wrap_windows_powershell_command_for_utf8, AppError, ErrorCode, GatewayConfig, SkillCommandRule,
-    SkillPolicyAction, SkillsConfig,
+    assign_child_to_gateway_job, wrap_windows_powershell_command_for_utf8, AppError, ErrorCode,
+    GatewayConfig, SkillCommandRule, SkillPolicyAction, SkillsConfig,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -20,6 +21,16 @@ use uuid::Uuid;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+const BUILTIN_SHELL_COMMAND_SKILL_MD: &str =
+    include_str!("../builtin-skills/shell_command/SKILL.md");
+const BUILTIN_APPLY_PATCH_SKILL_MD: &str = include_str!("../builtin-skills/apply_patch/SKILL.md");
+const BUILTIN_CHROME_CDP_SKILL_MD: &str = include_str!("../builtin-skills/chrome-cdp/SKILL.md");
+const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
+    include_str!("../builtin-skills/chat-plus-adapter-debugger/SKILL.md");
+const BUILTIN_CHAT_PLUS_RECORDER_COMMAND_MJS: &str =
+    include_str!("../builtin-skills/chat-plus-adapter-debugger/scripts/recorder-command.mjs");
+const BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "windows")]
 fn configure_skill_command(command: &mut Command) {
@@ -110,17 +121,21 @@ struct ToolCallParams {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SkillCommandArgs {
-    cmd: String,
+    exec: String,
+    #[serde(default)]
+    skill_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BuiltinShellArgs {
-    cmd: String,
+    exec: String,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    skill_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +144,8 @@ struct ApplyPatchArgs {
     patch: String,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    skill_token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -156,6 +173,8 @@ struct CommandInvocation {
 enum BuiltinTool {
     ShellCommand,
     ApplyPatch,
+    ChromeCdp,
+    ChatPlusAdapterDebugger,
 }
 
 #[derive(Debug, Clone)]
@@ -435,9 +454,10 @@ impl SkillsService {
         &self,
         config: &GatewayConfig,
     ) -> Result<Vec<SkillSummary>, AppError> {
-        self.discover_skills(&config.skills)
-            .await
-            .map(|skills| summarize_discovered_skills(&skills))
+        let discovered = self.discover_skills(&config.skills).await?;
+        let mut summaries = summarize_builtin_skills();
+        summaries.extend(summarize_discovered_skills(&discovered));
+        Ok(summaries)
     }
 
     async fn execute_tool_call(
@@ -484,6 +504,15 @@ impl SkillsService {
                 let args = decode_tool_args::<ApplyPatchArgs>(&arguments)?;
                 self.handle_builtin_apply_patch(config, args).await
             }
+            BuiltinTool::ChromeCdp => {
+                let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
+                self.handle_builtin_chrome_cdp(config, args).await
+            }
+            BuiltinTool::ChatPlusAdapterDebugger => {
+                let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
+                self.handle_builtin_chat_plus_adapter_debugger(config, args)
+                    .await
+            }
         }
     }
 
@@ -492,19 +521,36 @@ impl SkillsService {
         config: &GatewayConfig,
         args: BuiltinShellArgs,
     ) -> Result<ToolResult, AppError> {
-        let command_preview = args.cmd.trim().to_string();
+        let command_preview = args.exec.trim().to_string();
         if command_preview.is_empty() {
-            return Err(AppError::BadRequest("cmd cannot be empty".to_string()));
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
         }
 
-        if let Some(result) = missing_cwd_result_if_ambiguous(
+        if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
+            return Ok(builtin_skill_doc_result(
+                tool,
+                &command_preview,
+                matched_path,
+                builtin_skill_token(tool),
+            ));
+        }
+
+        if let Some(result) = validate_skill_token_result(
+            BuiltinTool::ShellCommand.name(),
+            &builtin_skill_token(BuiltinTool::ShellCommand),
+            args.skill_token.as_deref(),
+        ) {
+            return Ok(result);
+        }
+
+        let cwd = match resolve_builtin_cwd(
             BuiltinTool::ShellCommand,
             &config.skills,
             args.cwd.as_deref(),
         ) {
-            return Ok(result);
-        }
-        let cwd = resolve_builtin_cwd(&config.skills, args.cwd.as_deref())?;
+            Ok(cwd) => cwd,
+            Err(result) => return Ok(result),
+        };
 
         if let Some(patch) = extract_apply_patch_from_shell_command(&command_preview) {
             return self
@@ -514,7 +560,7 @@ impl SkillsService {
 
         let tokens = split_shell_tokens(&command_preview);
         if tokens.is_empty() {
-            return Err(AppError::BadRequest("cmd cannot be empty".to_string()));
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
         }
         let program = tokens[0].clone();
         let command_args = tokens[1..].to_vec();
@@ -536,7 +582,8 @@ impl SkillsService {
                         "reason": reason,
                         "command": command_preview,
                         "cwd": normalize_display_path(&cwd),
-                        "policyAction": "deny"
+                        "policyAction": "deny",
+                        "policyHelp": mcp_gateway_policy_denied_help()
                     }),
                 ));
             }
@@ -641,14 +688,20 @@ impl SkillsService {
         config: &GatewayConfig,
         args: ApplyPatchArgs,
     ) -> Result<ToolResult, AppError> {
-        if let Some(result) = missing_cwd_result_if_ambiguous(
-            BuiltinTool::ApplyPatch,
-            &config.skills,
-            args.cwd.as_deref(),
+        if let Some(result) = validate_skill_token_result(
+            BuiltinTool::ApplyPatch.name(),
+            &builtin_skill_token(BuiltinTool::ApplyPatch),
+            args.skill_token.as_deref(),
         ) {
             return Ok(result);
         }
-        let cwd = resolve_builtin_cwd(&config.skills, args.cwd.as_deref())?;
+
+        let cwd =
+            match resolve_builtin_cwd(BuiltinTool::ApplyPatch, &config.skills, args.cwd.as_deref())
+            {
+                Ok(cwd) => cwd,
+                Err(result) => return Ok(result),
+            };
         self.execute_apply_patch_text(config, args.patch, &cwd, "apply_patch")
             .await
     }
@@ -677,6 +730,8 @@ impl SkillsService {
                         "reason": reason,
                         "tool": BuiltinTool::ApplyPatch.name(),
                         "cwd": normalize_display_path(cwd),
+                        "policyAction": "deny",
+                        "policyHelp": mcp_gateway_policy_denied_help(),
                         "affectedPaths": affected_paths.iter().map(|path| normalize_display_path(path)).collect::<Vec<_>>()
                     }),
                 ));
@@ -743,6 +798,324 @@ impl SkillsService {
         ))
     }
 
+    async fn handle_builtin_chrome_cdp(
+        &self,
+        config: &GatewayConfig,
+        args: BuiltinShellArgs,
+    ) -> Result<ToolResult, AppError> {
+        let command_preview = args.exec.trim().to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
+        }
+
+        if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
+            return Ok(builtin_skill_doc_result(
+                tool,
+                &command_preview,
+                matched_path,
+                builtin_skill_token(tool),
+            ));
+        }
+
+        if let Some(result) = validate_skill_token_result(
+            BuiltinTool::ChromeCdp.name(),
+            &builtin_skill_token(BuiltinTool::ChromeCdp),
+            args.skill_token.as_deref(),
+        ) {
+            return Ok(result);
+        }
+
+        self.execute_builtin_chrome_axi_command(
+            config,
+            BuiltinTool::ChromeCdp.name(),
+            &command_preview,
+            &command_preview,
+            args.timeout_ms,
+        )
+        .await
+    }
+
+    async fn execute_builtin_chrome_axi_command(
+        &self,
+        config: &GatewayConfig,
+        tool_name: &str,
+        command_preview: &str,
+        structured_command: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<ToolResult, AppError> {
+        let axi_args = parse_builtin_chrome_axi_args(command_preview)?;
+        let axi_home_dir = builtin_chrome_axi_home_dir()?;
+        let axi_user_data_dir = builtin_chrome_axi_user_data_dir()?;
+        let bridge_port = find_free_local_port()?;
+        let timeout_ms = timeout_ms
+            .unwrap_or_else(|| {
+                config
+                    .skills
+                    .execution
+                    .timeout_ms
+                    .max(BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS)
+            })
+            .max(1000);
+        let bridge_timeout_ms = timeout_ms.saturating_sub(5_000).max(30_000);
+        let max_output_bytes = config.skills.execution.max_output_bytes.max(1024);
+        let (runner, runner_prefix_args) = chrome_axi_runner();
+
+        let started = Instant::now();
+        let mut command = Command::new(&runner);
+        command
+            .args(&runner_prefix_args)
+            .args(&axi_args)
+            .env("HOME", &axi_home_dir)
+            .env("USERPROFILE", &axi_home_dir)
+            .env("CHROME_DEVTOOLS_AXI_USER_DATA_DIR", &axi_user_data_dir)
+            .env("CHROME_DEVTOOLS_AXI_PORT", bridge_port.to_string())
+            .env(
+                "CHROME_DEVTOOLS_AXI_BRIDGE_TIMEOUT_MS",
+                bridge_timeout_ms.to_string(),
+            )
+            .env("CHROME_DEVTOOLS_AXI_HEADED", "1")
+            .env("CHROME_DEVTOOLS_AXI_DISABLE_HOOKS", "1")
+            .env_remove("CHROME_DEVTOOLS_AXI_AUTO_CONNECT")
+            .env_remove("CHROME_DEVTOOLS_AXI_BROWSER_URL")
+            .env_remove("CHROME_DEVTOOLS_AXI_WS_HEADERS")
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        configure_skill_command(&mut command);
+
+        let output =
+            execute_skill_command(&mut command, timeout_ms, max_output_bytes, false).await?;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let stdout = output.stdout.text;
+        let stderr = output.stderr.text;
+        let exit_code = output.status.code().unwrap_or(-1);
+        let structured_axi_args = if tool_name == BuiltinTool::ChatPlusAdapterDebugger.name()
+            && axi_args.first().map(|arg| arg.as_str()) == Some("eval")
+        {
+            vec!["eval".to_string(), "[recorder eval omitted]".to_string()]
+        } else {
+            axi_args.clone()
+        };
+
+        let structured = json!({
+            "status": if output.status.success() { "completed" } else { "failed" },
+            "tool": tool_name,
+            "command": structured_command,
+            "runner": runner,
+            "runnerPrefixArgs": runner_prefix_args,
+            "args": structured_axi_args,
+            "stateHome": normalize_display_path(&axi_home_dir),
+            "userDataDir": normalize_display_path(&axi_user_data_dir),
+            "requestedBridgePort": bridge_port,
+            "bridgeTimeoutMs": bridge_timeout_ms,
+            "browserMode": "persistent-profile-headed",
+            "exitCode": exit_code,
+            "durationMs": duration_ms,
+            "stdoutTruncated": output.stdout.truncated,
+            "stderrTruncated": output.stderr.truncated
+        });
+        let output_text = command_output_text(&stdout, &stderr);
+
+        if output.status.success() {
+            Ok(tool_success(output_text, structured))
+        } else {
+            Ok(tool_error(
+                command_failure_text(exit_code, &stdout, &stderr),
+                structured,
+            ))
+        }
+    }
+
+    async fn handle_builtin_chat_plus_adapter_debugger(
+        &self,
+        config: &GatewayConfig,
+        args: BuiltinShellArgs,
+    ) -> Result<ToolResult, AppError> {
+        let command_preview = args.exec.trim().to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
+        }
+
+        if let Some((doc_tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
+            return Ok(builtin_skill_doc_result(
+                doc_tool,
+                &command_preview,
+                matched_path,
+                builtin_skill_token(doc_tool),
+            ));
+        }
+
+        if let Some(result) = validate_skill_token_result(
+            BuiltinTool::ChatPlusAdapterDebugger.name(),
+            &builtin_skill_token(BuiltinTool::ChatPlusAdapterDebugger),
+            args.skill_token.as_deref(),
+        ) {
+            return Ok(result);
+        }
+
+        let Some(action) = parse_chat_plus_recorder_action(&command_preview) else {
+            return Ok(tool_error(
+                format!(
+                    "{} supports documentation reads and recorder actions only. Use `recorder install`, `recorder clear`, `recorder records`, `recorder records-full`, or `recorder performance` after reading {}.",
+                    BuiltinTool::ChatPlusAdapterDebugger.name(),
+                    builtin_skill_uri(BuiltinTool::ChatPlusAdapterDebugger)
+                ),
+                json!({
+                    "status": "error",
+                    "tool": BuiltinTool::ChatPlusAdapterDebugger.name(),
+                    "exec": command_preview,
+                    "nextStep": "Use one of: recorder install, recorder clear, recorder records, recorder records-full, recorder performance"
+                }),
+            ));
+        };
+
+        let recorder_script = materialize_builtin_chat_plus_recorder_script()?;
+        let node_output = self
+            .generate_chat_plus_recorder_axi_command(config, &recorder_script, action)
+            .await?;
+        let axi_command = node_output.trim();
+        if !axi_command.starts_with("eval ") {
+            return Err(AppError::BadRequest(format!(
+                "recorder script returned an invalid AXI command for action `{action}`"
+            )));
+        }
+
+        self.execute_chat_plus_recorder_axi_command(
+            config,
+            axi_command,
+            &format!("recorder {action}"),
+            args.timeout_ms,
+        )
+        .await
+    }
+
+    async fn generate_chat_plus_recorder_axi_command(
+        &self,
+        config: &GatewayConfig,
+        recorder_script: &Path,
+        action: &str,
+    ) -> Result<String, AppError> {
+        let timeout_ms = config.skills.execution.timeout_ms.max(10_000);
+        let max_output_bytes = config.skills.execution.max_output_bytes.max(256 * 1024);
+        let mut command = Command::new(node_command());
+        command
+            .arg(recorder_script)
+            .arg(action)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        configure_skill_command(&mut command);
+
+        let output =
+            execute_skill_command(&mut command, timeout_ms, max_output_bytes, false).await?;
+        if !output.status.success() {
+            let stdout = output.stdout.text;
+            let stderr = output.stderr.text;
+            let exit_code = output.status.code().unwrap_or(-1);
+            return Err(AppError::BadRequest(command_failure_text(
+                exit_code, &stdout, &stderr,
+            )));
+        }
+        Ok(output.stdout.text)
+    }
+
+    async fn execute_chat_plus_recorder_axi_command(
+        &self,
+        config: &GatewayConfig,
+        axi_command: &str,
+        structured_command: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<ToolResult, AppError> {
+        const MAX_DIRECT_AXI_COMMAND_LEN: usize = 6_500;
+
+        if axi_command.len() <= MAX_DIRECT_AXI_COMMAND_LEN {
+            return self
+                .execute_builtin_chrome_axi_command(
+                    config,
+                    BuiltinTool::ChatPlusAdapterDebugger.name(),
+                    axi_command,
+                    structured_command,
+                    timeout_ms,
+                )
+                .await;
+        }
+
+        let tokens = split_shell_tokens(axi_command);
+        if tokens.len() != 2 || tokens.first().map(|arg| arg.as_str()) != Some("eval") {
+            return self
+                .execute_builtin_chrome_axi_command(
+                    config,
+                    BuiltinTool::ChatPlusAdapterDebugger.name(),
+                    axi_command,
+                    structured_command,
+                    timeout_ms,
+                )
+                .await;
+        }
+        let source = &tokens[1];
+
+        self.execute_chunked_chat_plus_recorder_eval(config, source, structured_command, timeout_ms)
+            .await
+    }
+
+    async fn execute_chunked_chat_plus_recorder_eval(
+        &self,
+        config: &GatewayConfig,
+        source: &str,
+        structured_command: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<ToolResult, AppError> {
+        const KEY: &str = "__MCP_GATEWAY_RECORDER_EVAL_HEX__";
+        const CHUNK_BYTES: usize = 2_500;
+
+        let clear_command = format!(
+            "eval 'function(){{window[\"{KEY}\"]=[];return{{recorderChunked:true,phase:\"clear\"}}}}'"
+        );
+        let clear = self
+            .execute_builtin_chrome_axi_command(
+                config,
+                BuiltinTool::ChatPlusAdapterDebugger.name(),
+                &clear_command,
+                &format!("{structured_command} [chunk clear]"),
+                timeout_ms,
+            )
+            .await?;
+        if clear.is_error {
+            return Ok(clear);
+        }
+
+        for (index, chunk) in source.as_bytes().chunks(CHUNK_BYTES).enumerate() {
+            let hex = hex_encode(chunk);
+            let chunk_command = format!(
+                "eval 'function(){{window[\"{KEY}\"].push(\"{hex}\");return{{recorderChunked:true,phase:\"chunk\",index:{index}}}}}'"
+            );
+            let result = self
+                .execute_builtin_chrome_axi_command(
+                    config,
+                    BuiltinTool::ChatPlusAdapterDebugger.name(),
+                    &chunk_command,
+                    &format!("{structured_command} [chunk {index}]"),
+                    timeout_ms,
+                )
+                .await?;
+            if result.is_error {
+                return Ok(result);
+            }
+        }
+
+        let final_command = format!(
+            "eval 'function(){{const k=\"{KEY}\";const h=(window[k]||[]).join(\"\");delete window[k];const b=new Uint8Array(h.length/2);for(let i=0;i<h.length;i+=2)b[i/2]=parseInt(h.slice(i,i+2),16);const s=new TextDecoder().decode(b);return (0,eval)(\"(\"+s+\")\")();}}'"
+        );
+        self.execute_builtin_chrome_axi_command(
+            config,
+            BuiltinTool::ChatPlusAdapterDebugger.name(),
+            &final_command,
+            structured_command,
+            timeout_ms,
+        )
+        .await
+    }
+
     async fn handle_skill_command(
         &self,
         config: &GatewayConfig,
@@ -750,14 +1123,35 @@ impl SkillsService {
         skill: &DiscoveredSkill,
         args: SkillCommandArgs,
     ) -> Result<ToolResult, AppError> {
-        let command_preview = args.cmd.trim().to_string();
+        let command_preview = args.exec.trim().to_string();
         if command_preview.is_empty() {
-            return Err(AppError::BadRequest("cmd cannot be empty".to_string()));
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
+        }
+
+        if is_external_skill_doc_read_command(&command_preview, skill) {
+            let skill_md_path = skill.path.join("SKILL.md");
+            let content = std::fs::read_to_string(&skill_md_path)?;
+            let token = skill_token_from_content(&content);
+            return Ok(skill_doc_result(
+                tool_name,
+                &skill.skill,
+                &command_preview,
+                normalize_display_path(&skill_md_path),
+                content,
+                token,
+            ));
+        }
+
+        let expected_token = external_skill_token(skill)?;
+        if let Some(result) =
+            validate_skill_token_result(tool_name, &expected_token, args.skill_token.as_deref())
+        {
+            return Ok(result);
         }
 
         let tokens = split_shell_tokens(&command_preview);
         if tokens.is_empty() {
-            return Err(AppError::BadRequest("cmd cannot be empty".to_string()));
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
         }
         let program = tokens[0].clone();
         let command_args = tokens[1..].to_vec();
@@ -781,7 +1175,7 @@ impl SkillsService {
                         "reason": reason,
                         "command": command_preview,
                         "policyAction": "deny",
-                        "nextStep": "把匹配的 skills.policy 规则或 skills.policy.defaultAction 改为 confirm 让用户确认运行，或改为 allow 让它默认运行，然后重试。"
+                        "policyHelp": mcp_gateway_policy_denied_help()
                     }),
                 ));
             }
@@ -1216,8 +1610,19 @@ fn confirmation_rejected_result(confirmation_id: &str, timed_out: bool) -> ToolR
 
 fn mcp_gateway_policy_denied_text(reason: &str) -> String {
     format!(
-        "MCP Gateway 已拒绝此命令：命令命中了网关拒绝策略或默认拒绝规则，因此没有执行。原因：{reason}。要执行该命令，请把匹配的 skills.policy 规则或 skills.policy.defaultAction 改为 \"confirm\" 让用户确认运行，或改为 \"allow\" 让它默认运行，然后重试。"
+        "MCP Gateway 已拒绝此命令：该命令命中了当前网关策略中的拒绝规则（deny）或默认拒绝动作，因此没有执行。匹配原因：{reason}。如果你确认此类命令应该可以运行，请在可视化规则管理中把匹配规则从“拒绝/deny”改为“用户确认/confirm”，让它在执行前请求用户批准；也可以删除或禁用这条拒绝规则，让后续规则或默认动作接管。"
     )
+}
+
+fn mcp_gateway_policy_denied_help() -> Value {
+    json!({
+        "message": "This command was blocked by MCP Gateway policy and was not executed.",
+        "uiHint": "Open visual policy rule management, find the matching deny rule, then change it to confirm or remove/disable it.",
+        "suggestedActions": [
+            "change_matching_rule_to_confirm",
+            "remove_or_disable_matching_deny_rule"
+        ]
+    })
 }
 
 fn error_to_tool_result(error: AppError) -> ToolResult {
@@ -1286,6 +1691,31 @@ fn summarize_discovered_skills(skills: &[DiscoveredSkill]) -> Vec<SkillSummary> 
         .collect()
 }
 
+fn summarize_builtin_skills() -> Vec<SkillSummary> {
+    builtin_tools()
+        .into_iter()
+        .map(|tool| {
+            let frontmatter = builtin_skill_frontmatter(tool);
+            SkillSummary {
+                skill: tool.name().to_string(),
+                description: frontmatter.description,
+                root: builtin_skills_root_uri().to_string(),
+                path: builtin_skill_uri_root(tool),
+                has_scripts: false,
+            }
+        })
+        .collect()
+}
+
+fn builtin_tools() -> [BuiltinTool; 4] {
+    [
+        BuiltinTool::ShellCommand,
+        BuiltinTool::ApplyPatch,
+        BuiltinTool::ChromeCdp,
+        BuiltinTool::ChatPlusAdapterDebugger,
+    ]
+}
+
 fn tool_definitions(skills: &[DiscoveredSkill]) -> Value {
     let bindings = build_skill_tool_bindings(skills);
     let now = Utc::now().to_rfc3339();
@@ -1300,11 +1730,15 @@ fn tool_definitions(skills: &[DiscoveredSkill]) -> Value {
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["cmd"],
+                "required": ["exec"],
                 "properties": {
-                    "cmd": {
+                    "exec": {
                         "type": "string",
                         "description": "Shell command string for this skill. Main uses: read markdown files with full paths (for example `cat D:/.../SKILL.md` or `Get-Content D:/.../SKILL.md`) and run scripts."
+                    },
+                    "skillToken": {
+                        "type": "string",
+                        "description": "Required for every non-documentation call. Obtain it by first reading this skill's SKILL.md with this tool; extract the skillToken from the returned markdown content and pass it exactly."
                     }
                 }
             }
@@ -1315,71 +1749,16 @@ fn tool_definitions(skills: &[DiscoveredSkill]) -> Value {
 }
 
 fn builtin_tool_definitions(os: &str, now: &str) -> Vec<Value> {
-    let shell_description = format!(
-        r#"Bundled Skill: terminal operations.
-This bundled skill has no separate SKILL.md file; follow this description as the full usage guide.
-
-Scope and cwd:
-- The user-configured allowed directories are the only folders this skill can operate in.
-- Always set cwd to the concrete directory you intend to operate in.
-- If multiple allowed directories exist and the user has not specified which folder to operate in, ask the user to choose one before calling this tool.
-- If the requested file or folder is outside every allowed directory, ask the user to add the corresponding directory to allowed directories before continuing.
-
-Command usage:
-- Use non-interactive commands only; avoid commands that wait for prompts or open full-screen editors.
-- Quote paths that contain spaces or non-ASCII characters.
-- Prefer fast discovery commands: rg --files for listing project files, rg for text search. If rg is unavailable, use the platform shell's normal alternatives.
-- For reading files on Windows, prefer Get-Content -Raw <path>; on Unix-like systems, use cat, sed -n, or similar read-only commands.
-- Prefer the apply_patch bundled skill for file edits instead of shell redirection or in-place text tools when a structured edit is possible.
-- Destructive or sensitive commands may be blocked or require user approval by policy.
-
-Current OS: {os}. Current datetime: {now}."#
-    );
-    let patch_description = format!(
-        r#"Bundled Skill: structured file editing.
-This bundled skill has no separate SKILL.md file; follow this description as the full usage guide.
-
-Scope and cwd:
-- All affected files must be inside the user-configured allowed directories.
-- Always set cwd to the concrete directory for relative patch paths.
-- If multiple allowed directories exist and the user has not specified which folder to edit, ask the user to choose one before calling this tool.
-- If the requested file is outside every allowed directory, ask the user to add the corresponding directory to allowed directories before continuing.
-
-Patch format:
-- This tool does not accept standard unified diff headers such as --- file and +++ file.
-- Use only the format below. Every patch starts with *** Begin Patch and ends with *** End Patch.
-- Add files with *** Add File: path, where every content line starts with +.
-- Delete files with *** Delete File: path.
-- Update files with *** Update File: path. Inside update hunks, unchanged context lines start with one space, removed lines start with -, and added lines start with +.
-- Move files by adding *** Move to: new-path immediately after *** Update File: old-path.
-
-Minimal replacement example:
-*** Begin Patch
-*** Update File: index.html
-@@
--<h1>Old title</h1>
-+<h1>New title</h1>
-*** End Patch
-
-Add file example:
-*** Begin Patch
-*** Add File: notes.txt
-+first line
-+second line
-*** End Patch
-
-Current OS: {os}. Current datetime: {now}."#
-    );
     vec![
         json!({
             "name": BuiltinTool::ShellCommand.name(),
-            "description": shell_description,
+            "description": render_builtin_tool_description(BuiltinTool::ShellCommand, os, now),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["cmd"],
+                "required": ["exec"],
                 "properties": {
-                    "cmd": {
+                    "exec": {
                         "type": "string",
                         "description": "Shell command to run."
                     },
@@ -1391,13 +1770,17 @@ Current OS: {os}. Current datetime: {now}."#
                         "type": "integer",
                         "minimum": 1000,
                         "description": "Optional command timeout in milliseconds."
+                    },
+                    "skillToken": {
+                        "type": "string",
+                        "description": "Required for every non-documentation call. Obtain it by first reading builtin://shell_command/SKILL.md; extract the skillToken from the returned markdown content and pass it exactly."
                     }
                 }
             }
         }),
         json!({
             "name": BuiltinTool::ApplyPatch.name(),
-            "description": patch_description,
+            "description": render_builtin_tool_description(BuiltinTool::ApplyPatch, os, now),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -1410,11 +1793,564 @@ Current OS: {os}. Current datetime: {now}."#
                     "cwd": {
                         "type": "string",
                         "description": "Concrete working directory for relative patch paths. It must be inside one configured allowed directory. Required when more than one allowed directory exists; do not omit it in that case."
+                    },
+                    "skillToken": {
+                        "type": "string",
+                        "description": "Required for every apply_patch call. Obtain it by first reading builtin://apply_patch/SKILL.md with shell_command; extract the skillToken from the returned markdown content and pass it exactly."
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": BuiltinTool::ChromeCdp.name(),
+            "description": render_builtin_tool_description(BuiltinTool::ChromeCdp, os, now),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["exec"],
+                "properties": {
+                    "exec": {
+                        "type": "string",
+                        "description": "Chrome DevTools AXI command. First call must read builtin://chrome-cdp/SKILL.md. After reading it, use commands like `open <url>`, `snapshot`, `click @<uid>`, or `npx -y chrome-devtools-axi@latest open <url>`."
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "description": "Optional command timeout in milliseconds."
+                    },
+                    "skillToken": {
+                        "type": "string",
+                        "description": "Required for every non-documentation call. Obtain it by first reading builtin://chrome-cdp/SKILL.md; extract the skillToken from the returned markdown content and pass it exactly."
+                    }
+                }
+            }
+        }),
+        json!({
+            "name": BuiltinTool::ChatPlusAdapterDebugger.name(),
+            "description": render_builtin_tool_description(BuiltinTool::ChatPlusAdapterDebugger, os, now),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["exec"],
+                "properties": {
+                    "exec": {
+                        "type": "string",
+                        "description": "Documentation read or recorder action. First call must read builtin://chat-plus-adapter-debugger/SKILL.md. Then use `recorder install`, `recorder clear`, `recorder records`, `recorder records-full`, or `recorder performance` to run the built-in recorder through the gateway-managed Chrome CDP session."
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "description": "Optional recorder/CDP command timeout in milliseconds."
+                    },
+                    "skillToken": {
+                        "type": "string",
+                        "description": "Required for every recorder action. Obtain it by first reading builtin://chat-plus-adapter-debugger/SKILL.md; extract the skillToken from the returned markdown content and pass it exactly."
                     }
                 }
             }
         }),
     ]
+}
+
+fn render_builtin_tool_description(tool: BuiltinTool, os: &str, now: &str) -> String {
+    let frontmatter = builtin_skill_frontmatter(tool);
+    let skill_uri = builtin_skill_uri(tool);
+    let skill_root_uri = builtin_skill_uri_root(tool);
+    let read_cmd = if cfg!(target_os = "windows") {
+        format!("Get-Content -Raw {skill_uri}")
+    } else {
+        format!("cat {skill_uri}")
+    };
+    let read_requirement = match tool {
+        BuiltinTool::ShellCommand => {
+            format!("The only acceptable first call to this tool is a documentation-read call. Suggested `exec`: `{read_cmd}`.")
+        }
+        BuiltinTool::ApplyPatch => {
+            format!("Before calling `apply_patch`, use `shell_command` to read this SKILL.md. Suggested shell `exec`: `{read_cmd}`.")
+        }
+        BuiltinTool::ChromeCdp | BuiltinTool::ChatPlusAdapterDebugger => {
+            format!("The only acceptable first call to this tool is a documentation-read call using `exec`: `{read_cmd}`.")
+        }
+    };
+    let frontmatter_block = if frontmatter.block.trim().is_empty() {
+        "none".to_string()
+    } else {
+        format!("---\n{}\n---", frontmatter.block.trim())
+    };
+
+    format!(
+        "Bundled skill: {}.\nMANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this bundled skill for any real action, you MUST first read its full SKILL.md. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. {read_requirement} The SKILL.md response includes the required `skillToken` only inside the returned markdown content; every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call. The gateway serves bundled SKILL.md reads from embedded content, so this direct documentation read does not require a workspace `cwd`.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill URI: {skill_root_uri}.\nSKILL.md URI: {skill_uri}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
+        frontmatter.name,
+        frontmatter.name,
+        if frontmatter.description.trim().is_empty() {
+            "none"
+        } else {
+            frontmatter.description.trim()
+        },
+        if frontmatter.metadata.trim().is_empty() {
+            "none"
+        } else {
+            frontmatter.metadata.trim()
+        },
+        frontmatter_block
+    )
+}
+
+fn builtin_skill_frontmatter(tool: BuiltinTool) -> ParsedFrontmatter {
+    parse_frontmatter_content(builtin_skill_md_content(tool), &builtin_skill_uri(tool))
+        .unwrap_or_default()
+}
+
+fn builtin_skill_md_content(tool: BuiltinTool) -> &'static str {
+    match tool {
+        BuiltinTool::ShellCommand => BUILTIN_SHELL_COMMAND_SKILL_MD,
+        BuiltinTool::ApplyPatch => BUILTIN_APPLY_PATCH_SKILL_MD,
+        BuiltinTool::ChromeCdp => BUILTIN_CHROME_CDP_SKILL_MD,
+        BuiltinTool::ChatPlusAdapterDebugger => BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD,
+    }
+}
+
+fn builtin_skills_root_uri() -> &'static str {
+    "builtin://"
+}
+
+fn builtin_skill_uri_root(tool: BuiltinTool) -> String {
+    format!("builtin://{}", tool.name())
+}
+
+fn builtin_skill_uri(tool: BuiltinTool) -> String {
+    format!("builtin://{}/SKILL.md", tool.name())
+}
+
+fn builtin_skill_doc_read(command: &str) -> Option<(BuiltinTool, String)> {
+    let tokens = split_shell_tokens(command);
+    let (program, args) = tokens.split_first()?;
+    let normalized_program = normalize_command_token(program);
+    if !matches!(
+        normalized_program.as_str(),
+        "cat" | "type" | "get-content" | "gc"
+    ) {
+        return None;
+    }
+
+    args.iter().find_map(|arg| builtin_skill_doc_arg(arg))
+}
+
+fn builtin_skill_doc_result(
+    tool: BuiltinTool,
+    command: &str,
+    matched_path: String,
+    token: String,
+) -> ToolResult {
+    let runtime_assets = builtin_skill_runtime_assets(tool);
+    let mut text = render_builtin_skill_md(tool, runtime_assets.as_ref());
+    text.push_str(&format!(
+        "\n\n[skillToken]\nUse this exact skillToken for subsequent non-documentation calls to `{}`: {}\n",
+        tool.name(),
+        token
+    ));
+    tool_success(
+        text,
+        json!({
+            "status": "completed",
+            "tool": BuiltinTool::ShellCommand.name(),
+            "command": command,
+            "builtinSkill": tool.name(),
+            "path": matched_path,
+            "source": "embedded",
+            "runtimeAssets": runtime_assets
+                .as_ref()
+                .map(|assets| json!({
+                    "status": "available",
+                    "recorderScriptPath": normalize_display_path(&assets.recorder_script_path)
+                }))
+                .unwrap_or_else(|| json!({"status": "none"}))
+        }),
+    )
+}
+
+struct BuiltinRuntimeAssets {
+    recorder_script_path: PathBuf,
+}
+
+fn render_builtin_skill_md(tool: BuiltinTool, assets: Option<&BuiltinRuntimeAssets>) -> String {
+    let mut content = builtin_skill_md_content(tool).to_string();
+    if tool == BuiltinTool::ChatPlusAdapterDebugger {
+        let replacement = assets
+            .map(|assets| normalize_display_path(&assets.recorder_script_path))
+            .unwrap_or_else(|| {
+                "<recorder script unavailable: report gateway runtime asset materialization failure>"
+                    .to_string()
+            });
+        content = content.replace("{{RECORDER_SCRIPT_PATH}}", &replacement);
+    }
+    content
+}
+
+fn builtin_skill_runtime_assets(tool: BuiltinTool) -> Option<BuiltinRuntimeAssets> {
+    match tool {
+        BuiltinTool::ChatPlusAdapterDebugger => {
+            match materialize_builtin_chat_plus_recorder_script() {
+                Ok(path) => Some(BuiltinRuntimeAssets {
+                    recorder_script_path: path,
+                }),
+                Err(error) => {
+                    eprintln!(
+                        "failed to materialize built-in chat-plus adapter debugger recorder script: {error}"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn materialize_builtin_chat_plus_recorder_script() -> Result<PathBuf, AppError> {
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("mcp-gateway")
+        .join("builtin-skills")
+        .join("chat-plus-adapter-debugger")
+        .join("scripts");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("recorder-command.mjs");
+    let should_write = match fs::read_to_string(&path) {
+        Ok(existing) => existing != BUILTIN_CHAT_PLUS_RECORDER_COMMAND_MJS,
+        Err(_) => true,
+    };
+    if should_write {
+        fs::write(&path, BUILTIN_CHAT_PLUS_RECORDER_COMMAND_MJS)?;
+    }
+    Ok(path)
+}
+
+fn skill_doc_result(
+    tool_name: &str,
+    skill: &str,
+    command: &str,
+    path: String,
+    content: String,
+    token: String,
+) -> ToolResult {
+    let mut text = content;
+    text.push_str(&format!(
+        "\n\n[skillToken]\nUse this exact skillToken for subsequent non-documentation calls to `{tool_name}`: {token}\n"
+    ));
+    tool_success(
+        text,
+        json!({
+            "status": "completed",
+            "tool": tool_name,
+            "skill": skill,
+            "command": command,
+            "path": path,
+            "source": "file"
+        }),
+    )
+}
+
+fn validate_skill_token_result(
+    tool_name: &str,
+    expected_token: &str,
+    provided: Option<&str>,
+) -> Option<ToolResult> {
+    match provided.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(provided) if provided == expected_token => None,
+        Some(_) => Some(skill_token_error(
+            tool_name,
+            "invalid skillToken for this skill",
+        )),
+        None => Some(skill_token_error(
+            tool_name,
+            "missing skillToken for this skill",
+        )),
+    }
+}
+
+fn skill_token_error(tool_name: &str, message: &str) -> ToolResult {
+    tool_error(
+        format!(
+            "{message}. Before using `{tool_name}` for any real action, read its SKILL.md first and then retry with the returned `skillToken` argument."
+        ),
+        json!({
+            "status": "error",
+            "code": "SkillTokenRequired",
+            "tool": tool_name,
+            "message": message,
+            "requiredArgument": "skillToken",
+            "nextStep": "Read the corresponding SKILL.md with the documented first-call command. The response includes the skillToken only in the returned markdown content; pass that value as skillToken on subsequent non-documentation calls."
+        }),
+    )
+}
+
+fn builtin_skill_token(tool: BuiltinTool) -> String {
+    skill_token_from_content(builtin_skill_md_content(tool))
+}
+
+fn external_skill_token(skill: &DiscoveredSkill) -> Result<String, AppError> {
+    let skill_md_path = skill.path.join("SKILL.md");
+    let content = std::fs::read_to_string(skill_md_path)?;
+    Ok(skill_token_from_content(&content))
+}
+
+fn skill_token_from_content(content: &str) -> String {
+    // Stable FNV-1a hash: enough for a short gate token without adding a crypto dependency.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}").chars().take(6).collect()
+}
+
+fn is_external_skill_doc_read_command(command: &str, skill: &DiscoveredSkill) -> bool {
+    let tokens = split_shell_tokens(command);
+    let Some((program, args)) = tokens.split_first() else {
+        return false;
+    };
+    let normalized_program = normalize_command_token(program);
+    if !matches!(
+        normalized_program.as_str(),
+        "cat" | "type" | "get-content" | "gc"
+    ) {
+        return false;
+    }
+
+    let skill_md = normalize_root_path(skill.path.join("SKILL.md"));
+    args.iter().any(|arg| {
+        let candidate = strip_matching_quotes(arg)
+            .trim()
+            .trim_end_matches(';')
+            .trim();
+        if candidate.is_empty() || candidate.starts_with('-') {
+            return false;
+        }
+        let path = PathBuf::from(candidate);
+        let resolved = if path.is_absolute() {
+            normalize_root_path(path)
+        } else {
+            normalize_root_path(skill.path.join(path))
+        };
+        resolved == skill_md
+    })
+}
+
+fn builtin_skill_doc_arg(arg: &str) -> Option<(BuiltinTool, String)> {
+    let candidate = strip_matching_quotes(arg)
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    if candidate.is_empty() || candidate.starts_with('-') {
+        return None;
+    }
+
+    for tool in builtin_tools() {
+        let uri = builtin_skill_uri(tool);
+        if candidate.eq_ignore_ascii_case(&uri) {
+            return Some((tool, uri));
+        }
+    }
+
+    None
+}
+
+fn parse_builtin_chrome_axi_args(command: &str) -> Result<Vec<String>, AppError> {
+    let tokens = split_shell_tokens(command);
+    let Some((program, args)) = tokens.split_first() else {
+        return Err(AppError::BadRequest("exec cannot be empty".to_string()));
+    };
+    let normalized_program = normalize_command_token(program);
+
+    if matches!(normalized_program.as_str(), "npx" | "npx.cmd" | "npx.exe") {
+        let mut remaining = args;
+        if remaining.first().map(|arg| arg.as_str()) == Some("-y") {
+            remaining = &remaining[1..];
+        }
+        let Some((package, rest)) = remaining.split_first() else {
+            return Err(AppError::BadRequest(
+                "chrome-cdp command must include chrome-devtools-axi".to_string(),
+            ));
+        };
+        if is_chrome_devtools_axi_package(package) {
+            return Ok(rest.to_vec());
+        }
+    }
+
+    if is_chrome_devtools_axi_package(program) {
+        return Ok(args.to_vec());
+    }
+
+    if is_chrome_axi_cli_command(&normalized_program) || is_chrome_axi_cli_flag(&normalized_program)
+    {
+        return Ok(tokens);
+    }
+
+    Err(AppError::BadRequest(
+        "chrome-cdp now uses chrome-devtools-axi. Command must start with `npx -y chrome-devtools-axi@latest`, `chrome-devtools-axi`, or a documented AXI subcommand such as `open`, `snapshot`, `pages`, `click`, or `stop` after SKILL.md has been read".to_string(),
+    ))
+}
+
+fn parse_chat_plus_recorder_action(command: &str) -> Option<&'static str> {
+    let tokens = split_shell_tokens(command);
+    let action = match tokens.as_slice() {
+        [action] => action.as_str(),
+        [prefix, action] if prefix.eq_ignore_ascii_case("recorder") => action.as_str(),
+        _ => return None,
+    };
+
+    match action.to_ascii_lowercase().as_str() {
+        "install" => Some("install"),
+        "clear" => Some("clear"),
+        "records" => Some("records"),
+        "records-full" => Some("records-full"),
+        "performance" => Some("performance"),
+        _ => None,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn is_chrome_devtools_axi_package(token: &str) -> bool {
+    let normalized = normalize_command_token(token);
+    normalized == "chrome-devtools-axi"
+        || normalized == "chrome-devtools-axi.cmd"
+        || normalized == "chrome-devtools-axi.exe"
+        || normalized.starts_with("chrome-devtools-axi@")
+}
+
+fn is_chrome_axi_cli_flag(command: &str) -> bool {
+    matches!(command, "--help" | "-v" | "-V" | "--version" | "--full")
+}
+
+fn is_chrome_axi_cli_command(command: &str) -> bool {
+    matches!(
+        command,
+        "open"
+            | "snapshot"
+            | "screenshot"
+            | "click"
+            | "fill"
+            | "type"
+            | "press"
+            | "scroll"
+            | "back"
+            | "wait"
+            | "eval"
+            | "run"
+            | "hover"
+            | "drag"
+            | "fillform"
+            | "dialog"
+            | "upload"
+            | "pages"
+            | "newpage"
+            | "selectpage"
+            | "closepage"
+            | "resize"
+            | "emulate"
+            | "console"
+            | "console-get"
+            | "network"
+            | "network-get"
+            | "lighthouse"
+            | "perf-start"
+            | "perf-stop"
+            | "perf-insight"
+            | "heap"
+            | "start"
+            | "stop"
+    )
+}
+
+fn find_free_local_port() -> Result<u16, AppError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
+fn builtin_chrome_axi_home_dir() -> Result<PathBuf, AppError> {
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("mcp-gateway")
+        .join("builtin-skills")
+        .join("chrome-cdp")
+        .join("axi-home");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn builtin_chrome_axi_user_data_dir() -> Result<PathBuf, AppError> {
+    let dir = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("mcp-gateway")
+        .join("builtin-skills")
+        .join("chrome-cdp")
+        .join("chrome-user-data");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn chrome_axi_runner() -> (String, Vec<String>) {
+    if let Some(command) = find_command_in_path(chrome_axi_command_name()) {
+        return (command.to_string_lossy().to_string(), Vec::new());
+    }
+
+    (
+        npx_command().to_string(),
+        vec!["-y".to_string(), "chrome-devtools-axi@latest".to_string()],
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn chrome_axi_command_name() -> &'static str {
+    "chrome-devtools-axi.cmd"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn chrome_axi_command_name() -> &'static str {
+    "chrome-devtools-axi"
+}
+
+fn find_command_in_path(command: &str) -> Option<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.is_absolute() && command_path.is_file() {
+        return Some(command_path.to_path_buf());
+    }
+
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(command))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn npx_command() -> &'static str {
+    "npx.cmd"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn npx_command() -> &'static str {
+    "npx"
+}
+
+#[cfg(target_os = "windows")]
+fn node_command() -> &'static str {
+    "node.exe"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn node_command() -> &'static str {
+    "node"
 }
 
 fn build_skill_tool_bindings(skills: &[DiscoveredSkill]) -> Vec<(String, &DiscoveredSkill)> {
@@ -1450,6 +2386,10 @@ impl BuiltinTool {
                 Some(Self::ShellCommand)
             }
             value if value.eq_ignore_ascii_case(Self::ApplyPatch.name()) => Some(Self::ApplyPatch),
+            value if value.eq_ignore_ascii_case(Self::ChromeCdp.name()) => Some(Self::ChromeCdp),
+            value if value.eq_ignore_ascii_case(Self::ChatPlusAdapterDebugger.name()) => {
+                Some(Self::ChatPlusAdapterDebugger)
+            }
             _ => None,
         }
     }
@@ -1458,6 +2398,8 @@ impl BuiltinTool {
         match self {
             Self::ShellCommand => "shell_command",
             Self::ApplyPatch => "apply_patch",
+            Self::ChromeCdp => "chrome-cdp",
+            Self::ChatPlusAdapterDebugger => "chat-plus-adapter-debugger",
         }
     }
 }
@@ -1513,7 +2455,7 @@ fn render_skill_tool_description(skill: &DiscoveredSkill, os: &str, now: &str) -
     };
     let skill_path = normalize_display_path(&skill.path);
     format!(
-        "To learn the complete usage of this skill, run `cmd` to read the full SKILL.md text. like `cat /.../SKILL.md` or `Get-Content D:/.../SKILL.md`. The `cmd` value should be one shell command string used either to read markdown files or run scripts.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill path: {skill_path}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
+        "MANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this skill for any real action, you MUST first call this skill tool with `exec` that reads the full SKILL.md from the skill path below. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. The only acceptable first call is a documentation-read call, such as `cat {skill_path}/SKILL.md` or `Get-Content -Raw {skill_path}/SKILL.md`. The SKILL.md response includes the required `skillToken` only inside the returned markdown content; every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call.\nThe `exec` value should be one shell command string used either to read markdown files or run scripts after SKILL.md has been read.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill path: {skill_path}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
         skill_display_name(skill),
         meta_description,
         if skill.frontmatter_metadata.trim().is_empty() {
@@ -1656,7 +2598,11 @@ fn register_skill_directory(
 
 fn parse_frontmatter_fields(skill_md_path: &Path) -> Result<ParsedFrontmatter, AppError> {
     let content = std::fs::read_to_string(skill_md_path)?;
-    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    parse_frontmatter_content(&content, &skill_md_path.display().to_string())
+}
+
+fn parse_frontmatter_content(content: &str, source: &str) -> Result<ParsedFrontmatter, AppError> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let mut lines = content.lines();
     if lines.next().map(str::trim) != Some("---") {
         return Ok(ParsedFrontmatter::default());
@@ -1682,16 +2628,10 @@ fn parse_frontmatter_fields(skill_md_path: &Path) -> Result<ParsedFrontmatter, A
     }
 
     let frontmatter: Value = serde_yaml::from_str(&raw).map_err(|error| {
-        AppError::BadRequest(format!(
-            "invalid YAML frontmatter in {}: {error}",
-            skill_md_path.display()
-        ))
+        AppError::BadRequest(format!("invalid YAML frontmatter in {source}: {error}"))
     })?;
     let frontmatter_obj = frontmatter.as_object().ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "frontmatter in {} must be a YAML mapping",
-            skill_md_path.display()
-        ))
+        AppError::BadRequest(format!("frontmatter in {source} must be a YAML mapping"))
     })?;
 
     let name = frontmatter_obj
@@ -1726,7 +2666,7 @@ fn frontmatter_value_summary(value: &Value) -> String {
     }
 }
 
-fn shell_command_for_current_os(cmd: &str) -> (String, Vec<String>) {
+fn shell_command_for_current_os(exec: &str) -> (String, Vec<String>) {
     if cfg!(target_os = "windows") {
         let runner = "powershell".to_string();
         let args = vec![
@@ -1734,11 +2674,11 @@ fn shell_command_for_current_os(cmd: &str) -> (String, Vec<String>) {
             "-ExecutionPolicy".to_string(),
             "Bypass".to_string(),
             "-Command".to_string(),
-            cmd.to_string(),
+            exec.to_string(),
         ];
         wrap_windows_powershell_command_for_utf8(&runner, &args).unwrap_or((runner, args))
     } else {
-        ("sh".to_string(), vec!["-lc".to_string(), cmd.to_string()])
+        ("sh".to_string(), vec!["-lc".to_string(), exec.to_string()])
     }
 }
 
@@ -1767,6 +2707,9 @@ async fn execute_skill_command(
     let mut child = command
         .spawn()
         .map_err(|error| AppError::Upstream(format!("failed to execute command: {error}")))?;
+    if let Some(pid) = child.id() {
+        let _ = assign_child_to_gateway_job(pid);
+    }
     let stdout = child
         .stdout
         .take()
@@ -2176,85 +3119,111 @@ fn resolve_candidate_path(script_dir: &Path, token: &str) -> PathBuf {
     normalize_root_path(absolute)
 }
 
-fn resolve_builtin_cwd(skills: &SkillsConfig, cwd: Option<&str>) -> Result<PathBuf, AppError> {
-    let allowed_dirs = skills
-        .policy
-        .path_guard
-        .whitelist_dirs
+fn resolve_builtin_cwd(
+    tool: BuiltinTool,
+    skills: &SkillsConfig,
+    cwd: Option<&str>,
+) -> Result<PathBuf, ToolResult> {
+    let allowed_roots = configured_allowed_dir_paths(skills);
+    let allowed_dirs = allowed_roots
         .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
+        .map(|path| normalize_display_path(path))
         .collect::<Vec<_>>();
+    if allowed_roots.is_empty() {
+        return Err(cwd_error_result(
+            tool,
+            "skills enabled requires at least one allowed directory",
+            cwd,
+            None,
+            allowed_dirs,
+        ));
+    }
 
     let selected = if let Some(cwd) = cwd.map(str::trim).filter(|value| !value.is_empty()) {
         PathBuf::from(cwd)
     } else {
-        match allowed_dirs.as_slice() {
-            [] => {
-                return Err(AppError::Validation(
-                    "skills enabled requires at least one allowed directory".to_string(),
-                ));
-            }
-            [only] => PathBuf::from(only),
+        match allowed_roots.as_slice() {
+            [only] => only.clone(),
             _ => {
-                return Err(AppError::BadRequest(
-                    "cwd is required because multiple allowed directories are configured; ask the user which directory to operate in".to_string(),
-                ));
+                let message = "cwd is required because multiple allowed directories are configured; ask the user which directory to operate in";
+                return Err(cwd_error_result(tool, message, cwd, None, allowed_dirs));
             }
         }
     };
     let normalized = normalize_root_path(selected);
+    if !allowed_roots
+        .iter()
+        .any(|root| normalized.starts_with(root))
+    {
+        let message = "cwd must be inside one configured allowed directory";
+        return Err(cwd_error_result(
+            tool,
+            message,
+            cwd,
+            Some(&normalized),
+            allowed_dirs,
+        ));
+    }
+
     if !normalized.exists() || !normalized.is_dir() {
-        return Err(AppError::Validation(format!(
+        let message = format!(
             "working directory must be an existing directory: {}",
             normalized.to_string_lossy()
-        )));
+        );
+        return Err(cwd_error_result(
+            tool,
+            &message,
+            cwd,
+            Some(&normalized),
+            allowed_dirs,
+        ));
     }
 
-    match evaluate_paths_policy(skills, std::slice::from_ref(&normalized)) {
-        PolicyDecision::Allow => Ok(normalized),
-        PolicyDecision::Confirm(reason) | PolicyDecision::Deny(reason) => {
-            Err(AppError::Validation(reason))
-        }
-    }
+    Ok(normalized)
 }
 
-fn missing_cwd_result_if_ambiguous(
+fn cwd_error_result(
     tool: BuiltinTool,
-    skills: &SkillsConfig,
+    message: &str,
     cwd: Option<&str>,
-) -> Option<ToolResult> {
-    if cwd.map(str::trim).is_some_and(|value| !value.is_empty()) {
-        return None;
-    }
-
-    let allowed_dirs = configured_allowed_dirs(skills);
-    if allowed_dirs.len() <= 1 {
-        return None;
-    }
-
-    let message = "cwd is required because multiple allowed directories are configured; ask the user which directory to operate in";
-    Some(tool_error(
+    resolved_cwd: Option<&Path>,
+    allowed_dirs: Vec<String>,
+) -> ToolResult {
+    let requested_cwd = cwd
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let resolved_cwd = resolved_cwd.map(normalize_display_path);
+    tool_error(
         format!(
             "{message}\nAllowed directories:\n{}",
-            allowed_dirs
-                .iter()
-                .map(|item| format!("- {item}"))
-                .collect::<Vec<_>>()
-                .join("\n")
+            allowed_dirs_text(&allowed_dirs)
         ),
         json!({
             "status": "error",
-            "code": "BadRequest",
+            "code": "InvalidCwd",
             "message": message,
             "tool": tool.name(),
+            "requestedCwd": requested_cwd,
+            "resolvedCwd": resolved_cwd,
             "allowedDirectories": allowed_dirs,
             "nextStep": "Ask the user which allowed directory should be used as cwd, then retry with cwd set to that directory or a child directory."
         }),
-    ))
+    )
 }
 
-fn configured_allowed_dirs(skills: &SkillsConfig) -> Vec<String> {
+fn allowed_dirs_text(allowed_dirs: &[String]) -> String {
+    if allowed_dirs.is_empty() {
+        return "- <none configured>".to_string();
+    }
+    allowed_dirs
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn configured_allowed_dir_paths(skills: &SkillsConfig) -> Vec<PathBuf> {
     skills
         .policy
         .path_guard
@@ -2262,7 +3231,7 @@ fn configured_allowed_dirs(skills: &SkillsConfig) -> Vec<String> {
         .iter()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        .map(|value| normalize_display_path(&normalize_root_path(PathBuf::from(value))))
+        .map(|value| normalize_root_path(PathBuf::from(value)))
         .collect()
 }
 
@@ -2832,6 +3801,77 @@ mod tests {
     }
 
     #[test]
+    fn builtin_cwd_outside_allowed_dirs_returns_choices() {
+        let temp_root = std::env::temp_dir().join(format!("mcp-gateway-{}", Uuid::new_v4()));
+        let allowed = temp_root.join("allowed");
+        let outside = temp_root.join("outside");
+        fs::create_dir_all(&allowed).expect("create allowed test dir");
+        fs::create_dir_all(&outside).expect("create outside test dir");
+
+        let mut skills = SkillsConfig::default();
+        skills.policy.path_guard.enabled = false;
+        skills.policy.path_guard.whitelist_dirs = vec![allowed.to_string_lossy().to_string()];
+        skills.policy.path_guard.on_violation = SkillPolicyAction::Allow;
+
+        let outside_cwd = outside.to_string_lossy().to_string();
+        let result = resolve_builtin_cwd(BuiltinTool::ShellCommand, &skills, Some(&outside_cwd))
+            .expect_err("outside cwd should be rejected");
+
+        assert!(result.is_error);
+        assert_eq!(result.structured["code"], "InvalidCwd");
+        assert_eq!(
+            result.structured["message"],
+            "cwd must be inside one configured allowed directory"
+        );
+        assert_eq!(
+            result.structured["allowedDirectories"][0],
+            normalize_display_path(&normalize_root_path(allowed.clone()))
+        );
+        assert_eq!(
+            result.structured["resolvedCwd"],
+            normalize_display_path(&normalize_root_path(outside))
+        );
+        assert!(result.text.contains("Allowed directories:"));
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn builtin_cwd_missing_with_multiple_allowed_dirs_returns_choices() {
+        let temp_root = std::env::temp_dir().join(format!("mcp-gateway-{}", Uuid::new_v4()));
+        let first = temp_root.join("first");
+        let second = temp_root.join("second");
+        fs::create_dir_all(&first).expect("create first test dir");
+        fs::create_dir_all(&second).expect("create second test dir");
+
+        let mut skills = SkillsConfig::default();
+        skills.policy.path_guard.whitelist_dirs = vec![
+            first.to_string_lossy().to_string(),
+            second.to_string_lossy().to_string(),
+        ];
+
+        let result = resolve_builtin_cwd(BuiltinTool::ShellCommand, &skills, None)
+            .expect_err("ambiguous cwd should be rejected");
+
+        assert!(result.is_error);
+        assert_eq!(result.structured["code"], "InvalidCwd");
+        assert_eq!(
+            result.structured["message"],
+            "cwd is required because multiple allowed directories are configured; ask the user which directory to operate in"
+        );
+        assert_eq!(
+            result.structured["allowedDirectories"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(result.structured["requestedCwd"].is_null());
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
     fn default_policy_allow_when_no_match() {
         let mut skills = SkillsConfig::default();
         skills.policy.rules.clear();
@@ -2887,7 +3927,24 @@ mod tests {
         assert!(text.contains("MCP Gateway"));
         assert!(text.contains("已拒绝此命令"));
         assert!(text.contains("confirm"));
-        assert!(text.contains("allow"));
+        assert!(text.contains("删除或禁用"));
+    }
+
+    #[test]
+    fn tool_args_require_exec_not_legacy_cmd() {
+        let args = decode_tool_args::<BuiltinShellArgs>(&json!({
+            "exec": "Get-ChildItem -Name",
+            "cwd": "D:/workspace"
+        }))
+        .expect("exec argument should decode");
+        assert_eq!(args.exec, "Get-ChildItem -Name");
+
+        let error = decode_tool_args::<BuiltinShellArgs>(&json!({
+            "cmd": "Get-ChildItem -Name",
+            "cwd": "D:/workspace"
+        }))
+        .expect_err("legacy cmd argument should not decode");
+        assert!(error.message().contains("missing field `exec`"));
     }
 
     #[test]
@@ -3414,7 +4471,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_use_metadata_name_and_cmd_schema() {
+    fn tool_definitions_use_metadata_name_and_exec_schema() {
         let discovered = vec![
             DiscoveredSkill {
                 skill: "alpha".to_string(),
@@ -3451,9 +4508,14 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .expect("shell description");
-        assert!(shell_description.contains("no separate SKILL.md"));
-        assert!(shell_description.contains("rg --files"));
-        assert!(shell_description.contains("Get-Content -Raw"));
+        assert!(shell_description.contains("builtin://shell_command/SKILL.md"));
+        assert!(shell_description.contains("MANDATORY BEFORE USE"));
+        assert!(shell_description.contains("you MUST first read its full SKILL.md"));
+        assert!(shell_description.contains("returned markdown content"));
+        assert!(!shell_description.contains("structuredContent.skillToken"));
+        assert!(shell_description.contains("Front matter summary:"));
+        assert!(shell_description.contains("SKILL.md URI:"));
+        assert!(!shell_description.contains("Prefer fast discovery commands"));
 
         let patch_tool = tools
             .as_array()
@@ -3467,9 +4529,9 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .expect("patch description");
-        assert!(patch_description.contains("*** Update File:"));
-        assert!(patch_description.contains("does not accept standard unified diff"));
-        assert!(patch_description.contains("-<h1>Old title</h1>"));
+        assert!(patch_description.contains("builtin://apply_patch/SKILL.md"));
+        assert!(patch_description.contains("Front matter summary:"));
+        assert!(!patch_description.contains("Minimal replacement:"));
 
         let alpha_tool = tools
             .as_array()
@@ -3479,13 +4541,13 @@ mod tests {
                     .find(|item| item.get("name").and_then(Value::as_str) == Some("alpha_skill"))
             })
             .expect("alpha skill tool exists");
-        let cmd_schema = alpha_tool
+        let exec_schema = alpha_tool
             .get("inputSchema")
             .and_then(|schema| schema.get("properties"))
-            .and_then(|props| props.get("cmd"))
-            .expect("cmd schema is present");
+            .and_then(|props| props.get("exec"))
+            .expect("exec schema is present");
         assert_eq!(
-            cmd_schema.get("type").and_then(Value::as_str),
+            exec_schema.get("type").and_then(Value::as_str),
             Some("string")
         );
 
@@ -3493,6 +4555,10 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .expect("tool description");
+        assert!(description.contains("MANDATORY BEFORE USE"));
+        assert!(description.contains("you MUST first call this skill tool"));
+        assert!(description.contains("returned markdown content"));
+        assert!(!description.contains("structuredContent.skillToken"));
         assert!(description.contains("Current OS:"));
         assert!(description.contains("Current datetime:"));
         assert!(description.contains("SKILL.md"));
@@ -3510,8 +4576,167 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            vec!["shell_command", "apply_patch", "alpha_skill", "beta_skill"]
+            vec![
+                "shell_command",
+                "apply_patch",
+                "chrome-cdp",
+                "chat-plus-adapter-debugger",
+                "alpha_skill",
+                "beta_skill"
+            ]
         );
+    }
+
+    #[test]
+    fn builtin_skill_docs_are_served_from_embedded_skill_md() {
+        let (tool, path) =
+            builtin_skill_doc_read("Get-Content -Raw builtin://shell_command/SKILL.md")
+                .expect("shell doc read");
+        let shell = builtin_skill_doc_result(tool, "doc", path, "abc123".to_string());
+        assert!(!shell.is_error);
+        assert!(shell.text.contains("# Shell Command"));
+        assert!(shell.text.contains("rg --files"));
+        assert!(shell.text.contains("abc123"));
+        assert_eq!(
+            shell.structured.get("builtinSkill").and_then(Value::as_str),
+            Some("shell_command")
+        );
+        assert!(shell.structured.get("skillToken").is_none());
+
+        let (tool, path) = builtin_skill_doc_read("cat builtin://apply_patch/SKILL.md")
+            .expect("apply_patch doc read");
+        let patch = builtin_skill_doc_result(tool, "doc", path, "def456".to_string());
+        assert!(!patch.is_error);
+        assert!(patch.text.contains("# Apply Patch"));
+        assert!(patch.text.contains("*** Update File: path/to/file"));
+        assert!(patch.text.contains("does not accept standard unified diff"));
+        assert!(patch.text.contains("def456"));
+        assert!(patch.structured.get("skillToken").is_none());
+
+        let (tool, path) = builtin_skill_doc_read("cat builtin://chrome-cdp/SKILL.md")
+            .expect("chrome-cdp doc read");
+        let cdp = builtin_skill_doc_result(tool, "doc", path, "987abc".to_string());
+        assert!(!cdp.is_error);
+        assert!(cdp.text.contains("# Chrome CDP"));
+        assert!(cdp.text.contains("chrome-devtools-axi"));
+        assert!(!cdp.text.contains("scripts/cdp.mjs launch"));
+
+        let (tool, path) = builtin_skill_doc_read(
+            "Get-Content -Raw builtin://chat-plus-adapter-debugger/SKILL.md",
+        )
+        .expect("chat-plus adapter debugger doc read");
+        let adapter = builtin_skill_doc_result(tool, "doc", path, "654fed".to_string());
+        assert!(!adapter.is_error);
+        assert!(adapter.text.contains("# Chat Plus Adapter Debugger"));
+        assert!(adapter.text.contains("decorateBubbles"));
+        assert!(adapter.text.contains("recorder install"));
+        assert!(!adapter.text.contains("{{RECORDER_SCRIPT_PATH}}"));
+        assert!(!adapter
+            .text
+            .contains("mcp-gateway/crates/gateway-http/builtin-skills"));
+        assert!(adapter.text.contains("recorder-command.mjs"));
+        let recorder_path = adapter
+            .structured
+            .get("runtimeAssets")
+            .and_then(|assets| assets.get("recorderScriptPath"))
+            .and_then(Value::as_str)
+            .expect("recorder script path");
+        assert!(recorder_path.ends_with("recorder-command.mjs"));
+        assert!(Path::new(recorder_path).is_file());
+    }
+
+    #[test]
+    fn external_skill_docs_put_token_only_in_markdown_content() {
+        let result = skill_doc_result(
+            "demo_skill",
+            "demo",
+            "cat SKILL.md",
+            "D:/skills/demo/SKILL.md".to_string(),
+            "# Demo Skill\n".to_string(),
+            "tok123".to_string(),
+        );
+
+        assert!(!result.is_error);
+        assert!(result.text.contains("# Demo Skill"));
+        assert!(result.text.contains("[skillToken]"));
+        assert!(result.text.contains("tok123"));
+        assert!(result.structured.get("skillToken").is_none());
+    }
+
+    #[test]
+    fn non_documentation_calls_require_skill_md_hash_token() {
+        let token = builtin_skill_token(BuiltinTool::ApplyPatch);
+        assert_eq!(token.len(), 6);
+        assert_eq!(
+            token,
+            skill_token_from_content(BUILTIN_APPLY_PATCH_SKILL_MD)
+        );
+
+        let missing = validate_skill_token_result(BuiltinTool::ApplyPatch.name(), &token, None)
+            .expect("missing token should be rejected");
+        assert!(missing.is_error);
+        assert_eq!(
+            missing.structured.get("code").and_then(Value::as_str),
+            Some("SkillTokenRequired")
+        );
+
+        let invalid =
+            validate_skill_token_result(BuiltinTool::ApplyPatch.name(), &token, Some("bad000"))
+                .expect("invalid token should be rejected");
+        assert!(invalid.text.contains("invalid skillToken"));
+
+        let accepted =
+            validate_skill_token_result(BuiltinTool::ApplyPatch.name(), &token, Some(&token));
+        assert!(accepted.is_none());
+    }
+
+    #[test]
+    fn builtin_chrome_cdp_command_parser_accepts_axi_forms() {
+        assert_eq!(
+            parse_builtin_chrome_axi_args("open https://example.com").expect("parse short"),
+            vec!["open", "https://example.com"]
+        );
+        assert_eq!(
+            parse_builtin_chrome_axi_args("npx -y chrome-devtools-axi@latest snapshot --full")
+                .expect("parse npx"),
+            vec!["snapshot", "--full"]
+        );
+        assert_eq!(
+            parse_builtin_chrome_axi_args("chrome-devtools-axi click @12").expect("parse package"),
+            vec!["click", "@12"]
+        );
+        assert!(parse_builtin_chrome_axi_args("scripts/cdp.mjs list").is_err());
+        assert!(parse_builtin_chrome_axi_args("npm install").is_err());
+    }
+
+    #[test]
+    fn chat_plus_recorder_action_parser_accepts_only_recorder_actions() {
+        assert_eq!(
+            parse_chat_plus_recorder_action("recorder install"),
+            Some("install")
+        );
+        assert_eq!(parse_chat_plus_recorder_action("records"), Some("records"));
+        assert_eq!(
+            parse_chat_plus_recorder_action("recorder records-full"),
+            Some("records-full")
+        );
+        assert_eq!(
+            parse_chat_plus_recorder_action("recorder performance"),
+            Some("performance")
+        );
+        assert_eq!(parse_chat_plus_recorder_action("raw-install"), None);
+        assert_eq!(parse_chat_plus_recorder_action("recorder network"), None);
+        assert_eq!(
+            parse_chat_plus_recorder_action("recorder install extra"),
+            None
+        );
+    }
+
+    #[test]
+    fn hex_encode_outputs_lowercase_hex() {
+        assert_eq!(hex_encode(b""), "");
+        assert_eq!(hex_encode(b"Az09"), "417a3039");
+        assert_eq!(hex_encode(&[0, 15, 16, 255]), "000f10ff");
     }
 
     #[test]
