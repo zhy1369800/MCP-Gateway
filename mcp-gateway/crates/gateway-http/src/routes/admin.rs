@@ -41,6 +41,10 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
         )
         .route(&format!("{}/admin/skills", prefix), get(get_skills))
         .route(
+            &format!("{}/admin/skills/events", prefix),
+            get(get_skill_events),
+        )
+        .route(
             &format!("{}/admin/skills/confirmations", prefix),
             get(get_pending_skill_confirmations),
         )
@@ -384,6 +388,32 @@ pub async fn get_skills(State(state): State<AppState>) -> ApiResult<Vec<SkillSum
         .await
         .map_err(response::err_response)?;
     Ok(response::ok(skills))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillEventsQuery {
+    after: Option<u64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/admin/skills/events",
+    params(("after" = Option<u64>, Query, description = "Return events with seq greater than this value")),
+    responses((status = 200, description = "Recent skill tool events"))
+)]
+pub async fn get_skill_events(
+    State(state): State<AppState>,
+    Query(query): Query<SkillEventsQuery>,
+) -> ApiResult<Value> {
+    let events = state.skills.list_tool_events(query.after).await;
+    let next_after = events
+        .last()
+        .map(|event| event.seq)
+        .unwrap_or(query.after.unwrap_or(0));
+    Ok(response::ok(json!({
+        "events": events,
+        "nextAfter": next_after
+    })))
 }
 
 #[utoipa::path(

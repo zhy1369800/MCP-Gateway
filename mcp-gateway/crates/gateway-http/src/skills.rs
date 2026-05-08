@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
 use std::net::TcpListener;
@@ -11,7 +11,7 @@ use gateway_core::{
     assign_child_to_gateway_job, wrap_windows_powershell_command_for_utf8, AppError, ErrorCode,
     GatewayConfig, SkillCommandRule, SkillPolicyAction, SkillsConfig,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
@@ -45,6 +45,13 @@ fn configure_skill_command(_command: &mut Command) {}
 pub struct SkillsService {
     confirmations: Arc<RwLock<HashMap<String, ConfirmationEntry>>>,
     discovery_cache: Arc<RwLock<Option<SkillDiscoveryCache>>>,
+    events: Arc<RwLock<SkillEventStore>>,
+}
+
+#[derive(Debug, Default)]
+struct SkillEventStore {
+    next_seq: u64,
+    events: VecDeque<SkillToolEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,8 +210,10 @@ enum PatchHunk {
 
 #[derive(Debug, Default)]
 struct PatchChunk {
+    change_context: Option<String>,
     old_lines: Vec<String>,
     new_lines: Vec<String>,
+    is_end_of_file: bool,
 }
 
 #[derive(Debug)]
@@ -217,6 +226,96 @@ struct PatchSummary {
     added: Vec<String>,
     modified: Vec<String>,
     deleted: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillToolEvent {
+    pub seq: u64,
+    pub timestamp: DateTime<Utc>,
+    pub call_id: String,
+    pub tool: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub affected_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<AppliedPatchDelta>,
+}
+
+#[derive(Debug, Default)]
+struct SkillToolEventData {
+    cwd: Option<String>,
+    preview: Option<String>,
+    text: Option<String>,
+    status: Option<String>,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+    affected_paths: Vec<String>,
+    changes: Option<Value>,
+    delta: Option<AppliedPatchDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedPatchDelta {
+    changes: Vec<AppliedPatchChange>,
+    exact: bool,
+}
+
+impl Default for AppliedPatchDelta {
+    fn default() -> Self {
+        Self {
+            changes: Vec::new(),
+            exact: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AppliedPatchChange {
+    Add {
+        path: String,
+        content: String,
+        overwritten_content: Option<String>,
+    },
+    Delete {
+        path: String,
+        content: Option<String>,
+    },
+    Update {
+        path: String,
+        move_path: Option<String>,
+        old_content: String,
+        new_content: String,
+        overwritten_move_content: Option<String>,
+    },
+}
+
+#[derive(Debug)]
+struct ApplyPatchFailure {
+    message: String,
+    delta: AppliedPatchDelta,
+}
+
+#[derive(Debug)]
+struct ApplyPatchOutcome {
+    summary: PatchSummary,
+    delta: AppliedPatchDelta,
 }
 
 #[derive(Debug)]
@@ -251,6 +350,33 @@ struct StreamCapturedOutput {
     truncated: bool,
 }
 
+#[derive(Clone)]
+struct SkillStreamEmitter {
+    service: SkillsService,
+    call_id: String,
+    tool: String,
+    kind: &'static str,
+}
+
+impl SkillStreamEmitter {
+    async fn emit(&self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.service
+            .record_tool_event_data(
+                &self.call_id,
+                &self.tool,
+                self.kind,
+                SkillToolEventData {
+                    text: Some(text),
+                    ..SkillToolEventData::default()
+                },
+            )
+            .await;
+    }
+}
+
 #[derive(Debug, Default)]
 struct StreamCaptureState {
     bytes: Vec<u8>,
@@ -269,6 +395,7 @@ impl SkillsService {
     const CONFIRMATION_STALE_PENDING_WINDOW: Duration = Duration::from_secs(75);
     const CONFIRMATION_RESOLVED_RETENTION_WINDOW: Duration = Duration::from_secs(120);
     const SKILL_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(3);
+    const MAX_TOOL_EVENTS: usize = 500;
 
     pub fn new() -> Self {
         Self::default()
@@ -460,6 +587,53 @@ impl SkillsService {
         Ok(summaries)
     }
 
+    pub async fn list_tool_events(&self, after: Option<u64>) -> Vec<SkillToolEvent> {
+        let after = after.unwrap_or(0);
+        let guard = self.events.read().await;
+        guard
+            .events
+            .iter()
+            .filter(|event| event.seq > after)
+            .cloned()
+            .collect()
+    }
+
+    async fn record_tool_event(&self, mut event: SkillToolEvent) {
+        let mut guard = self.events.write().await;
+        guard.next_seq = guard.next_seq.saturating_add(1);
+        event.seq = guard.next_seq;
+        guard.events.push_back(event);
+        while guard.events.len() > Self::MAX_TOOL_EVENTS {
+            guard.events.pop_front();
+        }
+    }
+
+    async fn record_tool_event_data(
+        &self,
+        call_id: &str,
+        tool: &str,
+        kind: &str,
+        data: SkillToolEventData,
+    ) {
+        self.record_tool_event(SkillToolEvent {
+            seq: 0,
+            timestamp: Utc::now(),
+            call_id: call_id.to_string(),
+            tool: tool.to_string(),
+            kind: kind.to_string(),
+            cwd: data.cwd,
+            preview: data.preview,
+            text: data.text,
+            status: data.status,
+            exit_code: data.exit_code,
+            duration_ms: data.duration_ms,
+            affected_paths: data.affected_paths,
+            changes: data.changes,
+            delta: data.delta,
+        })
+        .await;
+    }
+
     async fn execute_tool_call(
         &self,
         config: &GatewayConfig,
@@ -521,6 +695,7 @@ impl SkillsService {
         config: &GatewayConfig,
         args: BuiltinShellArgs,
     ) -> Result<ToolResult, AppError> {
+        let call_id = Uuid::new_v4().to_string();
         let command_preview = args.exec.trim().to_string();
         if command_preview.is_empty() {
             return Err(AppError::BadRequest("exec cannot be empty".to_string()));
@@ -554,7 +729,7 @@ impl SkillsService {
 
         if let Some(patch) = extract_apply_patch_from_shell_command(&command_preview) {
             return self
-                .execute_apply_patch_text(config, patch, &cwd, &command_preview)
+                .execute_apply_patch_text(config, patch, &cwd, &command_preview, &call_id)
                 .await;
         }
 
@@ -637,6 +812,17 @@ impl SkillsService {
             .max(1000);
         let max_output_bytes = config.skills.execution.max_output_bytes.max(1024);
         let (runner, runner_args) = shell_command_for_current_os(&command_preview);
+        self.record_tool_event_data(
+            &call_id,
+            BuiltinTool::ShellCommand.name(),
+            "started",
+            SkillToolEventData {
+                cwd: Some(normalize_display_path(&cwd)),
+                preview: Some(command_preview.clone()),
+                ..SkillToolEventData::default()
+            },
+        )
+        .await;
 
         let started = Instant::now();
         let mut command = Command::new(&runner);
@@ -654,6 +840,18 @@ impl SkillsService {
             timeout_ms,
             max_output_bytes,
             disable_truncation,
+            Some(SkillStreamEmitter {
+                service: self.clone(),
+                call_id: call_id.clone(),
+                tool: BuiltinTool::ShellCommand.name().to_string(),
+                kind: "stdoutDelta",
+            }),
+            Some(SkillStreamEmitter {
+                service: self.clone(),
+                call_id: call_id.clone(),
+                tool: BuiltinTool::ShellCommand.name().to_string(),
+                kind: "stderrDelta",
+            }),
         )
         .await?;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -671,6 +869,22 @@ impl SkillsService {
             "stdoutTruncated": output.stdout.truncated,
             "stderrTruncated": output.stderr.truncated
         });
+        self.record_tool_event_data(
+            &call_id,
+            BuiltinTool::ShellCommand.name(),
+            "finished",
+            SkillToolEventData {
+                status: Some(if output.status.success() {
+                    "completed".to_string()
+                } else {
+                    "failed".to_string()
+                }),
+                exit_code: Some(exit_code),
+                duration_ms: Some(duration_ms),
+                ..SkillToolEventData::default()
+            },
+        )
+        .await;
         let output_text = command_output_text(&stdout, &stderr);
 
         if output.status.success() {
@@ -688,6 +902,7 @@ impl SkillsService {
         config: &GatewayConfig,
         args: ApplyPatchArgs,
     ) -> Result<ToolResult, AppError> {
+        let call_id = Uuid::new_v4().to_string();
         if let Some(result) = validate_skill_token_result(
             BuiltinTool::ApplyPatch.name(),
             &builtin_skill_token(BuiltinTool::ApplyPatch),
@@ -702,7 +917,7 @@ impl SkillsService {
                 Ok(cwd) => cwd,
                 Err(result) => return Ok(result),
             };
-        self.execute_apply_patch_text(config, args.patch, &cwd, "apply_patch")
+        self.execute_apply_patch_text(config, args.patch, &cwd, "apply_patch", &call_id)
             .await
     }
 
@@ -712,6 +927,7 @@ impl SkillsService {
         patch: String,
         cwd: &Path,
         raw_command: &str,
+        call_id: &str,
     ) -> Result<ToolResult, AppError> {
         let patch_preview = patch.trim().to_string();
         if patch_preview.is_empty() {
@@ -720,6 +936,22 @@ impl SkillsService {
 
         let parsed = parse_apply_patch(&patch_preview)?;
         let affected_paths = patch_affected_paths(&parsed, cwd)?;
+        self.record_tool_event_data(
+            call_id,
+            BuiltinTool::ApplyPatch.name(),
+            "patchPreview",
+            SkillToolEventData {
+                cwd: Some(normalize_display_path(cwd)),
+                preview: Some(truncate_preview(&patch_preview, 4000)),
+                affected_paths: affected_paths
+                    .iter()
+                    .map(|path| normalize_display_path(path))
+                    .collect(),
+                changes: Some(patch_preview_changes(&parsed)),
+                ..SkillToolEventData::default()
+            },
+        )
+        .await;
         let access_decision = evaluate_paths_policy(&config.skills, &affected_paths);
         match access_decision {
             PolicyDecision::Deny(reason) => {
@@ -783,19 +1015,62 @@ impl SkillsService {
             PolicyDecision::Allow => {}
         }
 
-        let summary = apply_parsed_patch(&parsed, cwd)?;
-        let text = patch_summary_text(&summary);
-        Ok(tool_success(
-            text,
-            json!({
-                "status": "completed",
-                "tool": BuiltinTool::ApplyPatch.name(),
-                "cwd": normalize_display_path(cwd),
-                "added": summary.added,
-                "modified": summary.modified,
-                "deleted": summary.deleted
-            }),
-        ))
+        match apply_parsed_patch(&parsed, cwd) {
+            Ok(outcome) => {
+                let text = patch_summary_text(&outcome.summary);
+                self.record_tool_event_data(
+                    call_id,
+                    BuiltinTool::ApplyPatch.name(),
+                    "finished",
+                    SkillToolEventData {
+                        status: Some("completed".to_string()),
+                        delta: Some(outcome.delta.clone()),
+                        ..SkillToolEventData::default()
+                    },
+                )
+                .await;
+                Ok(tool_success(
+                    text,
+                    json!({
+                        "status": "completed",
+                        "tool": BuiltinTool::ApplyPatch.name(),
+                        "cwd": normalize_display_path(cwd),
+                        "added": outcome.summary.added,
+                        "modified": outcome.summary.modified,
+                        "deleted": outcome.summary.deleted,
+                        "delta": outcome.delta
+                    }),
+                ))
+            }
+            Err(failure) => {
+                self.record_tool_event_data(
+                    call_id,
+                    BuiltinTool::ApplyPatch.name(),
+                    "finished",
+                    SkillToolEventData {
+                        status: Some("failed".to_string()),
+                        delta: Some(failure.delta.clone()),
+                        ..SkillToolEventData::default()
+                    },
+                )
+                .await;
+                Ok(tool_error(
+                    format!(
+                        "{}\nCommitted patch delta exact: {}\nCommitted changes: {}",
+                        failure.message,
+                        failure.delta.exact,
+                        failure.delta.changes.len()
+                    ),
+                    json!({
+                        "status": "failed",
+                        "tool": BuiltinTool::ApplyPatch.name(),
+                        "cwd": normalize_display_path(cwd),
+                        "message": failure.message,
+                        "delta": failure.delta
+                    }),
+                ))
+            }
+        }
     }
 
     async fn handle_builtin_chrome_cdp(
@@ -883,8 +1158,15 @@ impl SkillsService {
             .stderr(std::process::Stdio::piped());
         configure_skill_command(&mut command);
 
-        let output =
-            execute_skill_command(&mut command, timeout_ms, max_output_bytes, false).await?;
+        let output = execute_skill_command(
+            &mut command,
+            timeout_ms,
+            max_output_bytes,
+            false,
+            None,
+            None,
+        )
+        .await?;
         let duration_ms = started.elapsed().as_millis() as u64;
         let stdout = output.stdout.text;
         let stderr = output.stderr.text;
@@ -1006,8 +1288,15 @@ impl SkillsService {
             .stderr(std::process::Stdio::piped());
         configure_skill_command(&mut command);
 
-        let output =
-            execute_skill_command(&mut command, timeout_ms, max_output_bytes, false).await?;
+        let output = execute_skill_command(
+            &mut command,
+            timeout_ms,
+            max_output_bytes,
+            false,
+            None,
+            None,
+        )
+        .await?;
         if !output.status.success() {
             let stdout = output.stdout.text;
             let stderr = output.stderr.text;
@@ -1251,6 +1540,8 @@ impl SkillsService {
             timeout_ms,
             max_output_bytes,
             disable_truncation,
+            None,
+            None,
         )
         .await?;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -2703,6 +2994,8 @@ async fn execute_skill_command(
     timeout_ms: u64,
     max_output_bytes: usize,
     disable_truncation: bool,
+    stdout_emitter: Option<SkillStreamEmitter>,
+    stderr_emitter: Option<SkillStreamEmitter>,
 ) -> Result<SkillCommandExecution, AppError> {
     let mut child = command
         .spawn()
@@ -2727,12 +3020,14 @@ async fn execute_skill_command(
         stdout_state.clone(),
         max_output_bytes,
         disable_truncation,
+        stdout_emitter,
     ));
     let stderr_task = tokio::spawn(capture_stream_output(
         stderr,
         stderr_state.clone(),
         max_output_bytes,
         disable_truncation,
+        stderr_emitter,
     ));
 
     let status = match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await {
@@ -2774,6 +3069,7 @@ async fn capture_stream_output<R>(
     shared_state: Arc<Mutex<StreamCaptureState>>,
     max_output_bytes: usize,
     disable_truncation: bool,
+    emitter: Option<SkillStreamEmitter>,
 ) -> Result<(), AppError>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -2786,6 +3082,11 @@ where
         })?;
         if read == 0 {
             break;
+        }
+        if let Some(emitter) = &emitter {
+            emitter
+                .emit(String::from_utf8_lossy(&chunk[..read]).to_string())
+                .await;
         }
 
         let mut state = match shared_state.lock() {
@@ -3275,7 +3576,8 @@ fn extract_apply_patch_from_shell_command(command: &str) -> Option<String> {
 }
 
 fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
-    let lines = input.lines().collect::<Vec<_>>();
+    let normalized_input = normalize_apply_patch_input(input);
+    let lines = normalized_input.lines().collect::<Vec<_>>();
     if lines.first().map(|line| line.trim()) != Some("*** Begin Patch") {
         return Err(AppError::BadRequest(
             "patch must start with *** Begin Patch".to_string(),
@@ -3336,10 +3638,14 @@ fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
                 let patch_line = lines[index];
                 if patch_line == "@@" || patch_line.starts_with("@@ ") {
                     push_patch_chunk(&mut chunks, &mut current);
+                    current.change_context = patch_line
+                        .strip_prefix("@@ ")
+                        .map(|context| context.to_string());
                     index += 1;
                     continue;
                 }
                 if patch_line == "*** End of File" {
+                    current.is_end_of_file = true;
                     index += 1;
                     continue;
                 }
@@ -3364,6 +3670,16 @@ fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
                 index += 1;
             }
             push_patch_chunk(&mut chunks, &mut current);
+            if chunks.is_empty()
+                || chunks
+                    .iter()
+                    .any(|chunk| chunk.old_lines.is_empty() && chunk.new_lines.is_empty())
+            {
+                return Err(AppError::BadRequest(format!(
+                    "update file hunk for path '{}' is empty",
+                    path.trim()
+                )));
+            }
             hunks.push(PatchHunk::UpdateFile {
                 path: path.trim().to_string(),
                 move_path,
@@ -3384,6 +3700,19 @@ fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
     Ok(ParsedPatch { hunks })
 }
 
+fn normalize_apply_patch_input(input: &str) -> String {
+    let trimmed = input.trim();
+    let lines = trimmed.lines().collect::<Vec<_>>();
+    if lines.len() >= 4 {
+        let first = lines.first().map(|line| line.trim());
+        let last = lines.last().map(|line| line.trim());
+        if matches!(first, Some("<<EOF" | "<<'EOF'" | "<<\"EOF\"")) && last == Some("EOF") {
+            return lines[1..lines.len() - 1].join("\n").trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn unsupported_patch_line_error(line: &str) -> AppError {
     AppError::BadRequest(format!(
         "unsupported patch line: {line}\n\nThis apply_patch tool does not accept standard unified diff headers such as '--- file' and '+++ file', and it does not accept Search/Replace prose blocks. Use this format instead:\n*** Begin Patch\n*** Update File: path/to/file\n@@\n-old line\n+new line\n*** End Patch\n\nFor adding a file:\n*** Begin Patch\n*** Add File: path/to/file\n+new line\n*** End Patch\n\nFor deleting a file:\n*** Begin Patch\n*** Delete File: path/to/file\n*** End Patch"
@@ -3398,7 +3727,11 @@ fn is_patch_file_header(line: &str) -> bool {
 }
 
 fn push_patch_chunk(chunks: &mut Vec<PatchChunk>, current: &mut PatchChunk) {
-    if current.old_lines.is_empty() && current.new_lines.is_empty() {
+    if current.old_lines.is_empty()
+        && current.new_lines.is_empty()
+        && current.change_context.is_none()
+        && !current.is_end_of_file
+    {
         return;
     }
     chunks.push(std::mem::take(current));
@@ -3427,6 +3760,40 @@ fn patch_affected_paths(parsed: &ParsedPatch, cwd: &Path) -> Result<Vec<PathBuf>
     Ok(paths)
 }
 
+fn patch_preview_changes(parsed: &ParsedPatch) -> Value {
+    let changes = parsed
+        .hunks
+        .iter()
+        .map(|hunk| match hunk {
+            PatchHunk::AddFile { path, contents } => json!({
+                "kind": "add",
+                "path": path,
+                "lines": contents.len()
+            }),
+            PatchHunk::DeleteFile { path } => json!({
+                "kind": "delete",
+                "path": path
+            }),
+            PatchHunk::UpdateFile {
+                path,
+                move_path,
+                chunks,
+            } => json!({
+                "kind": "update",
+                "path": path,
+                "movePath": move_path,
+                "chunks": chunks.iter().map(|chunk| json!({
+                    "context": chunk.change_context.as_deref(),
+                    "oldLines": chunk.old_lines.len(),
+                    "newLines": chunk.new_lines.len(),
+                    "endOfFile": chunk.is_end_of_file
+                })).collect::<Vec<_>>()
+            }),
+        })
+        .collect::<Vec<_>>();
+    json!(changes)
+}
+
 fn resolve_patch_path(cwd: &Path, raw: &str) -> Result<PathBuf, AppError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -3444,36 +3811,75 @@ fn resolve_patch_path(cwd: &Path, raw: &str) -> Result<PathBuf, AppError> {
     Ok(normalize_root_path(absolute))
 }
 
-fn apply_parsed_patch(parsed: &ParsedPatch, cwd: &Path) -> Result<PatchSummary, AppError> {
+fn apply_parsed_patch(
+    parsed: &ParsedPatch,
+    cwd: &Path,
+) -> Result<ApplyPatchOutcome, ApplyPatchFailure> {
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
+    let mut delta = AppliedPatchDelta::default();
 
     for hunk in &parsed.hunks {
         match hunk {
             PatchHunk::AddFile { path, contents } => {
-                let target = resolve_patch_path(cwd, path)?;
+                let target =
+                    resolve_patch_path(cwd, path).map_err(|error| patch_failure(error, &delta))?;
                 if target.exists() {
-                    return Err(AppError::Conflict(format!(
-                        "file already exists: {}",
-                        target.to_string_lossy()
-                    )));
+                    return Err(patch_failure(
+                        AppError::Conflict(format!(
+                            "file already exists: {}",
+                            target.to_string_lossy()
+                        )),
+                        &delta,
+                    ));
                 }
                 if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
+                    fs::create_dir_all(parent)
+                        .map_err(|error| patch_failure(error.into(), &delta))?;
                 }
-                fs::write(&target, format!("{}\n", contents.join("\n")))?;
+                let content = format!("{}\n", contents.join("\n"));
+                if let Err(error) = fs::write(&target, &content) {
+                    delta.exact = false;
+                    return Err(patch_failure(error.into(), &delta));
+                }
+                delta.changes.push(AppliedPatchChange::Add {
+                    path: normalize_display_path(&target),
+                    content,
+                    overwritten_content: None,
+                });
                 added.push(path.clone());
             }
             PatchHunk::DeleteFile { path } => {
-                let target = resolve_patch_path(cwd, path)?;
+                let target =
+                    resolve_patch_path(cwd, path).map_err(|error| patch_failure(error, &delta))?;
                 if target.is_dir() {
-                    return Err(AppError::BadRequest(format!(
-                        "delete file target is a directory: {}",
-                        target.to_string_lossy()
-                    )));
+                    return Err(patch_failure(
+                        AppError::BadRequest(format!(
+                            "delete file target is a directory: {}",
+                            target.to_string_lossy()
+                        )),
+                        &delta,
+                    ));
                 }
-                fs::remove_file(&target)?;
+                let content = match fs::read_to_string(&target) {
+                    Ok(content) => Some(content),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(_) => {
+                        delta.exact = false;
+                        None
+                    }
+                };
+                if content.is_none() {
+                    delta.exact = false;
+                }
+                if let Err(error) = fs::remove_file(&target) {
+                    return Err(patch_failure(error.into(), &delta));
+                }
+                delta.changes.push(AppliedPatchChange::Delete {
+                    path: normalize_display_path(&target),
+                    content,
+                });
                 deleted.push(path.clone());
             }
             PatchHunk::UpdateFile {
@@ -3481,36 +3887,90 @@ fn apply_parsed_patch(parsed: &ParsedPatch, cwd: &Path) -> Result<PatchSummary, 
                 move_path,
                 chunks,
             } => {
-                let source = resolve_patch_path(cwd, path)?;
+                let source =
+                    resolve_patch_path(cwd, path).map_err(|error| patch_failure(error, &delta))?;
                 if source.is_dir() {
-                    return Err(AppError::BadRequest(format!(
-                        "update file target is a directory: {}",
-                        source.to_string_lossy()
-                    )));
+                    return Err(patch_failure(
+                        AppError::BadRequest(format!(
+                            "update file target is a directory: {}",
+                            source.to_string_lossy()
+                        )),
+                        &delta,
+                    ));
                 }
-                let original = fs::read_to_string(&source)?;
-                let updated = apply_update_chunks(&original, chunks, &source)?;
+                let original = fs::read_to_string(&source)
+                    .map_err(|error| patch_failure(error.into(), &delta))?;
+                let updated = apply_update_chunks(&original, chunks, &source)
+                    .map_err(|error| patch_failure(error, &delta))?;
                 if let Some(move_path) = move_path {
-                    let target = resolve_patch_path(cwd, move_path)?;
+                    let target = resolve_patch_path(cwd, move_path)
+                        .map_err(|error| patch_failure(error, &delta))?;
+                    let overwritten_move_content = match fs::read_to_string(&target) {
+                        Ok(content) => Some(content),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(_) => {
+                            delta.exact = false;
+                            None
+                        }
+                    };
                     if let Some(parent) = target.parent() {
-                        fs::create_dir_all(parent)?;
+                        fs::create_dir_all(parent)
+                            .map_err(|error| patch_failure(error.into(), &delta))?;
                     }
-                    fs::write(&target, updated)?;
-                    fs::remove_file(&source)?;
+                    if let Err(error) = fs::write(&target, &updated) {
+                        delta.exact = false;
+                        return Err(patch_failure(error.into(), &delta));
+                    }
+                    let pending_index = delta.changes.len();
+                    delta.changes.push(AppliedPatchChange::Add {
+                        path: normalize_display_path(&target),
+                        content: updated.clone(),
+                        overwritten_content: overwritten_move_content.clone(),
+                    });
+                    if let Err(error) = fs::remove_file(&source) {
+                        return Err(patch_failure(error.into(), &delta));
+                    }
+                    delta.changes[pending_index] = AppliedPatchChange::Update {
+                        path: normalize_display_path(&source),
+                        move_path: Some(normalize_display_path(&target)),
+                        old_content: original,
+                        new_content: updated,
+                        overwritten_move_content,
+                    };
                     modified.push(move_path.clone());
                 } else {
-                    fs::write(&source, updated)?;
+                    if let Err(error) = fs::write(&source, &updated) {
+                        delta.exact = false;
+                        return Err(patch_failure(error.into(), &delta));
+                    }
+                    delta.changes.push(AppliedPatchChange::Update {
+                        path: normalize_display_path(&source),
+                        move_path: None,
+                        old_content: original,
+                        new_content: updated,
+                        overwritten_move_content: None,
+                    });
                     modified.push(path.clone());
                 }
             }
         }
     }
 
-    Ok(PatchSummary {
-        added,
-        modified,
-        deleted,
+    Ok(ApplyPatchOutcome {
+        summary: PatchSummary {
+            added,
+            modified,
+            deleted,
+        },
+        delta,
     })
+}
+
+fn patch_failure(error: AppError, delta: &AppliedPatchDelta) -> ApplyPatchFailure {
+    ApplyPatchFailure {
+        message: error.to_string(),
+        delta: delta.clone(),
+    }
 }
 
 fn apply_update_chunks(
@@ -3528,15 +3988,26 @@ fn apply_update_chunks(
 
     let mut cursor = 0;
     for chunk in chunks {
+        let context_start = chunk
+            .change_context
+            .as_ref()
+            .and_then(|context| find_context_line(&lines, context, cursor))
+            .map(|index| index + 1);
+        let search_start = context_start.unwrap_or(cursor);
         if chunk.old_lines.is_empty() {
-            let insert_at = lines.len();
+            let insert_at = if chunk.is_end_of_file {
+                lines.len()
+            } else {
+                search_start.min(lines.len())
+            };
             lines.splice(insert_at..insert_at, chunk.new_lines.clone());
             cursor = insert_at + chunk.new_lines.len();
             continue;
         }
 
-        let Some(found) = find_line_sequence(&lines, &chunk.old_lines, cursor)
-            .or_else(|| find_line_sequence(&lines, &chunk.old_lines, 0))
+        let Some(found) =
+            find_line_sequence(&lines, &chunk.old_lines, search_start, chunk.is_end_of_file)
+                .or_else(|| find_line_sequence(&lines, &chunk.old_lines, 0, chunk.is_end_of_file))
         else {
             return Err(AppError::BadRequest(format!(
                 "failed to find expected lines in {}:\n{}",
@@ -3552,15 +4023,97 @@ fn apply_update_chunks(
     Ok(format!("{}\n", lines.join("\n")))
 }
 
-fn find_line_sequence(lines: &[String], needle: &[String], start: usize) -> Option<usize> {
+fn find_context_line(lines: &[String], context: &str, start: usize) -> Option<usize> {
+    let needle = vec![context.to_string()];
+    find_line_sequence(lines, &needle, start, false)
+        .or_else(|| find_line_sequence(lines, &needle, 0, false))
+}
+
+fn find_line_sequence(
+    lines: &[String],
+    needle: &[String],
+    start: usize,
+    eof: bool,
+) -> Option<usize> {
     if needle.is_empty() {
         return Some(start.min(lines.len()));
     }
     if needle.len() > lines.len() {
         return None;
     }
-    (start..=lines.len() - needle.len())
-        .find(|index| lines[*index..*index + needle.len()] == *needle)
+    let max_start = lines.len() - needle.len();
+    let search_start = if eof {
+        max_start
+    } else if start > max_start {
+        return None;
+    } else {
+        start
+    };
+    for matcher in [
+        line_matches_exact as fn(&str, &str) -> bool,
+        line_matches_trim_end,
+        line_matches_trim,
+        line_matches_normalized,
+    ] {
+        for index in search_start..=max_start {
+            if sequence_matches(lines, needle, index, matcher) {
+                return Some(index);
+            }
+        }
+        if eof && start <= max_start && search_start != start {
+            for index in start..=max_start {
+                if sequence_matches(lines, needle, index, matcher) {
+                    return Some(index);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn sequence_matches(
+    lines: &[String],
+    needle: &[String],
+    index: usize,
+    matcher: fn(&str, &str) -> bool,
+) -> bool {
+    needle
+        .iter()
+        .enumerate()
+        .all(|(offset, expected)| matcher(&lines[index + offset], expected))
+}
+
+fn line_matches_exact(left: &str, right: &str) -> bool {
+    left == right
+}
+
+fn line_matches_trim_end(left: &str, right: &str) -> bool {
+    left.trim_end() == right.trim_end()
+}
+
+fn line_matches_trim(left: &str, right: &str) -> bool {
+    left.trim() == right.trim()
+}
+
+fn line_matches_normalized(left: &str, right: &str) -> bool {
+    normalize_patch_match_text(left) == normalize_patch_match_text(right)
+}
+
+fn normalize_patch_match_text(input: &str) -> String {
+    input
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 fn patch_summary_text(summary: &PatchSummary) -> String {
@@ -4403,7 +4956,7 @@ mod tests {
             .stderr(std::process::Stdio::piped());
         configure_skill_command(&mut command);
 
-        let error = execute_skill_command(&mut command, timeout_ms, 4096, false)
+        let error = execute_skill_command(&mut command, timeout_ms, 4096, false, None, None)
             .await
             .expect_err("command should time out");
 
@@ -4755,10 +5308,12 @@ mod tests {
         let affected = patch_affected_paths(&parsed, &sandbox).expect("affected paths");
         assert_eq!(affected.len(), 3);
 
-        let summary = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
-        assert_eq!(summary.added, vec!["added.txt"]);
-        assert_eq!(summary.modified, vec!["update.txt"]);
-        assert_eq!(summary.deleted, vec!["delete.txt"]);
+        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
+        assert_eq!(outcome.summary.added, vec!["added.txt"]);
+        assert_eq!(outcome.summary.modified, vec!["update.txt"]);
+        assert_eq!(outcome.summary.deleted, vec!["delete.txt"]);
+        assert!(outcome.delta.exact);
+        assert_eq!(outcome.delta.changes.len(), 3);
         assert_eq!(
             std::fs::read_to_string(sandbox.join("update.txt")).expect("read update"),
             "alpha\ngamma\n"
@@ -4783,5 +5338,53 @@ mod tests {
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn apply_patch_rejects_empty_update() {
+        let patch = "*** Begin Patch\n*** Update File: file.txt\n*** End Patch";
+        let error = parse_apply_patch(patch).expect_err("empty update should be rejected");
+        match error {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("empty"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_patch_accepts_heredoc_context_eof_and_fuzzy_match() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("update.txt");
+        std::fs::write(
+            &target,
+            "intro\nfn target\n  value: old\u{2013}dash  \ntail\n",
+        )
+        .expect("write update");
+
+        let patch = "<<'EOF'\n*** Begin Patch\n*** Update File: update.txt\n@@ fn target\n-  value: old-dash\n+  value: new-dash\n@@\n+done\n*** End of File\n*** End Patch\nEOF";
+        let parsed = parse_apply_patch(patch).expect("parse patch");
+        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
+        assert_eq!(outcome.summary.modified, vec!["update.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read update"),
+            "intro\nfn target\n  value: new-dash\ntail\ndone\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn apply_patch_failure_reports_committed_delta() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let patch = "*** Begin Patch\n*** Add File: added.txt\n+new file\n*** Delete File: missing.txt\n*** End Patch";
+        let parsed = parse_apply_patch(patch).expect("parse patch");
+        let failure = apply_parsed_patch(&parsed, &sandbox).expect_err("delete should fail");
+        assert_eq!(failure.delta.changes.len(), 1);
+        assert!(sandbox.join("added.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
 }

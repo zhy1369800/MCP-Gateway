@@ -66,9 +66,17 @@ Optional move line immediately after an update header:
 Inside an update hunk:
 
 - `@@` starts a hunk.
+- `@@ some context` starts a hunk and asks the gateway to first seek that context line, such as a function or class name, before locating the changed lines.
 - Lines beginning with one space are unchanged context.
 - Lines beginning with `-` are removed.
 - Lines beginning with `+` are added.
+- `*** End of File` after hunk lines anchors the hunk at the end of the file, which is useful for appends and tail edits.
+
+`*** Update File` must contain at least one non-empty hunk. Empty update sections are rejected.
+
+The gateway accepts patch text wrapped in a simple heredoc envelope such as `<<'EOF' ... EOF` and strips the envelope before parsing. This is only for compatibility with shell-shaped calls; when using the `apply_patch` tool directly, send the patch body itself.
+
+When locating update hunks, the gateway tries exact matching first, then progressively allows trailing whitespace differences, surrounding whitespace differences, and common Unicode punctuation differences such as typographic dashes and quotes. Use enough context anyway; fuzzy matching is a recovery aid, not a replacement for precise patches.
 
 This tool does not accept standard unified diff headers such as `--- file` and `+++ file`. It also does not accept prose "search/replace" blocks. Use only the grammar above.
 
@@ -116,6 +124,37 @@ Move and update a file:
 +new content
 *** End Patch
 ```
+
+Context-targeted update:
+
+```text
+*** Begin Patch
+*** Update File: src/app.rs
+@@ fn render_title
+-    "Old title"
++    "New title"
+*** End Patch
+```
+
+Append at end of file:
+
+```text
+*** Begin Patch
+*** Update File: CHANGELOG.md
+@@
++- Added gateway apply_patch delta reporting.
+*** End of File
+*** End Patch
+```
+
+## Result And Events
+
+On success, the result includes a summary plus a committed `delta` describing added, deleted, and updated file content. On failure, the result still includes the committed delta so callers can see whether any earlier file operations were already written. The `delta.exact` flag is `false` when the gateway cannot fully prove the recorded delta, for example after a failed write, unreadable overwritten content, or non-regular file behavior.
+
+The admin event stream at `/api/v2/admin/skills/events?after=<seq>` records patch lifecycle events:
+
+- `patchPreview` after parsing and before policy confirmation.
+- `finished` with final status and committed delta.
 
 ## Editing Practice
 

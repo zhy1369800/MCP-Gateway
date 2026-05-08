@@ -104,6 +104,8 @@ On Windows, do not compose destructive file operations by piping paths into anot
 
 The gateway captures stdout and stderr and returns them to the caller. Markdown file reads are allowed to return larger output so a model can progressively load `SKILL.md` files and other instructions. Other command output may be truncated according to the configured limit.
 
+For real command execution, the gateway also records lightweight tool events that admin clients can poll at `/api/v2/admin/skills/events?after=<seq>`. Shell commands emit `started`, `stdoutDelta`, `stderrDelta`, and `finished` events. These events are for UI/progress display; the final tool result remains the authoritative command result.
+
 Keep terminal output intentionally small. Terminal commands can produce unexpectedly large output, and sending that output back to the model wastes context and tokens.
 
 - Prefer reading in bounded chunks, then continue only if more context is needed.
