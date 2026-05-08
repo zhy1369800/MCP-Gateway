@@ -133,8 +133,18 @@ Use shell-based writes only as a fallback after `apply_patch` is clearly unsuita
 - Running a code generator, scaffold command, package manager, or project script.
 - Producing binary files or very large mechanical outputs that cannot reasonably be expressed as a patch.
 - Applying an upstream patch file with `git apply` or a dedicated patch tool.
+- Performing a large, repetitive, structure-preserving migration that is safer as a small script than as a huge hand-written patch.
 
 Avoid ad hoc terminal writes such as `echo ... > file`, here-documents, `Set-Content`, `Out-File`, or scripts that manually rewrite source files when `apply_patch` can express the change. If shell-based writing is used as a fallback, explain why `apply_patch` was not sufficient and keep the command narrowly scoped.
+
+For batch edits to structured files, use structured APIs where practical. Use a JSON parser for JSON instead of regex. For code files, prefer narrow block-aware transformations, generated code followed by the project formatter, or project-owned tooling. Avoid broad regex replacements over Rust, JSON, YAML, TOML, or source files unless the pattern is tightly scoped, verified against current content, and followed by targeted validation.
+
+After any shell-based write, inspect the resulting changes before reporting success:
+
+- Use `git diff -- path` for focused edits.
+- Use `git diff --stat` for multi-file edits.
+- Run the smallest meaningful formatter, parser, build, or test command for the touched files.
+- If the diff includes unrelated changes, stop and report the discrepancy instead of continuing blindly.
 
 ## Safety And Policy
 
@@ -174,5 +184,7 @@ If a command fails, use the exit code and stderr/stdout to decide the next step.
 2. Inspect before changing: `git status --short`, `rg --files`, targeted file reads.
 3. Use the narrowest command that answers the question.
 4. Prefer `apply_patch` for manual source edits.
-5. Run the smallest meaningful verification command after changes.
-6. Report what changed and what verification passed or could not be run.
+5. For large mechanical migrations, use a narrowly scoped script only after reading the current target content; prefer structured parsers over regex.
+6. Inspect the relevant diff with `git diff -- path` or `git diff --stat`.
+7. Run the smallest meaningful verification command after changes.
+8. Report what changed and what verification passed or could not be run.

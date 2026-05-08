@@ -151,13 +151,13 @@
           "reason": "Boot configuration command is blocked"
         },
         {
-          "id": "deny-netsh",
-          "action": "deny",
+          "id": "confirm-netsh",
+          "action": "confirm",
           "commandTree": [
             "netsh"
           ],
           "contains": [],
-          "reason": "Network configuration command is blocked"
+          "reason": "Network configuration command requires confirmation"
         },
         {
           "id": "deny-runas",
@@ -169,13 +169,13 @@
           "reason": "Privilege escalation command is blocked"
         },
         {
-          "id": "deny-taskkill",
-          "action": "deny",
+          "id": "confirm-taskkill",
+          "action": "confirm",
           "commandTree": [
             "taskkill"
           ],
           "contains": [],
-          "reason": "Process termination command is blocked"
+          "reason": "Process termination command requires confirmation"
         },
         {
           "id": "deny-diskpart",
@@ -214,13 +214,13 @@
           "reason": "Background transfer command is blocked"
         },
         {
-          "id": "deny-msiexec",
-          "action": "deny",
+          "id": "confirm-msiexec",
+          "action": "confirm",
           "commandTree": [
             "msiexec"
           ],
           "contains": [],
-          "reason": "Installer execution command is blocked"
+          "reason": "Installer execution command requires confirmation"
         },
         {
           "id": "deny-regsvr32",
@@ -250,31 +250,31 @@
           "reason": "Task scheduler command is blocked"
         },
         {
-          "id": "deny-sc",
-          "action": "deny",
+          "id": "confirm-sc",
+          "action": "confirm",
           "commandTree": [
             "sc"
           ],
           "contains": [],
-          "reason": "Service controller command is blocked"
+          "reason": "Service controller command requires confirmation"
         },
         {
-          "id": "deny-systemctl",
-          "action": "deny",
+          "id": "confirm-systemctl",
+          "action": "confirm",
           "commandTree": [
             "systemctl"
           ],
           "contains": [],
-          "reason": "Service controller command is blocked"
+          "reason": "Service controller command requires confirmation"
         },
         {
-          "id": "deny-service",
-          "action": "deny",
+          "id": "confirm-service",
+          "action": "confirm",
           "commandTree": [
             "service"
           ],
           "contains": [],
-          "reason": "Service controller command is blocked"
+          "reason": "Service controller command requires confirmation"
         },
         {
           "id": "deny-pkexec",
@@ -286,121 +286,121 @@
           "reason": "Privilege escalation command is blocked"
         },
         {
-          "id": "deny-kill",
-          "action": "deny",
+          "id": "confirm-kill",
+          "action": "confirm",
           "commandTree": [
             "kill"
           ],
           "contains": [],
-          "reason": "Process termination command is blocked"
+          "reason": "Process termination command requires confirmation"
         },
         {
-          "id": "deny-pkill",
-          "action": "deny",
+          "id": "confirm-pkill",
+          "action": "confirm",
           "commandTree": [
             "pkill"
           ],
           "contains": [],
-          "reason": "Process termination command is blocked"
+          "reason": "Process termination command requires confirmation"
         },
         {
-          "id": "deny-killall",
-          "action": "deny",
+          "id": "confirm-killall",
+          "action": "confirm",
           "commandTree": [
             "killall"
           ],
           "contains": [],
-          "reason": "Process termination command is blocked"
+          "reason": "Process termination command requires confirmation"
         },
         {
-          "id": "deny-apt",
-          "action": "deny",
+          "id": "confirm-apt",
+          "action": "confirm",
           "commandTree": [
             "apt"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-apt-get",
-          "action": "deny",
+          "id": "confirm-apt-get",
+          "action": "confirm",
           "commandTree": [
             "apt-get"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-yum",
-          "action": "deny",
+          "id": "confirm-yum",
+          "action": "confirm",
           "commandTree": [
             "yum"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-dnf",
-          "action": "deny",
+          "id": "confirm-dnf",
+          "action": "confirm",
           "commandTree": [
             "dnf"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-pacman",
-          "action": "deny",
+          "id": "confirm-pacman",
+          "action": "confirm",
           "commandTree": [
             "pacman"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-zypper",
-          "action": "deny",
+          "id": "confirm-zypper",
+          "action": "confirm",
           "commandTree": [
             "zypper"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-apk",
-          "action": "deny",
+          "id": "confirm-apk",
+          "action": "confirm",
           "commandTree": [
             "apk"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-brew",
-          "action": "deny",
+          "id": "confirm-brew",
+          "action": "confirm",
           "commandTree": [
             "brew"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-winget",
-          "action": "deny",
+          "id": "confirm-winget",
+          "action": "confirm",
           "commandTree": [
             "winget"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
-          "id": "deny-choco",
-          "action": "deny",
+          "id": "confirm-choco",
+          "action": "confirm",
           "commandTree": [
             "choco"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation"
         },
         {
           "id": "deny-iptables",
@@ -430,31 +430,31 @@
           "reason": "Firewall command is blocked"
         },
         {
-          "id": "deny-ip",
-          "action": "deny",
+          "id": "confirm-ip",
+          "action": "confirm",
           "commandTree": [
             "ip"
           ],
           "contains": [],
-          "reason": "Network configuration command is blocked"
+          "reason": "Network configuration command requires confirmation"
         },
         {
-          "id": "deny-ifconfig",
-          "action": "deny",
+          "id": "confirm-ifconfig",
+          "action": "confirm",
           "commandTree": [
             "ifconfig"
           ],
           "contains": [],
-          "reason": "Network configuration command is blocked"
+          "reason": "Network configuration command requires confirmation"
         },
         {
-          "id": "deny-route",
-          "action": "deny",
+          "id": "confirm-route",
+          "action": "confirm",
           "commandTree": [
             "route"
           ],
           "contains": [],
-          "reason": "Routing configuration command is blocked"
+          "reason": "Routing configuration command requires confirmation"
         },
         {
           "id": "deny-dd",
@@ -493,22 +493,22 @@
           "reason": "Disk partition command is blocked"
         },
         {
-          "id": "deny-mount",
-          "action": "deny",
+          "id": "confirm-mount",
+          "action": "confirm",
           "commandTree": [
             "mount"
           ],
           "contains": [],
-          "reason": "Mount command is blocked"
+          "reason": "Mount command requires confirmation"
         },
         {
-          "id": "deny-umount",
-          "action": "deny",
+          "id": "confirm-umount",
+          "action": "confirm",
           "commandTree": [
             "umount"
           ],
           "contains": [],
-          "reason": "Unmount command is blocked"
+          "reason": "Unmount command requires confirmation"
         },
         {
           "id": "deny-chattr",
@@ -574,22 +574,22 @@
           "reason": "Group management command is blocked"
         },
         {
-          "id": "deny-launchctl",
-          "action": "deny",
+          "id": "confirm-launchctl",
+          "action": "confirm",
           "commandTree": [
             "launchctl"
           ],
           "contains": [],
-          "reason": "macOS service controller command is blocked"
+          "reason": "macOS service controller command requires confirmation"
         },
         {
-          "id": "deny-defaults",
-          "action": "deny",
+          "id": "confirm-defaults",
+          "action": "confirm",
           "commandTree": [
             "defaults"
           ],
           "contains": [],
-          "reason": "macOS preferences write command is blocked"
+          "reason": "macOS preferences write command requires confirmation"
         },
         {
           "id": "deny-spctl",
@@ -619,13 +619,13 @@
           "reason": "macOS keychain command is blocked"
         },
         {
-          "id": "deny-osascript",
-          "action": "deny",
+          "id": "confirm-osascript",
+          "action": "confirm",
           "commandTree": [
             "osascript"
           ],
           "contains": [],
-          "reason": "AppleScript execution command is blocked"
+          "reason": "AppleScript execution command requires confirmation"
         },
         {
           "id": "deny-diskutil",
@@ -1048,6 +1048,114 @@
           ],
           "contains": [],
           "reason": "File unlink command requires confirmation"
+        },
+        {
+          "id": "confirm-mv",
+          "action": "confirm",
+          "commandTree": [
+            "mv"
+          ],
+          "contains": [],
+          "reason": "File move command requires confirmation"
+        },
+        {
+          "id": "confirm-move",
+          "action": "confirm",
+          "commandTree": [
+            "move"
+          ],
+          "contains": [],
+          "reason": "File move command requires confirmation"
+        },
+        {
+          "id": "confirm-move-item",
+          "action": "confirm",
+          "commandTree": [
+            "move-item"
+          ],
+          "contains": [],
+          "reason": "File move command requires confirmation"
+        },
+        {
+          "id": "confirm-cp",
+          "action": "confirm",
+          "commandTree": [
+            "cp"
+          ],
+          "contains": [],
+          "reason": "File copy command requires confirmation"
+        },
+        {
+          "id": "confirm-copy",
+          "action": "confirm",
+          "commandTree": [
+            "copy"
+          ],
+          "contains": [],
+          "reason": "File copy command requires confirmation"
+        },
+        {
+          "id": "confirm-copy-item",
+          "action": "confirm",
+          "commandTree": [
+            "copy-item"
+          ],
+          "contains": [],
+          "reason": "File copy command requires confirmation"
+        },
+        {
+          "id": "confirm-rename",
+          "action": "confirm",
+          "commandTree": [
+            "rename"
+          ],
+          "contains": [],
+          "reason": "File rename command requires confirmation"
+        },
+        {
+          "id": "confirm-ren",
+          "action": "confirm",
+          "commandTree": [
+            "ren"
+          ],
+          "contains": [],
+          "reason": "File rename command requires confirmation"
+        },
+        {
+          "id": "confirm-rename-item",
+          "action": "confirm",
+          "commandTree": [
+            "rename-item"
+          ],
+          "contains": [],
+          "reason": "File rename command requires confirmation"
+        },
+        {
+          "id": "confirm-new-item",
+          "action": "confirm",
+          "commandTree": [
+            "new-item"
+          ],
+          "contains": [],
+          "reason": "File/directory creation command requires confirmation"
+        },
+        {
+          "id": "confirm-mkdir",
+          "action": "confirm",
+          "commandTree": [
+            "mkdir"
+          ],
+          "contains": [],
+          "reason": "Directory creation command requires confirmation"
+        },
+        {
+          "id": "confirm-touch",
+          "action": "confirm",
+          "commandTree": [
+            "touch"
+          ],
+          "contains": [],
+          "reason": "File creation/timestamp update command requires confirmation"
         }
       ],
       "pathGuard": {

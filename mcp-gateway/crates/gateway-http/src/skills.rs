@@ -1107,7 +1107,7 @@ impl SkillsService {
                         "added": outcome.summary.added,
                         "modified": outcome.summary.modified,
                         "deleted": outcome.summary.deleted,
-                        "delta": outcome.delta
+                        "delta": patch_delta_for_model(&outcome.delta)
                     }),
                 ))
             }
@@ -1135,7 +1135,7 @@ impl SkillsService {
                         "tool": BuiltinTool::ApplyPatch.name(),
                         "cwd": normalize_display_path(cwd),
                         "message": failure.message,
-                        "delta": failure.delta
+                        "delta": patch_delta_for_model(&failure.delta)
                     }),
                 ))
             }
@@ -3542,10 +3542,11 @@ fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
             index += 1;
             continue;
         }
-        if let Some(path) = line.strip_prefix("*** Add File: ") {
+        let header = line.trim();
+        if let Some(path) = header.strip_prefix("*** Add File: ") {
             index += 1;
             let mut contents = Vec::new();
-            while index + 1 < lines.len() && !lines[index].starts_with("*** ") {
+            while index + 1 < lines.len() && !is_patch_file_header(lines[index]) {
                 let content_line = lines[index].strip_prefix('+').ok_or_else(|| {
                     AppError::BadRequest(format!(
                         "add file hunk lines must start with '+': {}",
@@ -3561,28 +3562,30 @@ fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
             });
             continue;
         }
-        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+        if let Some(path) = header.strip_prefix("*** Delete File: ") {
             hunks.push(PatchHunk::DeleteFile {
                 path: path.trim().to_string(),
             });
             index += 1;
             continue;
         }
-        if let Some(path) = line.strip_prefix("*** Update File: ") {
+        if let Some(path) = header.strip_prefix("*** Update File: ") {
             index += 1;
             let mut move_path = None;
             if index + 1 < lines.len() {
-                if let Some(target) = lines[index].strip_prefix("*** Move to: ") {
+                if let Some(target) = lines[index].trim().strip_prefix("*** Move to: ") {
                     move_path = Some(target.trim().to_string());
                     index += 1;
                 }
             }
             let mut chunks = Vec::new();
             let mut current = PatchChunk::default();
+            let mut in_chunk = false;
             while index + 1 < lines.len() && !is_patch_file_header(lines[index]) {
                 let patch_line = lines[index];
                 if patch_line == "@@" || patch_line.starts_with("@@ ") {
                     push_patch_chunk(&mut chunks, &mut current);
+                    in_chunk = true;
                     current.change_context = patch_line
                         .strip_prefix("@@ ")
                         .map(|context| context.to_string());
@@ -3590,22 +3593,34 @@ fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
                     continue;
                 }
                 if patch_line == "*** End of File" {
+                    in_chunk = true;
                     current.is_end_of_file = true;
                     index += 1;
                     continue;
                 }
                 let Some(prefix) = patch_line.chars().next() else {
+                    if in_chunk {
+                        current.old_lines.push(String::new());
+                        current.new_lines.push(String::new());
+                    }
                     index += 1;
                     continue;
                 };
                 let body = patch_line.get(1..).unwrap_or_default().to_string();
                 match prefix {
                     ' ' => {
+                        in_chunk = true;
                         current.old_lines.push(body.clone());
                         current.new_lines.push(body);
                     }
-                    '-' => current.old_lines.push(body),
-                    '+' => current.new_lines.push(body),
+                    '-' => {
+                        in_chunk = true;
+                        current.old_lines.push(body);
+                    }
+                    '+' => {
+                        in_chunk = true;
+                        current.new_lines.push(body);
+                    }
                     _ => {
                         return Err(AppError::BadRequest(format!(
                             "invalid update hunk line: {patch_line}"
@@ -3770,15 +3785,23 @@ fn apply_parsed_patch(
             PatchHunk::AddFile { path, contents } => {
                 let target =
                     resolve_patch_path(cwd, path).map_err(|error| patch_failure(error, &delta))?;
-                if target.exists() {
+                if target.is_dir() {
                     return Err(patch_failure(
-                        AppError::Conflict(format!(
-                            "file already exists: {}",
+                        AppError::BadRequest(format!(
+                            "add file target is a directory: {}",
                             target.to_string_lossy()
                         )),
                         &delta,
                     ));
                 }
+                let overwritten_content = match fs::read_to_string(&target) {
+                    Ok(content) => Some(content),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(_) => {
+                        delta.exact = false;
+                        None
+                    }
+                };
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)
                         .map_err(|error| patch_failure(error.into(), &delta))?;
@@ -3791,7 +3814,7 @@ fn apply_parsed_patch(
                 delta.changes.push(AppliedPatchChange::Add {
                     path: normalize_display_path(&target),
                     content,
-                    overwritten_content: None,
+                    overwritten_content,
                 });
                 added.push(path.clone());
             }
@@ -3916,6 +3939,53 @@ fn patch_failure(error: AppError, delta: &AppliedPatchDelta) -> ApplyPatchFailur
         message: error.to_string(),
         delta: delta.clone(),
     }
+}
+
+fn patch_delta_for_model(delta: &AppliedPatchDelta) -> Value {
+    let changes = delta
+        .changes
+        .iter()
+        .map(|change| match change {
+            AppliedPatchChange::Add {
+                path,
+                content,
+                overwritten_content,
+            } => json!({
+                "kind": "add",
+                "path": path,
+                "contentBytes": content.len(),
+                "overwritten": overwritten_content.is_some(),
+                "overwrittenContentBytes": overwritten_content.as_ref().map(String::len)
+            }),
+            AppliedPatchChange::Delete { path, content } => json!({
+                "kind": "delete",
+                "path": path,
+                "contentAvailable": content.is_some(),
+                "contentBytes": content.as_ref().map(String::len)
+            }),
+            AppliedPatchChange::Update {
+                path,
+                move_path,
+                old_content,
+                new_content,
+                overwritten_move_content,
+            } => json!({
+                "kind": "update",
+                "path": path,
+                "movePath": move_path,
+                "oldContentBytes": old_content.len(),
+                "newContentBytes": new_content.len(),
+                "overwrittenMoveContent": overwritten_move_content.is_some(),
+                "overwrittenMoveContentBytes": overwritten_move_content.as_ref().map(String::len)
+            }),
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "exact": delta.exact,
+        "changeCount": delta.changes.len(),
+        "changes": changes
+    })
 }
 
 fn apply_update_chunks(
@@ -4072,7 +4142,7 @@ fn patch_summary_text(summary: &PatchSummary) -> String {
     for path in &summary.deleted {
         lines.push(format!("D {path}"));
     }
-    lines.join("\n")
+    format!("{}\n", lines.join("\n"))
 }
 
 fn truncate_preview(input: &str, max_chars: usize) -> String {
@@ -5337,6 +5407,77 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn apply_patch_preserves_blank_lines_inside_update_hunks() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("update.txt");
+        std::fs::write(&target, "alpha\n\nbeta\n").expect("write update");
+
+        let patch = "*** Begin Patch\n*** Update File: update.txt\n@@\n alpha\n\n-beta\n+gamma\n*** End Patch";
+        let parsed = parse_apply_patch(patch).expect("parse patch");
+        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
+        assert_eq!(outcome.summary.modified, vec!["update.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read update"),
+            "alpha\n\ngamma\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn apply_patch_add_file_overwrites_like_codex_and_records_delta() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("existing.txt");
+        std::fs::write(&target, "old\n").expect("write existing");
+
+        let patch = "*** Begin Patch\n*** Add File: existing.txt\n+new\n*** End Patch";
+        let parsed = parse_apply_patch(patch).expect("parse patch");
+        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
+        assert_eq!(outcome.summary.added, vec!["existing.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read existing"),
+            "new\n"
+        );
+        match outcome.delta.changes.as_slice() {
+            [AppliedPatchChange::Add {
+                path,
+                content,
+                overwritten_content,
+            }] => {
+                assert!(Path::new(path).ends_with("existing.txt"));
+                assert_eq!(content, "new\n");
+                assert_eq!(overwritten_content.as_deref(), Some("old\n"));
+            }
+            other => panic!("unexpected delta: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn apply_patch_model_delta_omits_full_file_contents() {
+        let delta = AppliedPatchDelta {
+            exact: true,
+            changes: vec![AppliedPatchChange::Update {
+                path: "src/lib.rs".to_string(),
+                move_path: None,
+                old_content: "old\ncontent\n".to_string(),
+                new_content: "new\ncontent\n".to_string(),
+                overwritten_move_content: None,
+            }],
+        };
+
+        let model_delta = patch_delta_for_model(&delta);
+        let serialized = serde_json::to_string(&model_delta).expect("serialize model delta");
+        assert!(serialized.contains("oldContentBytes"));
+        assert!(serialized.contains("newContentBytes"));
+        assert!(!serialized.contains("old\\ncontent"));
+        assert!(!serialized.contains("new\\ncontent"));
     }
 
     #[test]
