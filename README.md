@@ -14,7 +14,7 @@ Common use case: convert local `stdio` MCP services into remotely accessible `SS
 - Unified `HTTP` forwarding: default `POST /api/v2/mcp/<serverName>`
 - Built-in authentication (`Admin Token` / `MCP Token`)
 - Built-in Skill MCP management in the `SKILLS` tab
-- Bundled Skills: `shell_command`, `apply_patch`, `multi_edit_file`, `chrome-cdp`, and `chat-plus-adapter-debugger`, each individually toggleable
+- Bundled Skills: `read_file`, `shell_command`, `multi_edit_file`, `chrome-cdp`, and `chat-plus-adapter-debugger`, each individually toggleable
 - External Skill root management with per-root enable switches and `SKILL.md` validation
 - Access boundary / path guard (allowed directories + out-of-scope policy)
 - Execution limits (timeout, max output)
@@ -90,7 +90,7 @@ Example (Playwright MCP):
 The `SKILLS` tab is used to enable and manage the built-in Skill MCP service:
 
 1. Set `External Skill Server Name` (default `__skills__`) and `Built-in Skill Server Name` (default `__builtin_skills__`). These two names must be different.
-2. Review bundled Skills: `shell_command`, `apply_patch`, `multi_edit_file`, `chrome-cdp`, and `chat-plus-adapter-debugger`. Each can be toggled individually. Note: `apply_patch` and `multi_edit_file` require `shell_command` to read their SKILL.md and obtain the token; if `shell_command` is disabled, those two tools will not function. Keep `shell_command` enabled if you need file editing tools.
+2. Review bundled Skills: `read_file`, `shell_command`, `multi_edit_file`, `chrome-cdp`, and `chat-plus-adapter-debugger`. Each can be toggled individually. Prefer `read_file` for source/config file reads before editing; it enforces allowed directories, returns line-numbered windows, and works with the editing tools.
 3. Add `External Skill Roots`, validate that `SKILL.md` exists directly in each directory, and enable only the roots you want to expose.
 4. Configure `Allowed Directories`. Commands and file edits must stay inside the allowed directories unless the selected violation action says otherwise.
 6. Choose the violation action: `allow / confirm / deny`.

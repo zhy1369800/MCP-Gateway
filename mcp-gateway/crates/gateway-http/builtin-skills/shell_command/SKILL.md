@@ -67,7 +67,7 @@ Useful patterns:
 - On Unix-like systems, commands are run through `sh -lc ...`. Write the `exec` string as POSIX shell code by default.
 - Commands are non-interactive. Do not launch editors, pagers, REPLs, curses/full-screen UIs, or prompts that wait for input.
 - Use `timeoutMs` when a command may take longer than the configured default. Keep it bounded.
-- Treat shell commands as the wrong default for manual file edits. When the task is to create, patch, or rewrite source/config/docs files by hand, prefer the bundled `apply_patch` skill first.
+- Treat shell commands as the wrong default for manual file edits. When the task is to create, edit, delete, move, or rewrite source/config/docs files by hand, prefer the bundled `multi_edit_file` skill first.
 
 ## Windows PowerShell Style
 
@@ -150,9 +150,15 @@ Common directories to exclude from broad counts and inventories include:
 
 Do not use broad recursive commands such as `Get-ChildItem -Recurse`, `find . -type f`, `dir /s`, `ls -R`, or `du` at the repository root for counts or inventories unless they include explicit exclusions or the workspace is already known to be small. If `rg` is unavailable, prefer `git ls-files` for repository counts. For untracked non-ignored files without `rg`, use the platform's recursive listing only with exclusion filters.
 
+## File Reading
+
+Use the bundled `read_file` skill as the default way to read text files. It returns stable line-numbered output, enforces allowed-directory boundaries before reading, rejects binary files, and limits large reads. Use terminal reads only when `read_file` is disabled, unavailable, or clearly unsuitable for the target file type.
+
+Use terminal commands for directory listings, search, generated command output, test/build output, and project-owned tools. Do not use `cat`, `Get-Content`, `type`, `sed`, `head`, or `tail` for ordinary source/config file reads when `read_file` can do the job.
+
 ## File Editing
 
-Use bundled editing skills as the default way to create, modify, or rewrite files by hand. Use `multi_edit_file` for multiple exact replacements inside one existing file. Use `apply_patch` for adding, deleting, moving, or small focused line-level patches.
+Use bundled editing skills as the default way to create, modify, or rewrite files by hand. Use `multi_edit_file` for exact replacements, multi-file edits, file creation, deletion, and moves.
 
 Prefer these editing skills because they give the gateway a clear set of affected paths before files are changed, produce reviewable deltas, and avoid fragile shell redirection or quoting problems.
 
@@ -160,11 +166,11 @@ Use shell-based writes only as a fallback after the bundled editing skills are c
 
 - Running a formatter that rewrites files.
 - Running a code generator, scaffold command, package manager, or project script.
-- Producing binary files or very large mechanical outputs that cannot reasonably be expressed as a patch.
+- Producing binary files or very large mechanical outputs that cannot reasonably be expressed as structured file operations.
 - Applying an upstream patch file with `git apply` or a dedicated patch tool.
-- Performing a large, repetitive, structure-preserving migration that is safer as a small script than as a huge hand-written patch.
+- Performing a large, repetitive, structure-preserving migration that is safer as a small script than as a huge hand-written edit request.
 
-Avoid ad hoc terminal writes such as `echo ... > file`, here-documents, `Set-Content`, `Out-File`, or scripts that manually rewrite source files when `multi_edit_file` or `apply_patch` can express the change. If shell-based writing is used as a fallback, explain why the bundled editing skills were not sufficient and keep the command narrowly scoped.
+Avoid ad hoc terminal writes such as `echo ... > file`, here-documents, `Set-Content`, `Out-File`, or scripts that manually rewrite source files when `multi_edit_file` can express the change. If shell-based writing is used as a fallback, explain why the bundled editing skill was not sufficient and keep the command narrowly scoped.
 
 For batch edits to structured files, use structured APIs where practical. Use a JSON parser for JSON instead of regex. For code files, prefer narrow block-aware transformations, generated code followed by the project formatter, or project-owned tooling. Avoid broad regex replacements over Rust, JSON, YAML, TOML, or source files unless the pattern is tightly scoped, verified against current content, and followed by targeted validation.
 
@@ -197,7 +203,7 @@ For real command execution, the gateway also records lightweight tool events tha
 Keep terminal output intentionally small. Terminal commands can produce unexpectedly large output, and sending that output back to the model wastes context and tokens.
 
 - Prefer reading in bounded chunks, then continue only if more context is needed.
-- For normal file reads, start around 120-200 lines rather than reading the whole file.
+- For normal file reads, prefer `read_file` with `offset` and `limit`. Start around 120-200 lines when inspecting a known region rather than reading the whole file.
 - On Windows, prefer `Get-Content -LiteralPath path -TotalCount 200` for the start of a file, or `Get-Content -LiteralPath path | Select-Object -Skip 200 -First 200` for the next chunk.
 - On Unix-like systems, prefer `sed -n '1,200p' path`, then `sed -n '201,400p' path` if needed.
 - Avoid `Get-Content -Raw`, `cat large-file`, broad `git diff`, recursive directory listings, and commands with unbounded logs unless the file or output is already known to be small.
@@ -211,9 +217,9 @@ If a command fails, use the exit code and stderr/stdout to decide the next step.
 
 1. Establish the workspace with `cwd`.
 2. Inspect before changing: `git status --short`, then use `rg`/`rg --files` to locate relevant files, symbols, call sites, config keys, and line numbers.
-3. Read only the targeted files or line ranges that `rg` identified. Avoid reading broad file contents as a discovery strategy.
+3. Use `read_file` to read only the targeted files or line ranges that `rg` identified. Avoid reading broad file contents as a discovery strategy.
 4. Use the narrowest command that answers the question.
-5. Prefer `apply_patch` for manual source edits.
+5. Prefer `multi_edit_file` for manual source edits.
 6. For large mechanical migrations, use a narrowly scoped script only after reading the current target content; prefer structured parsers over regex.
 7. Inspect the relevant diff with `git diff -- path` or `git diff --stat`.
 8. Run the smallest meaningful verification command after changes.

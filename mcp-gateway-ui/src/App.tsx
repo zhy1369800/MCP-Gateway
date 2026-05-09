@@ -5,6 +5,7 @@ import {
   Copy,
   Check,
   Code2,
+  FileText,
   List,
   Languages,
   Save,
@@ -371,8 +372,8 @@ function ensureSkillsConfig(
       maxOutputBytes: raw?.execution?.maxOutputBytes ?? 131072,
     },
     builtinTools: {
+      readFile: raw?.builtinTools?.readFile ?? true,
       shellCommand: raw?.builtinTools?.shellCommand ?? true,
-      applyPatch: raw?.builtinTools?.applyPatch ?? true,
       multiEditFile: raw?.builtinTools?.multiEditFile ?? true,
       taskPlanning: raw?.builtinTools?.taskPlanning ?? true,
       chromeCdp: raw?.builtinTools?.chromeCdp ?? true,
@@ -729,7 +730,6 @@ function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: {
 }
 
 function skillPreviewLabel(kind: string | undefined, t: ReturnType<typeof useT>): string {
-  if (kind === "patch") return t("patchPreview");
   if (kind === "edit") return t("editPreview");
   return t("commandPreview");
 }
@@ -2975,6 +2975,18 @@ function App() {
                   </div>
                   <div className="built-in-tools-grid">
                     <div className="built-in-tool">
+                      <FileText size={15} />
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">read_file</div>
+                        <div className="built-in-tool-desc">{t("builtInReadFileDesc")}</div>
+                      </div>
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.readFile ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, readFile: !prev.builtinTools.readFile } }))}
+                        title={skills.builtinTools.readFile ? t("enabledClick") : t("disabledClick")}
+                      />
+                    </div>
+                    <div className="built-in-tool">
                       <Code2 size={15} />
                       <div className="built-in-tool-body">
                         <div className="built-in-tool-name">shell_command</div>
@@ -2984,18 +2996,6 @@ function App() {
                         className={`toggle-btn ${skills.builtinTools.shellCommand ? "toggle-on" : "toggle-off"}`}
                         onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellCommand: !prev.builtinTools.shellCommand } }))}
                         title={skills.builtinTools.shellCommand ? t("enabledClick") : t("disabledClick")}
-                      />
-                    </div>
-                    <div className="built-in-tool">
-                      <Pencil size={15} />
-                      <div className="built-in-tool-body">
-                        <div className="built-in-tool-name">apply_patch</div>
-                        <div className="built-in-tool-desc">{t("builtInPatchDesc")}</div>
-                      </div>
-                      <button
-                        className={`toggle-btn ${skills.builtinTools.applyPatch ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, applyPatch: !prev.builtinTools.applyPatch } }))}
-                        title={skills.builtinTools.applyPatch ? t("enabledClick") : t("disabledClick")}
                       />
                     </div>
                     <div className="built-in-tool">

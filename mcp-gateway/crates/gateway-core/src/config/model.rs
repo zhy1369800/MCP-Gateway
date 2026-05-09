@@ -223,9 +223,9 @@ impl Default for SkillsExecutionConfig {
 #[serde(rename_all = "camelCase")]
 pub struct BuiltinToolsConfig {
     #[serde(default = "default_builtin_tool_enabled")]
-    pub shell_command: bool,
+    pub read_file: bool,
     #[serde(default = "default_builtin_tool_enabled")]
-    pub apply_patch: bool,
+    pub shell_command: bool,
     #[serde(default = "default_builtin_tool_enabled")]
     pub multi_edit_file: bool,
     #[serde(default = "default_builtin_tool_enabled")]
@@ -239,8 +239,8 @@ pub struct BuiltinToolsConfig {
 impl Default for BuiltinToolsConfig {
     fn default() -> Self {
         Self {
+            read_file: default_builtin_tool_enabled(),
             shell_command: default_builtin_tool_enabled(),
-            apply_patch: default_builtin_tool_enabled(),
             multi_edit_file: default_builtin_tool_enabled(),
             task_planning: default_builtin_tool_enabled(),
             chrome_cdp: default_builtin_tool_enabled(),

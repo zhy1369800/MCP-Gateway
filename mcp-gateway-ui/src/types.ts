@@ -61,8 +61,8 @@ export interface SkillRootEntry {
 }
 
 export interface BuiltinToolsConfig {
+  readFile: boolean;
   shellCommand: boolean;
-  applyPatch: boolean;
   multiEditFile: boolean;
   taskPlanning: boolean;
   chromeCdp: boolean;

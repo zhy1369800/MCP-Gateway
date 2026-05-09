@@ -1,9 +1,8 @@
 ---
 name: multi_edit_file
 description: >-
-  Apply multiple exact string replacements to one existing file in a single
-  write. Use this for larger or repeated source edits where Codex-style
-  apply_patch hunks would be noisy. First read the complete
+  Apply validated text file operations through the gateway: exact replacements,
+  multi-file edits, file creation, deletion, and moves. First read the complete
   builtin://multi_edit_file/SKILL.md to get skillToken; this SKILL.md read does
   not require skillToken. Do not use regex or partial reads to fetch only the
   token. Calls without the correct skillToken will fail and must be retried.
@@ -15,11 +14,13 @@ metadata:
 
 # Multi Edit File
 
-Use this bundled skill for manual edits to an existing text file when several exact replacements should be applied together. The gateway validates every edit against the current in-memory file content first, then writes the file once. If any edit fails, no file is written.
+Use this bundled skill for manual text-file changes. The gateway resolves all affected paths, validates the full request, applies exact replacements in memory, and only then commits the file operations. If validation fails, no file is written.
 
-Prefer `apply_patch` for creating, deleting, moving, or renaming files. Prefer `multi_edit_file` for multiple modifications inside one existing file.
+Prefer `multi_edit_file` over shell redirection or ad hoc scripts for normal source/config/docs edits because the gateway can audit affected paths, enforce allowed-directory policy, and return a compact delta.
 
-## Input
+## Input Modes
+
+Legacy single-file edit:
 
 ```json
 {
@@ -37,61 +38,104 @@ Prefer `apply_patch` for creating, deleting, moving, or renaming files. Prefer `
 }
 ```
 
-- `path` is the existing file to edit, relative to `cwd` unless absolute.
-- `edits` is an ordered list of replacements applied to the current file content in memory during this call.
+Multi-file exact edits:
+
+```json
+{
+  "files": [
+    {
+      "path": "src/a.rs",
+      "edits": [
+        {
+          "old_string": "old",
+          "new_string": "new"
+        }
+      ]
+    },
+    {
+      "path": "src/b.rs",
+      "edits": [
+        {
+          "old_string": "enabled: false",
+          "new_string": "enabled: true"
+        }
+      ]
+    }
+  ],
+  "cwd": "D:/path/to/workspace",
+  "skillToken": "..."
+}
+```
+
+Structured file operations:
+
+```json
+{
+  "operations": [
+    {
+      "type": "edit",
+      "path": "src/a.rs",
+      "edits": [
+        {
+          "old_string": "old",
+          "new_string": "new"
+        }
+      ]
+    },
+    {
+      "type": "create",
+      "path": "src/new.rs",
+      "content": "pub fn new_file() {}\n"
+    },
+    {
+      "type": "delete",
+      "path": "src/old.rs"
+    },
+    {
+      "type": "move",
+      "from": "src/name_old.rs",
+      "to": "src/name_new.rs"
+    }
+  ],
+  "cwd": "D:/path/to/workspace",
+  "skillToken": "..."
+}
+```
+
+## Fields
+
+- `path` plus top-level `edits` keeps compatibility with the original single-file mode.
+- `files` is for multiple existing files, each with its own `path` and `edits`.
+- `operations` supports `edit`, `create`, `delete`, and `move`.
+- `cwd` is required when more than one allowed directory is configured.
+- `skillToken` is required for normal calls. The documentation read for this SKILL.md is the only call that does not require it.
+
+Edit fields:
+
 - `old_string` must be exact current file text after normalizing CRLF to LF.
 - `new_string` is the replacement text.
 - `replace_all` replaces every occurrence of `old_string` in the current in-memory state.
 - `startLine` is optional and 1-based. Use it when the same `old_string` appears more than once and you want the closest match to that line.
 
+Create and move fields:
+
+- `content` is required for `create`.
+- `overwrite` defaults to false. When false, `create` or `move` fails if the target already exists.
+- `from` and `to` are required for `move`.
+
 ## Rules
 
-1. Read the relevant file content before editing.
-2. Treat every successful write as immediately committed to disk. If this file was just changed by `multi_edit_file`, `apply_patch`, a formatter, or another tool call, base the next edit on the latest file text, not on an older snapshot.
-3. Use exact `old_string` text copied from the current file, including indentation.
-4. Keep `old_string` as small as practical while still unique. If it is not unique, either set `replace_all` or provide `startLine`.
-5. Do not set `old_string` equal to `new_string`.
-6. Do not use an empty `old_string`; use `apply_patch` for insert-only changes.
-7. Order edits so a later `old_string` does not target text produced by an earlier `new_string`.
+1. Read relevant current content with `read_file` before editing unless the exact text is already in context. Use terminal reads only if `read_file` is disabled, unavailable, or unsuitable.
+2. Use exact `old_string` text copied from the current file, including indentation. Do not include the line-number prefix or tab from `read_file` output.
+3. Keep `old_string` as small as practical while still unique. If it is not unique, either set `replace_all` or provide `startLine`.
+4. Do not set `old_string` equal to `new_string`.
+5. Do not use an empty `old_string`; use `create` for new files, or include surrounding existing text for insertions.
+6. Do not touch the same path more than once in one call. Put all replacements for one file into a single `edit` operation.
+7. Order edits inside one file so a later `old_string` does not target text produced by an earlier `new_string`.
 8. For TS, TSX, JS, and JSX template strings, write `${...}` exactly. Do not escape the dollar sign as `\${...}` unless the target source code truly needs a literal `${...}` string.
-
-## Examples
-
-Multiple targeted edits:
-
-```json
-{
-  "path": "src/config.rs",
-  "edits": [
-    {
-      "old_string": "action: SkillPolicyAction::Deny,",
-      "new_string": "action: SkillPolicyAction::Confirm,",
-      "startLine": 120
-    },
-    {
-      "old_string": "reason: \"blocked\".to_string(),",
-      "new_string": "reason: \"requires confirmation\".to_string(),",
-      "startLine": 121
-    }
-  ]
-}
-```
-
-Rename throughout one file:
-
-```json
-{
-  "path": "src/lib.rs",
-  "edits": [
-    {
-      "old_string": "old_name",
-      "new_string": "new_name",
-      "replace_all": true
-    }
-  ]
-}
-```
 
 ## Result And Events
 
-On success, the result includes a compact delta with byte counts and affected path metadata. It also includes a `warnings` array when the gateway detects likely syntax hazards such as unbalanced delimiters or accidental `\${...}` in TS/JS files. Warnings do not block the write; inspect and verify them before continuing. The admin event stream records an `editPreview` event before policy confirmation and a `finished` event after completion.
+On success, the result includes `added`, `modified`, `deleted`, `moved`, a compact `delta` with byte counts and affected path metadata, and a `warnings` array when the gateway detects likely syntax hazards such as unbalanced delimiters or accidental `\${...}` in TS/JS files. Warnings do not block the write; inspect and verify them before continuing.
+
+The admin event stream records an `editPreview` event before policy confirmation and a `finished` event after completion.

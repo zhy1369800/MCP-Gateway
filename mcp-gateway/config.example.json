@@ -1169,8 +1169,8 @@
       "maxOutputBytes": 131072
     },
     "builtinTools": {
+      "readFile": true,
       "shellCommand": true,
-      "applyPatch": true,
       "multiEditFile": true,
       "chromeCdp": true,
       "chatPlusAdapterDebugger": true

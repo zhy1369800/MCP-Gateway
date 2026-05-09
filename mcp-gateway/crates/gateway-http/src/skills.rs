@@ -4,6 +4,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -35,7 +36,7 @@ include!(concat!(env!("OUT_DIR"), "/bundled_tools.rs"));
 
 const BUILTIN_SHELL_COMMAND_SKILL_MD: &str =
     include_str!("../builtin-skills/shell_command/SKILL.md");
-const BUILTIN_APPLY_PATCH_SKILL_MD: &str = include_str!("../builtin-skills/apply_patch/SKILL.md");
+const BUILTIN_READ_FILE_SKILL_MD: &str = include_str!("../builtin-skills/read_file/SKILL.md");
 const BUILTIN_MULTI_EDIT_FILE_SKILL_MD: &str =
     include_str!("../builtin-skills/multi_edit_file/SKILL.md");
 const BUILTIN_TASK_PLANNING_SKILL_MD: &str =
@@ -167,7 +168,6 @@ struct PlanningState {
     plan: Vec<PlanItem>,
     explanation: Option<String>,
     consecutive_shell_commands: u32,
-    consecutive_apply_patch_failures: u32,
     consecutive_multi_edit_file_failures: u32,
     updated_at: DateTime<Utc>,
 }
@@ -257,6 +257,23 @@ struct SkillCommandArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ReadFileArgs {
+    #[serde(alias = "filePath", alias = "file_path")]
+    path: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    skill_token: Option<String>,
+    #[serde(default)]
+    planning_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BuiltinShellArgs {
     exec: String,
     #[serde(default)]
@@ -271,8 +288,15 @@ struct BuiltinShellArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ApplyPatchArgs {
-    patch: String,
+struct MultiEditFileArgs {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    edits: Vec<MultiEditFileEdit>,
+    #[serde(default)]
+    files: Vec<MultiEditFileSpec>,
+    #[serde(default)]
+    operations: Vec<MultiEditFileOperation>,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
@@ -283,15 +307,10 @@ struct ApplyPatchArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MultiEditFileArgs {
+struct MultiEditFileSpec {
     path: String,
+    #[serde(default)]
     edits: Vec<MultiEditFileEdit>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    skill_token: Option<String>,
-    #[serde(default)]
-    planning_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,7 +334,7 @@ struct TaskPlanningArgs {
     skill_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MultiEditFileEdit {
     #[serde(alias = "oldString")]
     old_string: String,
@@ -325,6 +344,34 @@ struct MultiEditFileEdit {
     replace_all: bool,
     #[serde(default, alias = "startLine")]
     start_line: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum MultiEditFileOperation {
+    #[serde(alias = "update")]
+    Edit {
+        path: String,
+        edits: Vec<MultiEditFileEdit>,
+    },
+    Create {
+        path: String,
+        content: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    Delete {
+        path: String,
+    },
+    #[serde(alias = "rename")]
+    Move {
+        #[serde(alias = "fromPath", alias = "from_path")]
+        from: String,
+        #[serde(alias = "toPath", alias = "to_path")]
+        to: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -350,8 +397,8 @@ struct CommandInvocation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuiltinTool {
+    ReadFile,
     ShellCommand,
-    ApplyPatch,
     MultiEditFile,
     TaskPlanning,
     ChromeCdp,
@@ -367,40 +414,11 @@ struct ConfirmationMetadata {
 }
 
 #[derive(Debug)]
-#[allow(clippy::enum_variant_names)]
-enum PatchHunk {
-    AddFile {
-        path: String,
-        contents: Vec<String>,
-    },
-    DeleteFile {
-        path: String,
-    },
-    UpdateFile {
-        path: String,
-        move_path: Option<String>,
-        chunks: Vec<PatchChunk>,
-    },
-}
-
-#[derive(Debug, Default)]
-struct PatchChunk {
-    change_context: Option<String>,
-    old_lines: Vec<String>,
-    new_lines: Vec<String>,
-    is_end_of_file: bool,
-}
-
-#[derive(Debug)]
-struct ParsedPatch {
-    hunks: Vec<PatchHunk>,
-}
-
-#[derive(Debug)]
-struct PatchSummary {
+struct FileEditSummary {
     added: Vec<String>,
     modified: Vec<String>,
     deleted: Vec<String>,
+    moved: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -428,7 +446,7 @@ pub struct SkillToolEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<AppliedPatchDelta>,
+    pub delta: Option<FileEditDelta>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -443,18 +461,18 @@ struct SkillToolEventData {
     duration_ms: Option<u64>,
     affected_paths: Vec<String>,
     changes: Option<Value>,
-    delta: Option<AppliedPatchDelta>,
+    delta: Option<FileEditDelta>,
     warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct AppliedPatchDelta {
-    changes: Vec<AppliedPatchChange>,
+pub struct FileEditDelta {
+    changes: Vec<FileEditChange>,
     exact: bool,
 }
 
-impl Default for AppliedPatchDelta {
+impl Default for FileEditDelta {
     fn default() -> Self {
         Self {
             changes: Vec::new(),
@@ -465,7 +483,7 @@ impl Default for AppliedPatchDelta {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-pub enum AppliedPatchChange {
+pub enum FileEditChange {
     Add {
         path: String,
         content: String,
@@ -485,15 +503,15 @@ pub enum AppliedPatchChange {
 }
 
 #[derive(Debug)]
-struct ApplyPatchFailure {
+struct FileEditFailure {
     message: String,
-    delta: AppliedPatchDelta,
+    delta: FileEditDelta,
 }
 
 #[derive(Debug)]
-struct ApplyPatchOutcome {
-    summary: PatchSummary,
-    delta: AppliedPatchDelta,
+struct FileEditOutcome {
+    summary: FileEditSummary,
+    delta: FileEditDelta,
     warnings: Vec<String>,
 }
 
@@ -965,7 +983,6 @@ impl SkillsService {
             return PlanningSuccessHints::default();
         };
 
-        state.consecutive_apply_patch_failures = 0;
         state.consecutive_multi_edit_file_failures = 0;
         let shell_command_reminder = if tool == BuiltinTool::ShellCommand {
             if shell_command.is_some_and(shell_command_starts_with_rg) {
@@ -989,10 +1006,33 @@ impl SkillsService {
         };
 
         let planning_reminder = if let Some((idx, item)) = current_plan_item(&state.plan) {
-            Some(format!(
-                "Current plan item #{idx} is in_progress: \"{}\". If this tool completed that item, call task-planning with {{\"action\":\"set_status\",\"planningId\":\"{}\",\"status\":\"completed\"}}; otherwise keep reusing the same planningId.",
-                item.step, state.planning_id
-            ))
+            let next_item = state
+                .plan
+                .iter()
+                .enumerate()
+                .skip(idx)
+                .find(|(_, item)| item.status == PlanItemStatus::Pending)
+                .map(|(next_idx, next_item)| (next_idx + 1, next_item));
+            let mut reminder = format!(
+                "Current plan item #{idx} is in_progress: \"{}\".",
+                item.step
+            );
+            if let Some((next_idx, next_item)) = next_item {
+                reminder.push_str(&format!(
+                    " Next plan item #{next_idx}: \"{}\".",
+                    next_item.step
+                ));
+                reminder.push_str(&format!(
+                    " Remember to decide whether the current plan item is complete and whether to start the next plan item. If complete, call task-planning with {{\"action\":\"set_status\",\"planningId\":\"{}\",\"item\":{idx},\"status\":\"completed\"}}; the gateway will start the next pending item when appropriate.",
+                    state.planning_id
+                ));
+            } else {
+                reminder.push_str(&format!(
+                    " Remember to decide whether this final plan item is complete and whether the whole plan is done. If complete, call task-planning with {{\"action\":\"set_status\",\"planningId\":\"{}\",\"item\":{idx},\"status\":\"completed\"}}.",
+                    state.planning_id
+                ));
+            }
+            Some(reminder)
         } else {
             Some(format!(
                 "No plan item is currently in_progress for planningId {}. If work moved to a specific item, call task-planning with {{\"action\":\"set_status\",\"planningId\":\"{}\",\"item\":<1-based item number>,\"status\":\"in_progress\"}}.",
@@ -1027,31 +1067,18 @@ impl SkillsService {
         let state = guard.get_mut(&key)?;
         state.consecutive_shell_commands = 0;
 
-        let (tool_name, count) = match tool {
-            BuiltinTool::ApplyPatch => {
-                state.consecutive_apply_patch_failures =
-                    state.consecutive_apply_patch_failures.saturating_add(1);
-                state.consecutive_multi_edit_file_failures = 0;
-                (
-                    BuiltinTool::ApplyPatch.name(),
-                    state.consecutive_apply_patch_failures,
-                )
-            }
-            BuiltinTool::MultiEditFile => {
-                state.consecutive_multi_edit_file_failures =
-                    state.consecutive_multi_edit_file_failures.saturating_add(1);
-                state.consecutive_apply_patch_failures = 0;
-                (
-                    BuiltinTool::MultiEditFile.name(),
-                    state.consecutive_multi_edit_file_failures,
-                )
-            }
-            _ => return None,
-        };
+        if tool != BuiltinTool::MultiEditFile {
+            return None;
+        }
+
+        state.consecutive_multi_edit_file_failures =
+            state.consecutive_multi_edit_file_failures.saturating_add(1);
+        let tool_name = BuiltinTool::MultiEditFile.name();
+        let count = state.consecutive_multi_edit_file_failures;
 
         if count >= 3 {
             Some(format!(
-                "{tool_name} has failed {count} times in a row for this planningId. Consider switching write strategy: use the other edit tool, simplify the patch, inspect the exact file content first, or use shell_command with a focused script when structured edits keep failing."
+                "{tool_name} has failed {count} times in a row for this planningId. Consider simplifying the edit operation, inspecting the exact file content first, splitting unrelated changes, or using shell_command with a focused script when structured edits keep failing."
             ))
         } else {
             None
@@ -1072,14 +1099,14 @@ impl SkillsService {
             )));
         }
         match tool {
+            BuiltinTool::ReadFile => {
+                let args = decode_tool_args::<ReadFileArgs>(&arguments)?;
+                self.handle_builtin_read_file(config, args, planning_scope)
+                    .await
+            }
             BuiltinTool::ShellCommand => {
                 let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
                 self.handle_builtin_shell_command(config, args, planning_scope)
-                    .await
-            }
-            BuiltinTool::ApplyPatch => {
-                let args = decode_tool_args::<ApplyPatchArgs>(&arguments)?;
-                self.handle_builtin_apply_patch(config, args, planning_scope)
                     .await
             }
             BuiltinTool::MultiEditFile => {
@@ -1101,6 +1128,222 @@ impl SkillsService {
                 let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
                 self.handle_builtin_chat_plus_adapter_debugger(config, args, planning_scope)
                     .await
+            }
+        }
+    }
+
+    async fn handle_builtin_read_file(
+        &self,
+        config: &GatewayConfig,
+        args: ReadFileArgs,
+        planning_scope: &str,
+    ) -> Result<ToolResult, AppError> {
+        let call_id = Uuid::new_v4().to_string();
+        let requested_path = args.path.trim();
+        if requested_path.is_empty() {
+            return Err(AppError::BadRequest("path cannot be empty".to_string()));
+        }
+
+        if let Some((tool, matched_path)) = builtin_skill_doc_arg(requested_path) {
+            return Ok(builtin_skill_read_doc_result(
+                tool,
+                matched_path,
+                builtin_skill_token(tool),
+                Self::planning_enabled(config),
+            ));
+        }
+
+        if let Some(result) = validate_skill_token_result(
+            BuiltinTool::ReadFile.name(),
+            &builtin_skill_token(BuiltinTool::ReadFile),
+            args.skill_token.as_deref(),
+        ) {
+            return Ok(result);
+        }
+
+        if let Some(result) = self
+            .check_planning_gate(
+                config,
+                planning_scope,
+                BuiltinTool::ReadFile,
+                args.planning_id.as_deref(),
+            )
+            .await
+        {
+            return Ok(result);
+        }
+
+        let cwd =
+            match resolve_builtin_cwd(BuiltinTool::ReadFile, &config.skills, args.cwd.as_deref()) {
+                Ok(value) => value,
+                Err(result) => return Ok(result),
+            };
+        let target = resolve_file_operation_path(&cwd, requested_path)?;
+        self.record_tool_event_data(
+            &call_id,
+            BuiltinTool::ReadFile.name(),
+            "started",
+            SkillToolEventData {
+                cwd: Some(normalize_display_path(&cwd)),
+                affected_paths: vec![normalize_display_path(&target)],
+                preview: Some(read_file_window_preview(args.offset, args.limit)),
+                ..SkillToolEventData::default()
+            },
+        )
+        .await;
+
+        match evaluate_paths_policy(&config.skills, std::slice::from_ref(&target)) {
+            PolicyDecision::Deny(reason) => {
+                return Ok(tool_error(
+                    mcp_gateway_policy_denied_text(&reason),
+                    json!({
+                        "status": "blocked",
+                        "reason": reason,
+                        "tool": BuiltinTool::ReadFile.name(),
+                        "cwd": normalize_display_path(&cwd),
+                        "policyAction": "deny",
+                        "policyHelp": mcp_gateway_policy_denied_help(),
+                        "affectedPaths": [normalize_display_path(&target)]
+                    }),
+                ));
+            }
+            PolicyDecision::Confirm(reason) => {
+                let metadata = ConfirmationMetadata {
+                    kind: "read".to_string(),
+                    cwd: normalize_display_path(&cwd),
+                    affected_paths: vec![normalize_display_path(&target)],
+                    preview: format!("Read {}", normalize_display_path(&target)),
+                };
+                let confirmation_id = match self
+                    .create_confirmation_with_metadata(
+                        "builtin:read_file",
+                        "Read File",
+                        &[String::from("read_file")],
+                        requested_path,
+                        &reason,
+                        metadata,
+                    )
+                    .await
+                {
+                    CreateConfirmationResult::Created(c) | CreateConfirmationResult::Reused(c) => {
+                        c.id
+                    }
+                    CreateConfirmationResult::AlreadyTimedOut(id) => id,
+                };
+
+                match self
+                    .wait_for_confirmation_decision(
+                        &confirmation_id,
+                        Self::CONFIRMATION_DECISION_TIMEOUT,
+                        Duration::from_millis(250),
+                    )
+                    .await
+                {
+                    ConfirmationWaitOutcome::Approved => {}
+                    ConfirmationWaitOutcome::Rejected => {
+                        return Ok(tool_error(
+                            format!("read_file rejected by user: {reason}"),
+                            json!({
+                                "status": "rejected",
+                                "reason": reason,
+                                "tool": BuiltinTool::ReadFile.name(),
+                                "confirmationId": confirmation_id,
+                                "affectedPaths": [normalize_display_path(&target)]
+                            }),
+                        ));
+                    }
+                    ConfirmationWaitOutcome::TimedOut => {
+                        return Ok(tool_error(
+                            format!("read_file confirmation timed out: {reason}"),
+                            json!({
+                                "status": "timeout",
+                                "reason": reason,
+                                "tool": BuiltinTool::ReadFile.name(),
+                                "confirmationId": confirmation_id,
+                                "affectedPaths": [normalize_display_path(&target)]
+                            }),
+                        ));
+                    }
+                }
+            }
+            PolicyDecision::Allow => {}
+        }
+
+        match read_text_file_window(&target, args.offset, args.limit) {
+            Ok(output) => {
+                let text = if output.empty {
+                    format!(
+                        "File exists but is empty.\nPath: {}",
+                        normalize_display_path(&target)
+                    )
+                } else {
+                    output.numbered_content.clone()
+                };
+                let structured = json!({
+                    "status": "completed",
+                    "tool": BuiltinTool::ReadFile.name(),
+                    "path": normalize_display_path(&target),
+                    "cwd": normalize_display_path(&cwd),
+                    "startLine": output.start_line,
+                    "endLine": output.end_line,
+                    "limit": output.limit,
+                    "numLines": output.num_lines,
+                    "totalLines": output.total_lines,
+                    "totalBytes": output.total_bytes,
+                    "truncated": output.truncated,
+                    "lineTruncated": output.line_truncated,
+                    "empty": output.empty,
+                    "content": output.numbered_content.clone(),
+                    "lineNumberFormat": "line_number<TAB>content"
+                });
+                self.record_tool_event_data(
+                    &call_id,
+                    BuiltinTool::ReadFile.name(),
+                    "finished",
+                    SkillToolEventData {
+                        status: Some("completed".to_string()),
+                        affected_paths: vec![normalize_display_path(&target)],
+                        text: Some(format!("{} lines", output.num_lines)),
+                        ..SkillToolEventData::default()
+                    },
+                )
+                .await;
+                Ok(tool_success_with_planning_reminder(
+                    text,
+                    structured,
+                    self.planning_success_hints(
+                        config,
+                        planning_scope,
+                        args.planning_id.as_deref(),
+                        BuiltinTool::ReadFile,
+                        None,
+                    )
+                    .await,
+                ))
+            }
+            Err(error) => {
+                self.record_tool_event_data(
+                    &call_id,
+                    BuiltinTool::ReadFile.name(),
+                    "finished",
+                    SkillToolEventData {
+                        status: Some("failed".to_string()),
+                        affected_paths: vec![normalize_display_path(&target)],
+                        text: Some(error.to_string()),
+                        ..SkillToolEventData::default()
+                    },
+                )
+                .await;
+                Ok(tool_error(
+                    error.to_string(),
+                    json!({
+                        "status": "failed",
+                        "tool": BuiltinTool::ReadFile.name(),
+                        "path": normalize_display_path(&target),
+                        "cwd": normalize_display_path(&cwd),
+                        "message": error.to_string()
+                    }),
+                ))
             }
         }
     }
@@ -1156,26 +1399,6 @@ impl SkillsService {
             Err(result) => return Ok(result),
         };
 
-        if let Some(patch) = extract_apply_patch_from_shell_command(&command_preview) {
-            if !config.skills.builtin_tools.apply_patch {
-                return Err(AppError::BadRequest(
-                    "builtin tool apply_patch is disabled by configuration; cannot execute a patch from shell_command"
-                        .to_string(),
-                ));
-            }
-            return self
-                .execute_apply_patch_text(
-                    config,
-                    patch,
-                    &cwd,
-                    &command_preview,
-                    &call_id,
-                    planning_scope,
-                    args.planning_id.as_deref(),
-                )
-                .await;
-        }
-
         let tokens = split_shell_tokens(&command_preview);
         if tokens.is_empty() {
             return Err(AppError::BadRequest("exec cannot be empty".to_string()));
@@ -1198,6 +1421,7 @@ impl SkillsService {
                     json!({
                         "status": "blocked",
                         "reason": reason,
+                        "tool": BuiltinTool::ShellCommand.name(),
                         "command": command_preview,
                         "cwd": normalize_display_path(&cwd),
                         "policyAction": "deny",
@@ -1239,10 +1463,18 @@ impl SkillsService {
                 {
                     ConfirmationWaitOutcome::Approved => {}
                     ConfirmationWaitOutcome::Rejected => {
-                        return Ok(confirmation_rejected_result(&confirmation_id, false));
+                        return Ok(confirmation_rejected_result(
+                            BuiltinTool::ShellCommand.name(),
+                            &confirmation_id,
+                            false,
+                        ));
                     }
                     ConfirmationWaitOutcome::TimedOut => {
-                        return Ok(confirmation_rejected_result(&confirmation_id, true));
+                        return Ok(confirmation_rejected_result(
+                            BuiltinTool::ShellCommand.name(),
+                            &confirmation_id,
+                            true,
+                        ));
                     }
                 }
             }
@@ -1356,51 +1588,6 @@ impl SkillsService {
         }
     }
 
-    async fn handle_builtin_apply_patch(
-        &self,
-        config: &GatewayConfig,
-        args: ApplyPatchArgs,
-        planning_scope: &str,
-    ) -> Result<ToolResult, AppError> {
-        let call_id = Uuid::new_v4().to_string();
-        if let Some(result) = validate_skill_token_result(
-            BuiltinTool::ApplyPatch.name(),
-            &builtin_skill_token(BuiltinTool::ApplyPatch),
-            args.skill_token.as_deref(),
-        ) {
-            return Ok(result);
-        }
-
-        if let Some(result) = self
-            .check_planning_gate(
-                config,
-                planning_scope,
-                BuiltinTool::ApplyPatch,
-                args.planning_id.as_deref(),
-            )
-            .await
-        {
-            return Ok(result);
-        }
-
-        let cwd =
-            match resolve_builtin_cwd(BuiltinTool::ApplyPatch, &config.skills, args.cwd.as_deref())
-            {
-                Ok(cwd) => cwd,
-                Err(result) => return Ok(result),
-            };
-        self.execute_apply_patch_text(
-            config,
-            args.patch,
-            &cwd,
-            "apply_patch",
-            &call_id,
-            planning_scope,
-            args.planning_id.as_deref(),
-        )
-        .await
-    }
-
     async fn handle_builtin_multi_edit_file(
         &self,
         config: &GatewayConfig,
@@ -1437,9 +1624,9 @@ impl SkillsService {
             Err(result) => return Ok(result),
         };
 
-        let target = resolve_patch_path(&cwd, &args.path)?;
-        let affected_paths = vec![target.clone()];
-        let preview = multi_edit_preview(&args);
+        let operations = normalize_multi_edit_operations(&args)?;
+        let affected_paths = multi_edit_affected_paths(&cwd, &operations)?;
+        let preview = multi_edit_preview(&operations);
         self.record_tool_event_data(
             &call_id,
             BuiltinTool::MultiEditFile.name(),
@@ -1451,7 +1638,7 @@ impl SkillsService {
                     .iter()
                     .map(|path| normalize_display_path(path))
                     .collect(),
-                changes: Some(multi_edit_preview_changes(&args)),
+                changes: Some(multi_edit_preview_changes(&operations)),
                 ..SkillToolEventData::default()
             },
         )
@@ -1510,19 +1697,27 @@ impl SkillsService {
                 {
                     ConfirmationWaitOutcome::Approved => {}
                     ConfirmationWaitOutcome::Rejected => {
-                        return Ok(confirmation_rejected_result(&confirmation_id, false));
+                        return Ok(confirmation_rejected_result(
+                            BuiltinTool::MultiEditFile.name(),
+                            &confirmation_id,
+                            false,
+                        ));
                     }
                     ConfirmationWaitOutcome::TimedOut => {
-                        return Ok(confirmation_rejected_result(&confirmation_id, true));
+                        return Ok(confirmation_rejected_result(
+                            BuiltinTool::MultiEditFile.name(),
+                            &confirmation_id,
+                            true,
+                        ));
                     }
                 }
             }
             PolicyDecision::Allow => {}
         }
 
-        match apply_multi_edit_file(&target, &args) {
+        match apply_multi_edit_file(&cwd, &operations) {
             Ok(outcome) => {
-                let text = patch_summary_text(&outcome.summary);
+                let text = file_edit_summary_text(&outcome.summary);
                 self.record_tool_event_data(
                     &call_id,
                     BuiltinTool::MultiEditFile.name(),
@@ -1541,8 +1736,11 @@ impl SkillsService {
                         "status": "completed",
                         "tool": BuiltinTool::MultiEditFile.name(),
                         "cwd": normalize_display_path(&cwd),
+                        "added": outcome.summary.added,
                         "modified": outcome.summary.modified,
-                        "delta": patch_delta_for_model(&outcome.delta),
+                        "deleted": outcome.summary.deleted,
+                        "moved": outcome.summary.moved,
+                        "delta": edit_delta_for_model(&outcome.delta),
                         "warnings": outcome.warnings
                     }),
                     self.planning_success_hints(
@@ -1574,185 +1772,13 @@ impl SkillsService {
                         "tool": BuiltinTool::MultiEditFile.name(),
                         "cwd": normalize_display_path(&cwd),
                         "message": failure.message,
-                        "delta": patch_delta_for_model(&failure.delta)
+                        "delta": edit_delta_for_model(&failure.delta)
                     }),
                     self.planning_edit_failure_reminder(
                         config,
                         planning_scope,
                         args.planning_id.as_deref(),
                         BuiltinTool::MultiEditFile,
-                    )
-                    .await,
-                ))
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_apply_patch_text(
-        &self,
-        config: &GatewayConfig,
-        patch: String,
-        cwd: &Path,
-        raw_command: &str,
-        call_id: &str,
-        planning_scope: &str,
-        planning_id: Option<&str>,
-    ) -> Result<ToolResult, AppError> {
-        let patch_preview = patch.trim().to_string();
-        if patch_preview.is_empty() {
-            return Err(AppError::BadRequest("patch cannot be empty".to_string()));
-        }
-
-        let parsed = parse_apply_patch(&patch_preview)?;
-        let affected_paths = patch_affected_paths(&parsed, cwd)?;
-        self.record_tool_event_data(
-            call_id,
-            BuiltinTool::ApplyPatch.name(),
-            "patchPreview",
-            SkillToolEventData {
-                cwd: Some(normalize_display_path(cwd)),
-                preview: Some(truncate_preview(&patch_preview, 4000)),
-                affected_paths: affected_paths
-                    .iter()
-                    .map(|path| normalize_display_path(path))
-                    .collect(),
-                changes: Some(patch_preview_changes(&parsed)),
-                ..SkillToolEventData::default()
-            },
-        )
-        .await;
-        let access_decision = evaluate_paths_policy(&config.skills, &affected_paths);
-        match access_decision {
-            PolicyDecision::Deny(reason) => {
-                return Ok(tool_error(
-                    mcp_gateway_policy_denied_text(&reason),
-                    json!({
-                        "status": "blocked",
-                        "reason": reason,
-                        "tool": BuiltinTool::ApplyPatch.name(),
-                        "cwd": normalize_display_path(cwd),
-                        "policyAction": "deny",
-                        "policyHelp": mcp_gateway_policy_denied_help(),
-                        "affectedPaths": affected_paths.iter().map(|path| normalize_display_path(path)).collect::<Vec<_>>()
-                    }),
-                ));
-            }
-            PolicyDecision::Confirm(reason) => {
-                let metadata = ConfirmationMetadata {
-                    kind: "patch".to_string(),
-                    cwd: normalize_display_path(cwd),
-                    affected_paths: affected_paths
-                        .iter()
-                        .map(|path| normalize_display_path(path))
-                        .collect(),
-                    preview: truncate_preview(&patch_preview, 4000),
-                };
-                let confirmation_id = match self
-                    .create_confirmation_with_metadata(
-                        "builtin:apply_patch",
-                        "Apply Patch",
-                        &[String::from("apply_patch")],
-                        raw_command,
-                        &reason,
-                        metadata,
-                    )
-                    .await
-                {
-                    CreateConfirmationResult::Created(c) | CreateConfirmationResult::Reused(c) => {
-                        c.id
-                    }
-                    CreateConfirmationResult::AlreadyTimedOut(id) => id,
-                };
-
-                match self
-                    .wait_for_confirmation_decision(
-                        &confirmation_id,
-                        Self::CONFIRMATION_DECISION_TIMEOUT,
-                        Duration::from_millis(250),
-                    )
-                    .await
-                {
-                    ConfirmationWaitOutcome::Approved => {}
-                    ConfirmationWaitOutcome::Rejected => {
-                        return Ok(confirmation_rejected_result(&confirmation_id, false));
-                    }
-                    ConfirmationWaitOutcome::TimedOut => {
-                        return Ok(confirmation_rejected_result(&confirmation_id, true));
-                    }
-                }
-            }
-            PolicyDecision::Allow => {}
-        }
-
-        match apply_parsed_patch(&parsed, cwd) {
-            Ok(outcome) => {
-                let text = patch_summary_text(&outcome.summary);
-                self.record_tool_event_data(
-                    call_id,
-                    BuiltinTool::ApplyPatch.name(),
-                    "finished",
-                    SkillToolEventData {
-                        status: Some("completed".to_string()),
-                        delta: Some(outcome.delta.clone()),
-                        warnings: outcome.warnings.clone(),
-                        ..SkillToolEventData::default()
-                    },
-                )
-                .await;
-                Ok(tool_success_with_planning_reminder(
-                    text,
-                    json!({
-                        "status": "completed",
-                        "tool": BuiltinTool::ApplyPatch.name(),
-                        "cwd": normalize_display_path(cwd),
-                        "added": outcome.summary.added,
-                        "modified": outcome.summary.modified,
-                        "deleted": outcome.summary.deleted,
-                        "delta": patch_delta_for_model(&outcome.delta),
-                        "warnings": outcome.warnings
-                    }),
-                    self.planning_success_hints(
-                        config,
-                        planning_scope,
-                        planning_id,
-                        BuiltinTool::ApplyPatch,
-                        None,
-                    )
-                    .await,
-                ))
-            }
-            Err(failure) => {
-                self.record_tool_event_data(
-                    call_id,
-                    BuiltinTool::ApplyPatch.name(),
-                    "finished",
-                    SkillToolEventData {
-                        status: Some("failed".to_string()),
-                        delta: Some(failure.delta.clone()),
-                        ..SkillToolEventData::default()
-                    },
-                )
-                .await;
-                Ok(tool_error_with_edit_failure_reminder(
-                    format!(
-                        "{}\nCommitted patch delta exact: {}\nCommitted changes: {}",
-                        failure.message,
-                        failure.delta.exact,
-                        failure.delta.changes.len()
-                    ),
-                    json!({
-                        "status": "failed",
-                        "tool": BuiltinTool::ApplyPatch.name(),
-                        "cwd": normalize_display_path(cwd),
-                        "message": failure.message,
-                        "delta": patch_delta_for_model(&failure.delta)
-                    }),
-                    self.planning_edit_failure_reminder(
-                        config,
-                        planning_scope,
-                        planning_id,
-                        BuiltinTool::ApplyPatch,
                     )
                     .await,
                 ))
@@ -1830,7 +1856,6 @@ impl SkillsService {
                         plan: args.plan.clone(),
                         explanation: args.explanation.clone(),
                         consecutive_shell_commands: 0,
-                        consecutive_apply_patch_failures: 0,
                         consecutive_multi_edit_file_failures: 0,
                         updated_at: now,
                     },
@@ -1883,7 +1908,6 @@ impl SkillsService {
                     ))
                 })?;
                 state.consecutive_shell_commands = 0;
-                state.consecutive_apply_patch_failures = 0;
                 state.consecutive_multi_edit_file_failures = 0;
                 let item_index = match args.item {
                     Some(item) if item == 0 || item > state.plan.len() => {
@@ -2147,15 +2171,12 @@ impl SkillsService {
             cdp_args.clone()
         };
 
-        let structured = json!({
+        let mut structured = json!({
             "status": if output.status.success() { "completed" } else { "failed" },
             "tool": tool_name,
             "command": structured_command,
             "runner": node_command(),
-            "script": normalize_display_path(&cdp_script),
             "args": structured_cdp_args,
-            "runtimeDir": normalize_display_path(&cdp_runtime_dir),
-            "userDataDir": normalize_display_path(&effective_user_data_dir),
             "profileMode": effective_profile_mode,
             "browserMode": effective_browser_mode,
             "exitCode": exit_code,
@@ -2163,6 +2184,22 @@ impl SkillsService {
             "stdoutTruncated": output.stdout.truncated,
             "stderrTruncated": output.stderr.truncated
         });
+        if skill_debug_metadata_enabled() {
+            if let Value::Object(fields) = &mut structured {
+                fields.insert(
+                    "script".to_string(),
+                    Value::String(normalize_display_path(&cdp_script)),
+                );
+                fields.insert(
+                    "runtimeDir".to_string(),
+                    Value::String(normalize_display_path(&cdp_runtime_dir)),
+                );
+                fields.insert(
+                    "userDataDir".to_string(),
+                    Value::String(normalize_display_path(&effective_user_data_dir)),
+                );
+            }
+        }
         let output_text = command_output_text(&stdout, &stderr);
 
         if output.status.success() {
@@ -2333,6 +2370,7 @@ impl SkillsService {
                     json!({
                         "status": "blocked",
                         "reason": reason,
+                        "tool": tool_name,
                         "command": command_preview,
                         "policyAction": "deny",
                         "policyHelp": mcp_gateway_policy_denied_help()
@@ -2381,10 +2419,18 @@ impl SkillsService {
                 match outcome {
                     ConfirmationWaitOutcome::Approved => {}
                     ConfirmationWaitOutcome::Rejected => {
-                        return Ok(confirmation_rejected_result(&confirmation_id, false));
+                        return Ok(confirmation_rejected_result(
+                            tool_name,
+                            &confirmation_id,
+                            false,
+                        ));
                     }
                     ConfirmationWaitOutcome::TimedOut => {
-                        return Ok(confirmation_rejected_result(&confirmation_id, true));
+                        return Ok(confirmation_rejected_result(
+                            tool_name,
+                            &confirmation_id,
+                            true,
+                        ));
                     }
                 }
             }
@@ -2437,12 +2483,8 @@ impl SkillsService {
         structured.insert("command".to_string(), Value::String(command_preview));
         structured.insert("exitCode".to_string(), json!(exit_code));
         structured.insert("durationMs".to_string(), json!(duration_ms));
-        if stdout_truncated {
-            structured.insert("stdoutTruncated".to_string(), Value::Bool(true));
-        }
-        if stderr_truncated {
-            structured.insert("stderrTruncated".to_string(), Value::Bool(true));
-        }
+        structured.insert("stdoutTruncated".to_string(), Value::Bool(stdout_truncated));
+        structured.insert("stderrTruncated".to_string(), Value::Bool(stderr_truncated));
         let structured = Value::Object(structured);
 
         let output_text = command_output_text(&stdout, &stderr);
@@ -2769,12 +2811,55 @@ fn tool_success_with_planning_reminder(
     tool_success(text, structured)
 }
 
-fn tool_error(text: String, structured: Value) -> ToolResult {
+fn tool_error(text: String, mut structured: Value) -> ToolResult {
+    normalize_tool_error_structured_content(&text, &mut structured);
     ToolResult {
         text,
         structured,
         is_error: true,
     }
+}
+
+fn normalize_tool_error_structured_content(text: &str, structured: &mut Value) {
+    let Value::Object(fields) = structured else {
+        return;
+    };
+
+    let status = fields
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("error")
+        .to_string();
+    fields
+        .entry("status".to_string())
+        .or_insert_with(|| Value::String("error".to_string()));
+    fields
+        .entry("code".to_string())
+        .or_insert_with(|| Value::String(default_tool_error_code(&status).to_string()));
+    fields
+        .entry("message".to_string())
+        .or_insert_with(|| Value::String(text.to_string()));
+}
+
+fn default_tool_error_code(status: &str) -> &'static str {
+    match status {
+        "blocked" => "PolicyBlocked",
+        "rejected" => "ConfirmationRejected",
+        "timeout" => "ConfirmationTimeout",
+        "failed" => "ToolFailed",
+        _ => "ToolError",
+    }
+}
+
+fn skill_debug_metadata_enabled() -> bool {
+    env::var("MCP_GATEWAY_SKILL_DEBUG_METADATA")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn tool_error_with_edit_failure_reminder(
@@ -2949,7 +3034,11 @@ fn planning_gate_instructions() -> &'static str {
     "## Planning Gate\n\nWhen the bundled `task-planning` skill is enabled, real builtin tool calls are gated by an active plan. Before using this skill for any non-documentation action, call `task-planning` with `action: \"update\"` and a concise todo list. The gateway returns a content-derived `planningId`. Pass it as `planningId` on subsequent builtin tool calls. Reuse the same planningId across multiple tool calls while working through the plan. Successful builtin tool results may include a single `planningReminder` for the current `in_progress` item. If that item is done, use `task-planning` with `action: \"set_status\"`, the active `planningId`, and `status: \"completed\"`; do not resend the full plan for simple status changes. Use full `update` only when the plan steps or approach change. When all plan items are updated to `completed`, that planningId is closed and can no longer be used for tool calls. Documentation reads of SKILL.md files do not require planning fields."
 }
 
-fn confirmation_rejected_result(confirmation_id: &str, timed_out: bool) -> ToolResult {
+fn confirmation_rejected_result(
+    tool_name: &str,
+    confirmation_id: &str,
+    timed_out: bool,
+) -> ToolResult {
     let text = if timed_out {
         "MCP Gateway 已拒绝此命令：确认请求 60 秒内未被批准，命令没有执行。要执行该命令，请重新提交并在 Pending Confirmations 中批准；或者把匹配的 skills.policy 规则改为 allow，让它默认运行。"
     } else {
@@ -2960,10 +3049,12 @@ fn confirmation_rejected_result(confirmation_id: &str, timed_out: bool) -> ToolR
     } else {
         "user_rejected"
     };
-    tool_success(
+    let status = if timed_out { "timeout" } else { "rejected" };
+    tool_error(
         text.to_string(),
         json!({
-            "status": "rejected",
+            "status": status,
+            "tool": tool_name,
             "reason": reason,
             "confirmationId": confirmation_id
         }),
@@ -3071,11 +3162,11 @@ fn summarize_builtin_skills(cfg: &BuiltinToolsConfig) -> Vec<SkillSummary> {
 
 fn builtin_tools(cfg: &BuiltinToolsConfig) -> Vec<BuiltinTool> {
     let mut tools = Vec::with_capacity(6);
+    if cfg.read_file {
+        tools.push(BuiltinTool::ReadFile);
+    }
     if cfg.shell_command {
         tools.push(BuiltinTool::ShellCommand);
-    }
-    if cfg.apply_patch {
-        tools.push(BuiltinTool::ApplyPatch);
     }
     if cfg.multi_edit_file {
         tools.push(BuiltinTool::MultiEditFile);
@@ -3129,10 +3220,46 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     let enabled: Vec<BuiltinTool> = builtin_tools(cfg);
     let mut defs = Vec::with_capacity(6);
 
+    if enabled.contains(&BuiltinTool::ReadFile) {
+        defs.push(json!({
+            "name": BuiltinTool::ReadFile.name(),
+            "description": render_builtin_tool_description(BuiltinTool::ReadFile, os, now, cfg.task_planning, cfg.read_file),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Text file path to read. Relative paths resolve from cwd. Use builtin://<skill>/SKILL.md to read bundled skill documentation."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Concrete working directory for relative paths. It must be inside one configured allowed directory. Required when more than one allowed directory exists."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based starting line number. Defaults to 1."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2000,
+                        "description": "Optional number of lines to return. Defaults to 2000, maximum 2000."
+                    },
+                    "skillToken": {
+                        "type": "string",
+                        "description": "Required for normal file reads. First read the complete builtin://read_file/SKILL.md without skillToken, then use the returned skillToken. Documentation reads do not require it."
+                    }
+                }
+            }
+        }));
+    }
     if enabled.contains(&BuiltinTool::ShellCommand) {
         defs.push(json!({
             "name": BuiltinTool::ShellCommand.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ShellCommand, os, now, cfg.task_planning),
+            "description": render_builtin_tool_description(BuiltinTool::ShellCommand, os, now, cfg.task_planning, cfg.read_file),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -3159,48 +3286,22 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
             }
         }));
     }
-    if enabled.contains(&BuiltinTool::ApplyPatch) {
-        defs.push(json!({
-            "name": BuiltinTool::ApplyPatch.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ApplyPatch, os, now, cfg.task_planning),
-            "inputSchema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["patch"],
-                "properties": {
-                    "patch": {
-                        "type": "string",
-                        "description": "Structured patch text. Must use *** Add File, *** Delete File, or *** Update File blocks. Do not send standard unified diff headers like --- file and +++ file."
-                    },
-                    "cwd": {
-                        "type": "string",
-                        "description": "Concrete working directory for relative patch paths. It must be inside one configured allowed directory. Required when more than one allowed directory exists; do not omit it in that case."
-                    },
-                    "skillToken": {
-                        "type": "string",
-                        "description": "Required for every apply_patch call. First read the complete builtin://apply_patch/SKILL.md with shell_command without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
-                    }
-                }
-            }
-        }));
-    }
     if enabled.contains(&BuiltinTool::MultiEditFile) {
         defs.push(json!({
             "name": BuiltinTool::MultiEditFile.name(),
-            "description": render_builtin_tool_description(BuiltinTool::MultiEditFile, os, now, cfg.task_planning),
+            "description": render_builtin_tool_description(BuiltinTool::MultiEditFile, os, now, cfg.task_planning, cfg.read_file),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["path", "edits"],
+                "required": [],
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the existing file to modify, relative to cwd unless absolute."
+                        "description": "Legacy single-file edit path, relative to cwd unless absolute. Use with top-level edits."
                     },
                     "edits": {
                         "type": "array",
-                        "minItems": 1,
-                        "description": "Ordered exact string replacements. All edits are validated and applied in memory before the file is written once.",
+                        "description": "Legacy ordered exact replacements for path. All edits are validated and applied in memory before writing.",
                         "items": {
                             "type": "object",
                             "additionalProperties": false,
@@ -3226,13 +3327,58 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
                             }
                         }
                     },
+                    "files": {
+                        "type": "array",
+                        "description": "Multiple existing files to edit. Each item has path and edits.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["path", "edits"],
+                            "properties": {
+                                "path": {"type": "string"},
+                                "edits": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "required": ["old_string", "new_string"],
+                                        "properties": {
+                                            "old_string": {"type": "string"},
+                                            "new_string": {"type": "string"},
+                                            "replace_all": {"type": "boolean"},
+                                            "startLine": {"type": "integer", "minimum": 1}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "operations": {
+                        "type": "array",
+                        "description": "Structured file operations. Supported type values: edit, create, delete, move. The gateway validates every operation before committing writes.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "required": ["type"],
+                            "properties": {
+                                "type": {"type": "string", "enum": ["edit", "create", "delete", "move"]},
+                                "path": {"type": "string"},
+                                "from": {"type": "string"},
+                                "to": {"type": "string"},
+                                "content": {"type": "string"},
+                                "overwrite": {"type": "boolean"},
+                                "edits": {"type": "array"}
+                            }
+                        }
+                    },
                     "cwd": {
                         "type": "string",
                         "description": "Concrete working directory for relative paths. It must be inside one configured allowed directory. Required when more than one allowed directory exists; do not omit it in that case."
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every multi_edit_file call. First read the complete builtin://multi_edit_file/SKILL.md with shell_command without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                        "description": "Required for every multi_edit_file call. First read the complete builtin://multi_edit_file/SKILL.md with read_file when available (or shell_command as fallback) without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -3241,7 +3387,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::TaskPlanning) {
         defs.push(json!({
             "name": BuiltinTool::TaskPlanning.name(),
-            "description": render_builtin_tool_description(BuiltinTool::TaskPlanning, os, now, cfg.task_planning),
+            "description": render_builtin_tool_description(BuiltinTool::TaskPlanning, os, now, cfg.task_planning, cfg.read_file),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -3305,7 +3451,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::ChromeCdp) {
         defs.push(json!({
             "name": BuiltinTool::ChromeCdp.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ChromeCdp, os, now, cfg.task_planning),
+            "description": render_builtin_tool_description(BuiltinTool::ChromeCdp, os, now, cfg.task_planning, cfg.read_file),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -3331,7 +3477,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     if enabled.contains(&BuiltinTool::ChatPlusAdapterDebugger) {
         defs.push(json!({
             "name": BuiltinTool::ChatPlusAdapterDebugger.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ChatPlusAdapterDebugger, os, now, cfg.task_planning),
+            "description": render_builtin_tool_description(BuiltinTool::ChatPlusAdapterDebugger, os, now, cfg.task_planning, cfg.read_file),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -3390,26 +3536,36 @@ fn render_builtin_tool_description(
     os: &str,
     now: &str,
     planning_enabled: bool,
+    read_file_enabled: bool,
 ) -> String {
     let frontmatter = builtin_skill_frontmatter(tool);
     let skill_uri = builtin_skill_uri(tool);
     let skill_root_uri = builtin_skill_uri_root(tool);
-    let read_cmd = if cfg!(target_os = "windows") {
+    let shell_read_cmd = if cfg!(target_os = "windows") {
         format!("Get-Content -Raw {skill_uri}")
     } else {
         format!("cat {skill_uri}")
     };
+    let read_file_doc = format!("`read_file` with `path`: `{skill_uri}` and no `skillToken`");
+    let doc_read_hint = if read_file_enabled && tool != BuiltinTool::ReadFile {
+        read_file_doc.clone()
+    } else {
+        format!("shell `exec`: `{shell_read_cmd}`")
+    };
     let read_requirement = match tool {
-        BuiltinTool::ShellCommand => {
-            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Suggested `exec`: `{read_cmd}`.")
+        BuiltinTool::ReadFile => {
+            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Suggested arguments: `{{\"path\":\"{skill_uri}\"}}`.")
         }
-        BuiltinTool::ApplyPatch | BuiltinTool::MultiEditFile => {
-            format!("Before calling `{}`, use `shell_command` to read the complete SKILL.md; this read does not require `skillToken`. Suggested shell `exec`: `{read_cmd}`.", tool.name())
+        BuiltinTool::ShellCommand => {
+            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Suggested `exec`: `{shell_read_cmd}`.")
+        }
+        BuiltinTool::MultiEditFile => {
+            format!("Before calling `{}`, read the complete SKILL.md; this read does not require `skillToken`. Preferred documentation read: {doc_read_hint}.", tool.name())
         }
         BuiltinTool::TaskPlanning
         | BuiltinTool::ChromeCdp
         | BuiltinTool::ChatPlusAdapterDebugger => {
-            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`, using `exec`: `{read_cmd}`.")
+            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Preferred documentation read: {doc_read_hint}.")
         }
     };
     let frontmatter_block = if frontmatter.block.trim().is_empty() {
@@ -3448,8 +3604,8 @@ fn builtin_skill_frontmatter(tool: BuiltinTool) -> ParsedFrontmatter {
 
 fn builtin_skill_md_content(tool: BuiltinTool) -> &'static str {
     match tool {
+        BuiltinTool::ReadFile => BUILTIN_READ_FILE_SKILL_MD,
         BuiltinTool::ShellCommand => BUILTIN_SHELL_COMMAND_SKILL_MD,
-        BuiltinTool::ApplyPatch => BUILTIN_APPLY_PATCH_SKILL_MD,
         BuiltinTool::MultiEditFile => BUILTIN_MULTI_EDIT_FILE_SKILL_MD,
         BuiltinTool::TaskPlanning => BUILTIN_TASK_PLANNING_SKILL_MD,
         BuiltinTool::ChromeCdp => BUILTIN_CHROME_CDP_SKILL_MD,
@@ -3504,8 +3660,32 @@ fn builtin_skill_doc_result(
             "command": command,
             "builtinSkill": tool.name(),
             "path": matched_path,
-            "source": "embedded",
-            "runtimeAssets": json!({"status": "none"})
+            "docSource": "embedded"
+        }),
+    )
+}
+
+fn builtin_skill_read_doc_result(
+    tool: BuiltinTool,
+    matched_path: String,
+    token: String,
+    planning_enabled: bool,
+) -> ToolResult {
+    let mut text = render_builtin_skill_md(tool, planning_enabled);
+    text.push_str(&format!(
+        "\n\n[skillToken]\nUse this exact skillToken for subsequent non-documentation calls to `{}`: {}\n",
+        tool.name(),
+        token
+    ));
+    tool_success(
+        text.clone(),
+        json!({
+            "status": "completed",
+            "tool": BuiltinTool::ReadFile.name(),
+            "builtinSkill": tool.name(),
+            "path": matched_path,
+            "docSource": "embedded",
+            "content": text
         }),
     )
 }
@@ -3558,7 +3738,7 @@ fn skill_doc_result(
             "skill": skill,
             "command": command,
             "path": path,
-            "source": "file"
+            "docSource": "file"
         }),
     )
 }
@@ -3941,10 +4121,15 @@ fn skill_tool_name_base(skill: &DiscoveredSkill) -> String {
 impl BuiltinTool {
     fn from_name(name: &str) -> Option<Self> {
         match name {
+            value
+                if value.eq_ignore_ascii_case(Self::ReadFile.name())
+                    || value.eq_ignore_ascii_case("Read") =>
+            {
+                Some(Self::ReadFile)
+            }
             value if value.eq_ignore_ascii_case(Self::ShellCommand.name()) => {
                 Some(Self::ShellCommand)
             }
-            value if value.eq_ignore_ascii_case(Self::ApplyPatch.name()) => Some(Self::ApplyPatch),
             value if value.eq_ignore_ascii_case(Self::MultiEditFile.name()) => {
                 Some(Self::MultiEditFile)
             }
@@ -3961,8 +4146,8 @@ impl BuiltinTool {
 
     fn name(self) -> &'static str {
         match self {
+            Self::ReadFile => "read_file",
             Self::ShellCommand => "shell_command",
-            Self::ApplyPatch => "apply_patch",
             Self::MultiEditFile => "multi_edit_file",
             Self::TaskPlanning => "task-planning",
             Self::ChromeCdp => "chrome-cdp",
@@ -4844,252 +5029,11 @@ fn evaluate_paths_policy(skills: &SkillsConfig, paths: &[PathBuf]) -> PolicyDeci
     PolicyDecision::Allow
 }
 
-fn extract_apply_patch_from_shell_command(command: &str) -> Option<String> {
-    let begin = command.find("*** Begin Patch")?;
-    let end_marker = "*** End Patch";
-    let end = command[begin..].find(end_marker)? + begin + end_marker.len();
-    Some(command[begin..end].to_string())
-}
-
-fn parse_apply_patch(input: &str) -> Result<ParsedPatch, AppError> {
-    let normalized_input = normalize_apply_patch_input(input);
-    let lines = normalized_input.lines().collect::<Vec<_>>();
-    if lines.first().map(|line| line.trim()) != Some("*** Begin Patch") {
-        return Err(AppError::BadRequest(
-            "patch must start with *** Begin Patch".to_string(),
-        ));
-    }
-    if lines.last().map(|line| line.trim()) != Some("*** End Patch") {
-        return Err(AppError::BadRequest(
-            "patch must end with *** End Patch".to_string(),
-        ));
-    }
-
-    let mut index = 1;
-    let mut hunks = Vec::new();
-    while index + 1 < lines.len() {
-        let line = lines[index];
-        if line.trim().is_empty() {
-            index += 1;
-            continue;
-        }
-        let header = line.trim();
-        if let Some(path) = header.strip_prefix("*** Add File: ") {
-            index += 1;
-            let mut contents = Vec::new();
-            while index + 1 < lines.len() && !is_patch_file_header(lines[index]) {
-                let content_line = lines[index].strip_prefix('+').ok_or_else(|| {
-                    AppError::BadRequest(format!(
-                        "add file hunk lines must start with '+': {}",
-                        lines[index]
-                    ))
-                })?;
-                contents.push(content_line.to_string());
-                index += 1;
-            }
-            hunks.push(PatchHunk::AddFile {
-                path: path.trim().to_string(),
-                contents,
-            });
-            continue;
-        }
-        if let Some(path) = header.strip_prefix("*** Delete File: ") {
-            hunks.push(PatchHunk::DeleteFile {
-                path: path.trim().to_string(),
-            });
-            index += 1;
-            continue;
-        }
-        if let Some(path) = header.strip_prefix("*** Update File: ") {
-            index += 1;
-            let mut move_path = None;
-            if index + 1 < lines.len() {
-                if let Some(target) = lines[index].trim().strip_prefix("*** Move to: ") {
-                    move_path = Some(target.trim().to_string());
-                    index += 1;
-                }
-            }
-            let mut chunks = Vec::new();
-            let mut current = PatchChunk::default();
-            let mut in_chunk = false;
-            while index + 1 < lines.len() && !is_patch_file_header(lines[index]) {
-                let patch_line = lines[index];
-                if patch_line == "@@" || patch_line.starts_with("@@ ") {
-                    push_patch_chunk(&mut chunks, &mut current);
-                    in_chunk = true;
-                    current.change_context = patch_line
-                        .strip_prefix("@@ ")
-                        .map(|context| context.to_string());
-                    index += 1;
-                    continue;
-                }
-                if patch_line == "*** End of File" {
-                    in_chunk = true;
-                    current.is_end_of_file = true;
-                    index += 1;
-                    continue;
-                }
-                let Some(prefix) = patch_line.chars().next() else {
-                    if in_chunk {
-                        current.old_lines.push(String::new());
-                        current.new_lines.push(String::new());
-                    }
-                    index += 1;
-                    continue;
-                };
-                let body = patch_line.get(1..).unwrap_or_default().to_string();
-                match prefix {
-                    ' ' => {
-                        in_chunk = true;
-                        current.old_lines.push(body.clone());
-                        current.new_lines.push(body);
-                    }
-                    '-' => {
-                        in_chunk = true;
-                        current.old_lines.push(body);
-                    }
-                    '+' => {
-                        in_chunk = true;
-                        current.new_lines.push(body);
-                    }
-                    _ => {
-                        return Err(AppError::BadRequest(format!(
-                            "invalid update hunk line: {patch_line}"
-                        )));
-                    }
-                }
-                index += 1;
-            }
-            push_patch_chunk(&mut chunks, &mut current);
-            if chunks.is_empty()
-                || chunks
-                    .iter()
-                    .any(|chunk| chunk.old_lines.is_empty() && chunk.new_lines.is_empty())
-            {
-                return Err(AppError::BadRequest(format!(
-                    "update file hunk for path '{}' is empty",
-                    path.trim()
-                )));
-            }
-            hunks.push(PatchHunk::UpdateFile {
-                path: path.trim().to_string(),
-                move_path,
-                chunks,
-            });
-            continue;
-        }
-
-        return Err(unsupported_patch_line_error(line));
-    }
-
-    if hunks.is_empty() {
-        return Err(AppError::BadRequest(
-            "patch contains no file changes".to_string(),
-        ));
-    }
-
-    Ok(ParsedPatch { hunks })
-}
-
-fn normalize_apply_patch_input(input: &str) -> String {
-    let trimmed = input.trim();
-    let lines = trimmed.lines().collect::<Vec<_>>();
-    if lines.len() >= 4 {
-        let first = lines.first().map(|line| line.trim());
-        let last = lines.last().map(|line| line.trim());
-        if matches!(first, Some("<<EOF" | "<<'EOF'" | "<<\"EOF\"")) && last == Some("EOF") {
-            return lines[1..lines.len() - 1].join("\n").trim().to_string();
-        }
-    }
-    trimmed.to_string()
-}
-
-fn unsupported_patch_line_error(line: &str) -> AppError {
-    AppError::BadRequest(format!(
-        "unsupported patch line: {line}\n\nThis apply_patch tool does not accept standard unified diff headers such as '--- file' and '+++ file', and it does not accept Search/Replace prose blocks. Use this format instead:\n*** Begin Patch\n*** Update File: path/to/file\n@@\n-old line\n+new line\n*** End Patch\n\nFor adding a file:\n*** Begin Patch\n*** Add File: path/to/file\n+new line\n*** End Patch\n\nFor deleting a file:\n*** Begin Patch\n*** Delete File: path/to/file\n*** End Patch"
-    ))
-}
-
-fn is_patch_file_header(line: &str) -> bool {
-    line.starts_with("*** Add File: ")
-        || line.starts_with("*** Delete File: ")
-        || line.starts_with("*** Update File: ")
-        || line == "*** End Patch"
-}
-
-fn push_patch_chunk(chunks: &mut Vec<PatchChunk>, current: &mut PatchChunk) {
-    if current.old_lines.is_empty()
-        && current.new_lines.is_empty()
-        && current.change_context.is_none()
-        && !current.is_end_of_file
-    {
-        return;
-    }
-    chunks.push(std::mem::take(current));
-}
-
-fn patch_affected_paths(parsed: &ParsedPatch, cwd: &Path) -> Result<Vec<PathBuf>, AppError> {
-    let mut paths = Vec::new();
-    for hunk in &parsed.hunks {
-        match hunk {
-            PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => {
-                paths.push(resolve_patch_path(cwd, path)?);
-            }
-            PatchHunk::UpdateFile {
-                path, move_path, ..
-            } => {
-                paths.push(resolve_patch_path(cwd, path)?);
-                if let Some(move_path) = move_path {
-                    paths.push(resolve_patch_path(cwd, move_path)?);
-                }
-            }
-        }
-    }
-
-    let mut seen = BTreeSet::new();
-    paths.retain(|path| seen.insert(normalize_display_path(path)));
-    Ok(paths)
-}
-
-fn patch_preview_changes(parsed: &ParsedPatch) -> Value {
-    let changes = parsed
-        .hunks
-        .iter()
-        .map(|hunk| match hunk {
-            PatchHunk::AddFile { path, contents } => json!({
-                "kind": "add",
-                "path": path,
-                "lines": contents.len()
-            }),
-            PatchHunk::DeleteFile { path } => json!({
-                "kind": "delete",
-                "path": path
-            }),
-            PatchHunk::UpdateFile {
-                path,
-                move_path,
-                chunks,
-            } => json!({
-                "kind": "update",
-                "path": path,
-                "movePath": move_path,
-                "chunks": chunks.iter().map(|chunk| json!({
-                    "context": chunk.change_context.as_deref(),
-                    "oldLines": chunk.old_lines.len(),
-                    "newLines": chunk.new_lines.len(),
-                    "endOfFile": chunk.is_end_of_file
-                })).collect::<Vec<_>>()
-            }),
-        })
-        .collect::<Vec<_>>();
-    json!(changes)
-}
-
-fn resolve_patch_path(cwd: &Path, raw: &str) -> Result<PathBuf, AppError> {
+fn resolve_file_operation_path(cwd: &Path, raw: &str) -> Result<PathBuf, AppError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(AppError::BadRequest(
-            "patch path cannot be empty".to_string(),
+            "file operation path cannot be empty".to_string(),
         ));
     }
     let expanded = expand_home_path(trimmed);
@@ -5102,186 +5046,168 @@ fn resolve_patch_path(cwd: &Path, raw: &str) -> Result<PathBuf, AppError> {
     Ok(normalize_root_path(absolute))
 }
 
-fn apply_parsed_patch(
-    parsed: &ParsedPatch,
-    cwd: &Path,
-) -> Result<ApplyPatchOutcome, ApplyPatchFailure> {
-    let mut added = Vec::new();
-    let mut modified = Vec::new();
-    let mut deleted = Vec::new();
-    let mut delta = AppliedPatchDelta::default();
-    let mut warnings = Vec::new();
+const READ_FILE_DEFAULT_LIMIT: usize = 2000;
+const READ_FILE_MAX_LIMIT: usize = 2000;
+const READ_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const READ_FILE_BINARY_PROBE_BYTES: usize = 8192;
+const READ_FILE_MAX_LINE_CHARS: usize = 4000;
 
-    for hunk in &parsed.hunks {
-        match hunk {
-            PatchHunk::AddFile { path, contents } => {
-                let target =
-                    resolve_patch_path(cwd, path).map_err(|error| patch_failure(error, &delta))?;
-                if target.is_dir() {
-                    return Err(patch_failure(
-                        AppError::BadRequest(format!(
-                            "add file target is a directory: {}",
-                            target.to_string_lossy()
-                        )),
-                        &delta,
-                    ));
-                }
-                let overwritten_content = match fs::read_to_string(&target) {
-                    Ok(content) => Some(content),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(_) => {
-                        delta.exact = false;
-                        None
-                    }
-                };
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|error| patch_failure(error.into(), &delta))?;
-                }
-                let content = format!("{}\n", contents.join("\n"));
-                if let Err(error) = fs::write(&target, &content) {
-                    delta.exact = false;
-                    return Err(patch_failure(error.into(), &delta));
-                }
-                warnings.extend(collect_edit_warnings(&target, "", &content));
-                delta.changes.push(AppliedPatchChange::Add {
-                    path: normalize_display_path(&target),
-                    content,
-                    overwritten_content,
-                });
-                added.push(path.clone());
-            }
-            PatchHunk::DeleteFile { path } => {
-                let target =
-                    resolve_patch_path(cwd, path).map_err(|error| patch_failure(error, &delta))?;
-                if target.is_dir() {
-                    return Err(patch_failure(
-                        AppError::BadRequest(format!(
-                            "delete file target is a directory: {}",
-                            target.to_string_lossy()
-                        )),
-                        &delta,
-                    ));
-                }
-                let content = match fs::read_to_string(&target) {
-                    Ok(content) => Some(content),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(_) => {
-                        delta.exact = false;
-                        None
-                    }
-                };
-                if content.is_none() {
-                    delta.exact = false;
-                }
-                if let Err(error) = fs::remove_file(&target) {
-                    return Err(patch_failure(error.into(), &delta));
-                }
-                delta.changes.push(AppliedPatchChange::Delete {
-                    path: normalize_display_path(&target),
-                    content,
-                });
-                deleted.push(path.clone());
-            }
-            PatchHunk::UpdateFile {
-                path,
-                move_path,
-                chunks,
-            } => {
-                let source =
-                    resolve_patch_path(cwd, path).map_err(|error| patch_failure(error, &delta))?;
-                if source.is_dir() {
-                    return Err(patch_failure(
-                        AppError::BadRequest(format!(
-                            "update file target is a directory: {}",
-                            source.to_string_lossy()
-                        )),
-                        &delta,
-                    ));
-                }
-                let original = fs::read_to_string(&source)
-                    .map_err(|error| patch_failure(error.into(), &delta))?;
-                let updated = apply_update_chunks(&original, chunks, &source)
-                    .map_err(|error| patch_failure(error, &delta))?;
-                warnings.extend(collect_edit_warnings(&source, &original, &updated));
-                if let Some(move_path) = move_path {
-                    let target = resolve_patch_path(cwd, move_path)
-                        .map_err(|error| patch_failure(error, &delta))?;
-                    let overwritten_move_content = match fs::read_to_string(&target) {
-                        Ok(content) => Some(content),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(_) => {
-                            delta.exact = false;
-                            None
-                        }
-                    };
-                    if let Some(parent) = target.parent() {
-                        fs::create_dir_all(parent)
-                            .map_err(|error| patch_failure(error.into(), &delta))?;
-                    }
-                    if let Err(error) = fs::write(&target, &updated) {
-                        delta.exact = false;
-                        return Err(patch_failure(error.into(), &delta));
-                    }
-                    let pending_index = delta.changes.len();
-                    delta.changes.push(AppliedPatchChange::Add {
-                        path: normalize_display_path(&target),
-                        content: updated.clone(),
-                        overwritten_content: overwritten_move_content.clone(),
-                    });
-                    if let Err(error) = fs::remove_file(&source) {
-                        return Err(patch_failure(error.into(), &delta));
-                    }
-                    delta.changes[pending_index] = AppliedPatchChange::Update {
-                        path: normalize_display_path(&source),
-                        move_path: Some(normalize_display_path(&target)),
-                        old_content: original,
-                        new_content: updated,
-                        overwritten_move_content,
-                    };
-                    modified.push(move_path.clone());
-                } else {
-                    if let Err(error) = fs::write(&source, &updated) {
-                        delta.exact = false;
-                        return Err(patch_failure(error.into(), &delta));
-                    }
-                    delta.changes.push(AppliedPatchChange::Update {
-                        path: normalize_display_path(&source),
-                        move_path: None,
-                        old_content: original,
-                        new_content: updated,
-                        overwritten_move_content: None,
-                    });
-                    modified.push(path.clone());
-                }
-            }
-        }
+#[derive(Debug)]
+struct ReadFileWindow {
+    numbered_content: String,
+    start_line: usize,
+    end_line: usize,
+    limit: usize,
+    num_lines: usize,
+    total_lines: usize,
+    total_bytes: u64,
+    truncated: bool,
+    line_truncated: bool,
+    empty: bool,
+}
+
+fn read_file_window_preview(offset: Option<usize>, limit: Option<usize>) -> String {
+    let start = offset.unwrap_or(1).max(1);
+    let limit = limit
+        .unwrap_or(READ_FILE_DEFAULT_LIMIT)
+        .min(READ_FILE_MAX_LIMIT);
+    format!(
+        "lines {start}-{}",
+        start.saturating_add(limit).saturating_sub(1)
+    )
+}
+
+fn read_text_file_window(
+    target: &Path,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<ReadFileWindow, AppError> {
+    if !target.exists() {
+        return Err(AppError::BadRequest(format!(
+            "file does not exist: {}",
+            target.to_string_lossy()
+        )));
+    }
+    if target.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "read_file target is a directory: {}",
+            target.to_string_lossy()
+        )));
     }
 
-    Ok(ApplyPatchOutcome {
-        summary: PatchSummary {
-            added,
-            modified,
-            deleted,
-        },
-        delta,
-        warnings,
+    let metadata = fs::metadata(target)?;
+    if metadata.len() > READ_FILE_MAX_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "file is too large to read safely: {} bytes (max {} bytes)",
+            metadata.len(),
+            READ_FILE_MAX_BYTES
+        )));
+    }
+    if is_probably_binary_file(target)? {
+        return Err(AppError::BadRequest(format!(
+            "file appears to be binary and cannot be read as text: {}",
+            target.to_string_lossy()
+        )));
+    }
+
+    let content = fs::read_to_string(target).map_err(|error| {
+        AppError::BadRequest(format!(
+            "failed to read file as UTF-8 text: {} ({error})",
+            target.to_string_lossy()
+        ))
+    })?;
+    let total_bytes = metadata.len();
+    let normalized = normalize_to_lf(&content);
+    if normalized.is_empty() {
+        return Ok(ReadFileWindow {
+            numbered_content: String::new(),
+            start_line: 1,
+            end_line: 0,
+            limit: limit
+                .unwrap_or(READ_FILE_DEFAULT_LIMIT)
+                .min(READ_FILE_MAX_LIMIT),
+            num_lines: 0,
+            total_lines: 0,
+            total_bytes,
+            truncated: false,
+            line_truncated: false,
+            empty: true,
+        });
+    }
+
+    let lines = normalized.lines().collect::<Vec<_>>();
+    let total_lines = lines.len();
+    let start_line = offset.unwrap_or(1).max(1);
+    let limit = limit
+        .unwrap_or(READ_FILE_DEFAULT_LIMIT)
+        .min(READ_FILE_MAX_LIMIT);
+    let start_index = start_line.saturating_sub(1).min(total_lines);
+    let end_index = start_index.saturating_add(limit).min(total_lines);
+    let mut line_truncated = false;
+    let numbered = lines[start_index..end_index]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let line_no = start_index + index + 1;
+            let (display_line, truncated) = truncate_line_for_read(line);
+            line_truncated |= truncated;
+            format!("{line_no}\t{display_line}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let num_lines = end_index.saturating_sub(start_index);
+    let end_line = if num_lines == 0 {
+        start_line.saturating_sub(1)
+    } else {
+        start_index + num_lines
+    };
+
+    Ok(ReadFileWindow {
+        numbered_content: numbered,
+        start_line,
+        end_line,
+        limit,
+        num_lines,
+        total_lines,
+        total_bytes,
+        truncated: end_index < total_lines,
+        line_truncated,
+        empty: false,
     })
 }
 
-fn patch_failure(error: AppError, delta: &AppliedPatchDelta) -> ApplyPatchFailure {
-    ApplyPatchFailure {
+fn is_probably_binary_file(path: &Path) -> Result<bool, AppError> {
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0_u8; READ_FILE_BINARY_PROBE_BYTES];
+    let bytes_read = file.read(&mut buffer)?;
+    Ok(buffer[..bytes_read].contains(&0))
+}
+
+fn truncate_line_for_read(line: &str) -> (String, bool) {
+    if line.chars().count() <= READ_FILE_MAX_LINE_CHARS {
+        return (line.to_string(), false);
+    }
+    let mut value = line
+        .chars()
+        .take(READ_FILE_MAX_LINE_CHARS)
+        .collect::<String>();
+    value.push_str(" [line truncated]");
+    (value, true)
+}
+
+fn edit_failure(error: AppError, delta: &FileEditDelta) -> FileEditFailure {
+    FileEditFailure {
         message: error.to_string(),
         delta: delta.clone(),
     }
 }
 
-fn patch_delta_for_model(delta: &AppliedPatchDelta) -> Value {
+fn edit_delta_for_model(delta: &FileEditDelta) -> Value {
     let changes = delta
         .changes
         .iter()
         .map(|change| match change {
-            AppliedPatchChange::Add {
+            FileEditChange::Add {
                 path,
                 content,
                 overwritten_content,
@@ -5292,13 +5218,13 @@ fn patch_delta_for_model(delta: &AppliedPatchDelta) -> Value {
                 "overwritten": overwritten_content.is_some(),
                 "overwrittenContentBytes": overwritten_content.as_ref().map(String::len)
             }),
-            AppliedPatchChange::Delete { path, content } => json!({
+            FileEditChange::Delete { path, content } => json!({
                 "kind": "delete",
                 "path": path,
                 "contentAvailable": content.is_some(),
                 "contentBytes": content.as_ref().map(String::len)
             }),
-            AppliedPatchChange::Update {
+            FileEditChange::Update {
                 path,
                 move_path,
                 old_content,
@@ -5323,145 +5249,403 @@ fn patch_delta_for_model(delta: &AppliedPatchDelta) -> Value {
     })
 }
 
-fn apply_update_chunks(
-    original: &str,
-    chunks: &[PatchChunk],
-    path: &Path,
-) -> Result<String, AppError> {
-    let mut lines = original
-        .split('\n')
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+#[derive(Debug)]
+enum StagedFileOperation {
+    Update {
+        path: PathBuf,
+        old_content: String,
+        new_content: String,
+    },
+    Create {
+        path: PathBuf,
+        content: String,
+        overwritten_content: Option<String>,
+    },
+    Delete {
+        path: PathBuf,
+        content: String,
+    },
+    Move {
+        from: PathBuf,
+        to: PathBuf,
+        content: String,
+        overwritten_content: Option<String>,
+    },
+}
+
+fn normalize_multi_edit_operations(
+    args: &MultiEditFileArgs,
+) -> Result<Vec<MultiEditFileOperation>, AppError> {
+    let mut operations = Vec::new();
+
+    if let Some(path) = args
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        operations.push(MultiEditFileOperation::Edit {
+            path: path.to_string(),
+            edits: args.edits.clone(),
+        });
+    } else if !args.edits.is_empty() {
+        return Err(AppError::BadRequest(
+            "path is required when using top-level edits".to_string(),
+        ));
     }
 
-    let mut cursor = 0;
-    for chunk in chunks {
-        let context_start = if let Some(context) = &chunk.change_context {
-            let Some(index) = find_context_line(&lines, context, cursor) else {
-                return Err(AppError::BadRequest(format!(
-                    "failed to find @@ context in {}: {}",
-                    path.to_string_lossy(),
-                    context
-                )));
-            };
-            Some(index + 1)
-        } else {
-            None
-        };
-        let search_start = context_start.unwrap_or(cursor);
-        if chunk.old_lines.is_empty() {
-            let insert_at = if chunk.is_end_of_file {
-                lines.len()
-            } else {
-                search_start.min(lines.len())
-            };
-            lines.splice(insert_at..insert_at, chunk.new_lines.clone());
-            cursor = insert_at + chunk.new_lines.len();
-            continue;
-        }
+    for file in &args.files {
+        operations.push(MultiEditFileOperation::Edit {
+            path: file.path.clone(),
+            edits: file.edits.clone(),
+        });
+    }
 
-        let matches = if chunk.change_context.is_some() {
-            find_line_sequence_matches(&lines, &chunk.old_lines, search_start, chunk.is_end_of_file)
-        } else {
-            let primary = find_line_sequence_matches(
-                &lines,
-                &chunk.old_lines,
-                search_start,
-                chunk.is_end_of_file,
-            );
-            if primary.is_empty() && search_start != 0 {
-                find_line_sequence_matches(&lines, &chunk.old_lines, 0, chunk.is_end_of_file)
-            } else {
-                primary
+    operations.extend(args.operations.clone());
+
+    if operations.is_empty() {
+        return Err(AppError::BadRequest(
+            "multi_edit_file requires path+edits, files, or operations".to_string(),
+        ));
+    }
+
+    Ok(operations)
+}
+
+fn multi_edit_affected_paths(
+    cwd: &Path,
+    operations: &[MultiEditFileOperation],
+) -> Result<Vec<PathBuf>, AppError> {
+    let mut paths = Vec::new();
+    for operation in operations {
+        match operation {
+            MultiEditFileOperation::Edit { path, .. }
+            | MultiEditFileOperation::Create { path, .. }
+            | MultiEditFileOperation::Delete { path } => {
+                paths.push(resolve_file_operation_path(cwd, path)?);
             }
-        };
-        let Some(found) = matches.first().copied() else {
-            return Err(AppError::BadRequest(format!(
-                "failed to find expected lines in {}:\n{}",
-                path.to_string_lossy(),
-                chunk.old_lines.join("\n")
-            )));
-        };
-        if matches.len() > 1 {
-            return Err(AppError::BadRequest(format!(
-                "ambiguous patch hunk in {}: expected lines matched {} locations at lines {}. Add a unique @@ context or include more surrounding unchanged lines.\n{}",
-                path.to_string_lossy(),
-                matches.len(),
-                format_line_candidates(&lines, &matches),
-                chunk.old_lines.join("\n")
-            )));
+            MultiEditFileOperation::Move { from, to, .. } => {
+                paths.push(resolve_file_operation_path(cwd, from)?);
+                paths.push(resolve_file_operation_path(cwd, to)?);
+            }
         }
-        let end = found + chunk.old_lines.len();
-        lines.splice(found..end, chunk.new_lines.clone());
-        cursor = found + chunk.new_lines.len();
     }
 
-    Ok(format!("{}\n", lines.join("\n")))
+    let mut seen = BTreeSet::new();
+    paths.retain(|path| seen.insert(normalize_display_path(path)));
+    Ok(paths)
 }
 
 fn apply_multi_edit_file(
-    target: &Path,
-    args: &MultiEditFileArgs,
-) -> Result<ApplyPatchOutcome, ApplyPatchFailure> {
-    let delta = AppliedPatchDelta::default();
-    if target.is_dir() {
-        return Err(patch_failure(
-            AppError::BadRequest(format!(
-                "multi_edit_file target is a directory: {}",
-                target.to_string_lossy()
-            )),
-            &delta,
-        ));
-    }
-    if args.edits.is_empty() {
-        return Err(patch_failure(
-            AppError::BadRequest("edits cannot be empty".to_string()),
-            &delta,
-        ));
+    cwd: &Path,
+    operations: &[MultiEditFileOperation],
+) -> Result<FileEditOutcome, FileEditFailure> {
+    let empty_delta = FileEditDelta::default();
+    let mut touched_paths = BTreeSet::new();
+    let mut staged = Vec::new();
+    let mut warnings = Vec::new();
+
+    for (index, operation) in operations.iter().enumerate() {
+        stage_multi_edit_operation(
+            cwd,
+            operation,
+            index + 1,
+            &mut touched_paths,
+            &mut staged,
+            &mut warnings,
+        )
+        .map_err(|error| edit_failure(error, &empty_delta))?;
     }
 
-    let original =
-        fs::read_to_string(target).map_err(|error| patch_failure(error.into(), &delta))?;
-    let line_endings = detect_text_line_endings(&original);
-    let original_lf = normalize_to_lf(&original);
-    let updated_lf = apply_multi_edits_to_lf_content(&original_lf, &args.edits, target)
-        .map_err(|error| patch_failure(error, &delta))?;
+    let mut delta = FileEditDelta::default();
+    for operation in staged {
+        commit_staged_file_operation(operation, &mut delta)
+            .map_err(|error| edit_failure(error, &delta))?;
+    }
 
-    if updated_lf == original_lf {
-        return Err(patch_failure(
+    if delta.changes.is_empty() {
+        return Err(edit_failure(
             AppError::BadRequest("multi_edit_file produced no changes".to_string()),
             &delta,
         ));
     }
 
-    let updated = restore_line_endings(&updated_lf, line_endings);
-    let warnings = collect_edit_warnings(target, &original, &updated);
-    fs::write(target, &updated).map_err(|error| {
-        let mut failed_delta = delta.clone();
-        failed_delta.exact = false;
-        patch_failure(error.into(), &failed_delta)
-    })?;
-
-    let mut committed_delta = AppliedPatchDelta::default();
-    committed_delta.changes.push(AppliedPatchChange::Update {
-        path: normalize_display_path(target),
-        move_path: None,
-        old_content: original,
-        new_content: updated,
-        overwritten_move_content: None,
-    });
-
-    Ok(ApplyPatchOutcome {
-        summary: PatchSummary {
-            added: Vec::new(),
-            modified: vec![args.path.clone()],
-            deleted: Vec::new(),
-        },
-        delta: committed_delta,
+    Ok(FileEditOutcome {
+        summary: summarize_file_edit_delta(&delta),
+        delta,
         warnings,
     })
+}
+
+fn stage_multi_edit_operation(
+    cwd: &Path,
+    operation: &MultiEditFileOperation,
+    index: usize,
+    touched_paths: &mut BTreeSet<String>,
+    staged: &mut Vec<StagedFileOperation>,
+    warnings: &mut Vec<String>,
+) -> Result<(), AppError> {
+    match operation {
+        MultiEditFileOperation::Edit { path, edits } => {
+            if edits.is_empty() {
+                return Err(AppError::BadRequest(format!(
+                    "operation {index} edit for {path} has empty edits"
+                )));
+            }
+            let target = resolve_file_operation_path(cwd, path)?;
+            ensure_unique_operation_path(touched_paths, &target)?;
+            if target.is_dir() {
+                return Err(AppError::BadRequest(format!(
+                    "multi_edit_file target is a directory: {}",
+                    target.to_string_lossy()
+                )));
+            }
+            let original = fs::read_to_string(&target)?;
+            let line_endings = detect_text_line_endings(&original);
+            let original_lf = normalize_to_lf(&original);
+            let updated_lf = apply_multi_edits_to_lf_content(&original_lf, edits, &target)?;
+            if updated_lf == original_lf {
+                return Err(AppError::BadRequest(format!(
+                    "operation {index} edit for {path} produced no changes"
+                )));
+            }
+            let updated = restore_line_endings(&updated_lf, line_endings);
+            warnings.extend(collect_edit_warnings(&target, &original, &updated));
+            staged.push(StagedFileOperation::Update {
+                path: target,
+                old_content: original,
+                new_content: updated,
+            });
+        }
+        MultiEditFileOperation::Create {
+            path,
+            content,
+            overwrite,
+        } => {
+            let target = resolve_file_operation_path(cwd, path)?;
+            ensure_unique_operation_path(touched_paths, &target)?;
+            if target.is_dir() {
+                return Err(AppError::BadRequest(format!(
+                    "create target is a directory: {}",
+                    target.to_string_lossy()
+                )));
+            }
+            let overwritten_content = match fs::read_to_string(&target) {
+                Ok(existing) => {
+                    if !overwrite {
+                        return Err(AppError::BadRequest(format!(
+                            "create target already exists: {}",
+                            target.to_string_lossy()
+                        )));
+                    }
+                    Some(existing)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            warnings.extend(collect_edit_warnings(
+                &target,
+                overwritten_content.as_deref().unwrap_or_default(),
+                content,
+            ));
+            staged.push(StagedFileOperation::Create {
+                path: target,
+                content: content.clone(),
+                overwritten_content,
+            });
+        }
+        MultiEditFileOperation::Delete { path } => {
+            let target = resolve_file_operation_path(cwd, path)?;
+            ensure_unique_operation_path(touched_paths, &target)?;
+            if target.is_dir() {
+                return Err(AppError::BadRequest(format!(
+                    "delete target is a directory: {}",
+                    target.to_string_lossy()
+                )));
+            }
+            let content = fs::read_to_string(&target)?;
+            staged.push(StagedFileOperation::Delete {
+                path: target,
+                content,
+            });
+        }
+        MultiEditFileOperation::Move {
+            from,
+            to,
+            overwrite,
+        } => {
+            let source = resolve_file_operation_path(cwd, from)?;
+            let target = resolve_file_operation_path(cwd, to)?;
+            if source == target {
+                return Err(AppError::BadRequest(format!(
+                    "move source and target are the same: {}",
+                    source.to_string_lossy()
+                )));
+            }
+            ensure_unique_operation_path(touched_paths, &source)?;
+            ensure_unique_operation_path(touched_paths, &target)?;
+            if source.is_dir() {
+                return Err(AppError::BadRequest(format!(
+                    "move source is a directory: {}",
+                    source.to_string_lossy()
+                )));
+            }
+            if target.is_dir() {
+                return Err(AppError::BadRequest(format!(
+                    "move target is a directory: {}",
+                    target.to_string_lossy()
+                )));
+            }
+            let content = fs::read_to_string(&source)?;
+            let overwritten_content = match fs::read_to_string(&target) {
+                Ok(existing) => {
+                    if !overwrite {
+                        return Err(AppError::BadRequest(format!(
+                            "move target already exists: {}",
+                            target.to_string_lossy()
+                        )));
+                    }
+                    Some(existing)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            staged.push(StagedFileOperation::Move {
+                from: source,
+                to: target,
+                content,
+                overwritten_content,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_unique_operation_path(
+    touched_paths: &mut BTreeSet<String>,
+    path: &Path,
+) -> Result<(), AppError> {
+    let display = normalize_display_path(path);
+    if !touched_paths.insert(display.clone()) {
+        return Err(AppError::BadRequest(format!(
+            "multi_edit_file cannot touch the same path more than once in one call: {display}"
+        )));
+    }
+    Ok(())
+}
+
+fn commit_staged_file_operation(
+    operation: StagedFileOperation,
+    delta: &mut FileEditDelta,
+) -> Result<(), AppError> {
+    match operation {
+        StagedFileOperation::Update {
+            path,
+            old_content,
+            new_content,
+            ..
+        } => {
+            fs::write(&path, &new_content).map_err(|error| {
+                delta.exact = false;
+                AppError::from(error)
+            })?;
+            delta.changes.push(FileEditChange::Update {
+                path: normalize_display_path(&path),
+                move_path: None,
+                old_content,
+                new_content,
+                overwritten_move_content: None,
+            });
+        }
+        StagedFileOperation::Create {
+            path,
+            content,
+            overwritten_content,
+            ..
+        } => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    delta.exact = false;
+                    AppError::from(error)
+                })?;
+            }
+            fs::write(&path, &content).map_err(|error| {
+                delta.exact = false;
+                AppError::from(error)
+            })?;
+            delta.changes.push(FileEditChange::Add {
+                path: normalize_display_path(&path),
+                content,
+                overwritten_content,
+            });
+        }
+        StagedFileOperation::Delete { path, content, .. } => {
+            fs::remove_file(&path).map_err(|error| {
+                delta.exact = false;
+                AppError::from(error)
+            })?;
+            delta.changes.push(FileEditChange::Delete {
+                path: normalize_display_path(&path),
+                content: Some(content),
+            });
+        }
+        StagedFileOperation::Move {
+            from,
+            to,
+            content,
+            overwritten_content,
+            ..
+        } => {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    delta.exact = false;
+                    AppError::from(error)
+                })?;
+            }
+            fs::write(&to, &content).map_err(|error| {
+                delta.exact = false;
+                AppError::from(error)
+            })?;
+            fs::remove_file(&from).map_err(|error| {
+                delta.exact = false;
+                AppError::from(error)
+            })?;
+            delta.changes.push(FileEditChange::Update {
+                path: normalize_display_path(&from),
+                move_path: Some(normalize_display_path(&to)),
+                old_content: content.clone(),
+                new_content: content,
+                overwritten_move_content: overwritten_content,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn summarize_file_edit_delta(delta: &FileEditDelta) -> FileEditSummary {
+    let mut summary = FileEditSummary {
+        added: Vec::new(),
+        modified: Vec::new(),
+        deleted: Vec::new(),
+        moved: Vec::new(),
+    };
+    for change in &delta.changes {
+        match change {
+            FileEditChange::Add { path, .. } => summary.added.push(path.clone()),
+            FileEditChange::Delete { path, .. } => summary.deleted.push(path.clone()),
+            FileEditChange::Update {
+                path, move_path, ..
+            } => {
+                if let Some(move_path) = move_path {
+                    summary.moved.push(format!("{path} -> {move_path}"));
+                } else {
+                    summary.modified.push(path.clone());
+                }
+            }
+        }
+    }
+    summary
 }
 
 fn apply_multi_edits_to_lf_content(
@@ -5478,7 +5662,7 @@ fn apply_multi_edits_to_lf_content(
 
         if old_string.is_empty() {
             return Err(AppError::BadRequest(format!(
-                "edit {} for {} has empty old_string; use apply_patch or write tooling for insert-only changes",
+                "edit {} for {} has empty old_string; use a create operation for new files or include surrounding existing text for insertions",
                 index + 1,
                 path.to_string_lossy()
             )));
@@ -5766,175 +5950,88 @@ fn matching_open_delimiter(close: char) -> char {
     }
 }
 
-fn multi_edit_preview(args: &MultiEditFileArgs) -> String {
-    let changes = args
-        .edits
+fn multi_edit_preview(operations: &[MultiEditFileOperation]) -> String {
+    let changes = operations
         .iter()
         .enumerate()
-        .map(|(index, edit)| {
-            format!(
-                "{}. oldBytes={} newBytes={} replaceAll={} startLine={}",
+        .map(|(index, operation)| match operation {
+            MultiEditFileOperation::Edit { path, edits } => {
+                format!("{}. edit {} edits={}", index + 1, path, edits.len())
+            }
+            MultiEditFileOperation::Create {
+                path,
+                content,
+                overwrite,
+            } => format!(
+                "{}. create {} bytes={} overwrite={}",
                 index + 1,
-                edit.old_string.len(),
-                edit.new_string.len(),
-                edit.replace_all,
-                edit.start_line
-                    .map(|line| line.to_string())
-                    .unwrap_or_else(|| "none".to_string())
-            )
+                path,
+                content.len(),
+                overwrite
+            ),
+            MultiEditFileOperation::Delete { path } => {
+                format!("{}. delete {}", index + 1, path)
+            }
+            MultiEditFileOperation::Move {
+                from,
+                to,
+                overwrite,
+            } => format!(
+                "{}. move {} -> {} overwrite={}",
+                index + 1,
+                from,
+                to,
+                overwrite
+            ),
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!("multi_edit_file {}\n{}", args.path, changes)
+    format!("multi_edit_file\n{}", changes)
 }
 
-fn multi_edit_preview_changes(args: &MultiEditFileArgs) -> Value {
-    json!({
-        "kind": "multiEdit",
-        "path": args.path,
-        "edits": args.edits.iter().map(|edit| json!({
-            "oldBytes": edit.old_string.len(),
-            "newBytes": edit.new_string.len(),
-            "replaceAll": edit.replace_all,
-            "startLine": edit.start_line
-        })).collect::<Vec<_>>()
-    })
-}
-
-fn find_context_line(lines: &[String], context: &str, start: usize) -> Option<usize> {
-    let needle = vec![context.to_string()];
-    find_line_sequence(lines, &needle, start, false)
-        .or_else(|| find_line_sequence(lines, &needle, 0, false))
-}
-
-fn find_line_sequence(
-    lines: &[String],
-    needle: &[String],
-    start: usize,
-    eof: bool,
-) -> Option<usize> {
-    find_line_sequence_matches(lines, needle, start, eof)
-        .first()
-        .copied()
-}
-
-fn find_line_sequence_matches(
-    lines: &[String],
-    needle: &[String],
-    start: usize,
-    eof: bool,
-) -> Vec<usize> {
-    if needle.is_empty() {
-        return vec![start.min(lines.len())];
-    }
-    if needle.len() > lines.len() {
-        return Vec::new();
-    }
-    let max_start = lines.len() - needle.len();
-    let search_start = if eof {
-        max_start
-    } else if start > max_start {
-        return Vec::new();
-    } else {
-        start
-    };
-    for matcher in [
-        line_matches_exact as fn(&str, &str) -> bool,
-        line_matches_trim_end,
-        line_matches_trim,
-        line_matches_normalized,
-    ] {
-        let mut matches = Vec::new();
-        let mut seen = BTreeSet::new();
-        for index in search_start..=max_start {
-            if sequence_matches(lines, needle, index, matcher) {
-                matches.push(index);
-                seen.insert(index);
-            }
-        }
-        if eof && start <= max_start && search_start != start {
-            for index in start..=max_start {
-                if !seen.contains(&index) && sequence_matches(lines, needle, index, matcher) {
-                    matches.push(index);
-                }
-            }
-        }
-        if !matches.is_empty() {
-            return matches;
-        }
-    }
-    Vec::new()
-}
-
-fn format_line_candidates(lines: &[String], matches: &[usize]) -> String {
-    let mut rendered = matches
+fn multi_edit_preview_changes(operations: &[MultiEditFileOperation]) -> Value {
+    json!(operations
         .iter()
-        .take(5)
-        .map(|index| {
-            let line_no = index + 1;
-            let preview = lines
-                .get(*index)
-                .map(|line| line.trim())
-                .unwrap_or_default();
-            if preview.is_empty() {
-                line_no.to_string()
-            } else {
-                format!("{line_no} (`{preview}`)")
-            }
+        .map(|operation| match operation {
+            MultiEditFileOperation::Edit { path, edits } => json!({
+                "kind": "edit",
+                "path": path,
+                "edits": edits.iter().map(|edit| json!({
+                    "oldBytes": edit.old_string.len(),
+                    "newBytes": edit.new_string.len(),
+                    "replaceAll": edit.replace_all,
+                    "startLine": edit.start_line
+                })).collect::<Vec<_>>()
+            }),
+            MultiEditFileOperation::Create {
+                path,
+                content,
+                overwrite,
+            } => json!({
+                "kind": "create",
+                "path": path,
+                "contentBytes": content.len(),
+                "overwrite": overwrite
+            }),
+            MultiEditFileOperation::Delete { path } => json!({
+                "kind": "delete",
+                "path": path
+            }),
+            MultiEditFileOperation::Move {
+                from,
+                to,
+                overwrite,
+            } => json!({
+                "kind": "move",
+                "from": from,
+                "to": to,
+                "overwrite": overwrite
+            }),
         })
-        .collect::<Vec<_>>();
-    if matches.len() > rendered.len() {
-        rendered.push(format!("and {} more", matches.len() - rendered.len()));
-    }
-    rendered.join(", ")
+        .collect::<Vec<_>>())
 }
 
-fn sequence_matches(
-    lines: &[String],
-    needle: &[String],
-    index: usize,
-    matcher: fn(&str, &str) -> bool,
-) -> bool {
-    needle
-        .iter()
-        .enumerate()
-        .all(|(offset, expected)| matcher(&lines[index + offset], expected))
-}
-
-fn line_matches_exact(left: &str, right: &str) -> bool {
-    left == right
-}
-
-fn line_matches_trim_end(left: &str, right: &str) -> bool {
-    left.trim_end() == right.trim_end()
-}
-
-fn line_matches_trim(left: &str, right: &str) -> bool {
-    left.trim() == right.trim()
-}
-
-fn line_matches_normalized(left: &str, right: &str) -> bool {
-    normalize_patch_match_text(left) == normalize_patch_match_text(right)
-}
-
-fn normalize_patch_match_text(input: &str) -> String {
-    input
-        .trim()
-        .chars()
-        .map(|ch| match ch {
-            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
-            | '\u{2212}' => '-',
-            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
-            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
-            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
-            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
-            | '\u{3000}' => ' ',
-            other => other,
-        })
-        .collect()
-}
-
-fn patch_summary_text(summary: &PatchSummary) -> String {
+fn file_edit_summary_text(summary: &FileEditSummary) -> String {
     let mut lines = vec!["Success. Updated the following files:".to_string()];
     for path in &summary.added {
         lines.push(format!("A {path}"));
@@ -5944,6 +6041,9 @@ fn patch_summary_text(summary: &PatchSummary) -> String {
     }
     for path in &summary.deleted {
         lines.push(format!("D {path}"));
+    }
+    for path in &summary.moved {
+        lines.push(format!("R {path}"));
     }
     format!("{}\n", lines.join("\n"))
 }
@@ -6884,18 +6984,6 @@ mod tests {
         assert!(shell_description.contains("SKILL.md URI:"));
         assert!(!shell_description.contains("Prefer fast discovery commands"));
 
-        let patch_tool = tools
-            .iter()
-            .find(|item| item.get("name").and_then(Value::as_str) == Some("apply_patch"))
-            .expect("apply patch tool exists");
-        let patch_description = patch_tool
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("patch description");
-        assert!(patch_description.contains("builtin://apply_patch/SKILL.md"));
-        assert!(patch_description.contains("Front matter summary:"));
-        assert!(!patch_description.contains("Minimal replacement:"));
-
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|item| item.get("name").and_then(Value::as_str))
@@ -6903,8 +6991,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "read_file",
                 "shell_command",
-                "apply_patch",
                 "multi_edit_file",
                 "task-planning",
                 "chrome-cdp",
@@ -6934,17 +7022,11 @@ mod tests {
             shell.structured.get("builtinSkill").and_then(Value::as_str),
             Some("shell_command")
         );
+        assert_eq!(
+            shell.structured.get("docSource").and_then(Value::as_str),
+            Some("embedded")
+        );
         assert!(shell.structured.get("skillToken").is_none());
-
-        let (tool, path) = builtin_skill_doc_read("cat builtin://apply_patch/SKILL.md")
-            .expect("apply_patch doc read");
-        let patch = builtin_skill_doc_result(tool, "doc", path, "def456".to_string(), false);
-        assert!(!patch.is_error);
-        assert!(patch.text.contains("# Apply Patch"));
-        assert!(patch.text.contains("*** Update File: path/to/file"));
-        assert!(patch.text.contains("does not accept standard unified diff"));
-        assert!(patch.text.contains("def456"));
-        assert!(patch.structured.get("skillToken").is_none());
 
         let (tool, path) = builtin_skill_doc_read("cat builtin://multi_edit_file/SKILL.md")
             .expect("multi_edit_file doc read");
@@ -6987,13 +7069,10 @@ mod tests {
         assert!(!adapter
             .text
             .contains("mcp-gateway/crates/gateway-http/builtin-skills"));
+        assert!(adapter.structured.get("runtimeAssets").is_none());
         assert_eq!(
-            adapter
-                .structured
-                .get("runtimeAssets")
-                .and_then(|assets| assets.get("status"))
-                .and_then(Value::as_str),
-            Some("none")
+            adapter.structured.get("docSource").and_then(Value::as_str),
+            Some("embedded")
         );
     }
 
@@ -7013,18 +7092,22 @@ mod tests {
         assert!(result.text.contains("[skillToken]"));
         assert!(result.text.contains("tok123"));
         assert!(result.structured.get("skillToken").is_none());
+        assert_eq!(
+            result.structured.get("docSource").and_then(Value::as_str),
+            Some("file")
+        );
     }
 
     #[test]
     fn non_documentation_calls_require_skill_md_hash_token() {
-        let token = builtin_skill_token(BuiltinTool::ApplyPatch);
+        let token = builtin_skill_token(BuiltinTool::MultiEditFile);
         assert_eq!(token.len(), 6);
         assert_eq!(
             token,
-            skill_token_from_content(BUILTIN_APPLY_PATCH_SKILL_MD)
+            skill_token_from_content(BUILTIN_MULTI_EDIT_FILE_SKILL_MD)
         );
 
-        let missing = validate_skill_token_result(BuiltinTool::ApplyPatch.name(), &token, None)
+        let missing = validate_skill_token_result(BuiltinTool::MultiEditFile.name(), &token, None)
             .expect("missing token should be rejected");
         assert!(missing.is_error);
         assert_eq!(
@@ -7033,12 +7116,12 @@ mod tests {
         );
 
         let invalid =
-            validate_skill_token_result(BuiltinTool::ApplyPatch.name(), &token, Some("bad000"))
+            validate_skill_token_result(BuiltinTool::MultiEditFile.name(), &token, Some("bad000"))
                 .expect("invalid token should be rejected");
         assert!(invalid.text.contains("invalid skillToken"));
 
         let accepted =
-            validate_skill_token_result(BuiltinTool::ApplyPatch.name(), &token, Some(&token));
+            validate_skill_token_result(BuiltinTool::MultiEditFile.name(), &token, Some(&token));
         assert!(accepted.is_none());
     }
 
@@ -7087,217 +7170,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_patch_updates_adds_and_deletes_files() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-        let update_path = sandbox.join("update.txt");
-        let delete_path = sandbox.join("delete.txt");
-        std::fs::write(&update_path, "alpha\nbeta\n").expect("write update");
-        std::fs::write(&delete_path, "remove me\n").expect("write delete");
-
-        let patch = "*** Begin Patch\n*** Update File: update.txt\n@@\n alpha\n-beta\n+gamma\n*** Add File: added.txt\n+new file\n*** Delete File: delete.txt\n*** End Patch"
-            .to_string();
-        let parsed = parse_apply_patch(&patch).expect("parse patch");
-        let affected = patch_affected_paths(&parsed, &sandbox).expect("affected paths");
-        assert_eq!(affected.len(), 3);
-
-        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
-        assert_eq!(outcome.summary.added, vec!["added.txt"]);
-        assert_eq!(outcome.summary.modified, vec!["update.txt"]);
-        assert_eq!(outcome.summary.deleted, vec!["delete.txt"]);
-        assert!(outcome.delta.exact);
-        assert_eq!(outcome.delta.changes.len(), 3);
-        assert_eq!(
-            std::fs::read_to_string(sandbox.join("update.txt")).expect("read update"),
-            "alpha\ngamma\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(sandbox.join("added.txt")).expect("read added"),
-            "new file\n"
-        );
-        assert!(!delete_path.exists());
-
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-
-    #[test]
-    fn apply_patch_rejects_unified_diff_with_format_hint() {
-        let patch = "*** Begin Patch\n--- index.html\n+++ index.html\n@@ -1 +1 @@\n-old\n+new\n*** End Patch";
-        let error = parse_apply_patch(patch).expect_err("unified diff should be rejected");
-        match error {
-            AppError::BadRequest(message) => {
-                assert!(message.contains("does not accept standard unified diff"));
-                assert!(message.contains("*** Update File: path/to/file"));
-            }
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn apply_patch_rejects_empty_update() {
-        let patch = "*** Begin Patch\n*** Update File: file.txt\n*** End Patch";
-        let error = parse_apply_patch(patch).expect_err("empty update should be rejected");
-        match error {
-            AppError::BadRequest(message) => {
-                assert!(message.contains("empty"));
-            }
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn apply_patch_accepts_heredoc_context_eof_and_fuzzy_match() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-        let target = sandbox.join("update.txt");
-        std::fs::write(
-            &target,
-            "intro\nfn target\n  value: old\u{2013}dash  \ntail\n",
-        )
-        .expect("write update");
-
-        let patch = "<<'EOF'\n*** Begin Patch\n*** Update File: update.txt\n@@ fn target\n-  value: old-dash\n+  value: new-dash\n@@\n+done\n*** End of File\n*** End Patch\nEOF";
-        let parsed = parse_apply_patch(patch).expect("parse patch");
-        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
-        assert_eq!(outcome.summary.modified, vec!["update.txt"]);
-        assert_eq!(
-            std::fs::read_to_string(&target).expect("read update"),
-            "intro\nfn target\n  value: new-dash\ntail\ndone\n"
-        );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-
-    #[test]
-    fn apply_patch_preserves_blank_lines_inside_update_hunks() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-        let target = sandbox.join("update.txt");
-        std::fs::write(&target, "alpha\n\nbeta\n").expect("write update");
-
-        let patch = "*** Begin Patch\n*** Update File: update.txt\n@@\n alpha\n\n-beta\n+gamma\n*** End Patch";
-        let parsed = parse_apply_patch(patch).expect("parse patch");
-        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
-        assert_eq!(outcome.summary.modified, vec!["update.txt"]);
-        assert_eq!(
-            std::fs::read_to_string(&target).expect("read update"),
-            "alpha\n\ngamma\n"
-        );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-
-    #[test]
-    fn apply_patch_rejects_missing_context_without_global_fallback() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-        let target = sandbox.join("update.txt");
-        std::fs::write(&target, "alpha\nbeta\n").expect("write update");
-
-        let patch =
-            "*** Begin Patch\n*** Update File: update.txt\n@@ missing-anchor\n-beta\n+gamma\n*** End Patch";
-        let parsed = parse_apply_patch(patch).expect("parse patch");
-        let failure = apply_parsed_patch(&parsed, &sandbox).expect_err("missing context fails");
-        assert!(failure.message.contains("failed to find @@ context"));
-        assert_eq!(
-            std::fs::read_to_string(&target).expect("read update"),
-            "alpha\nbeta\n"
-        );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-
-    #[test]
-    fn apply_patch_rejects_ambiguous_repeated_hunk_with_candidates() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-        let target = sandbox.join("App.tsx");
-        std::fs::write(
-            &target,
-            "<div>\n  <Code2 size={15} />\n</div>\n<div>\n  <Code2 size={15} />\n</div>\n",
-        )
-        .expect("write update");
-
-        let patch = "*** Begin Patch\n*** Update File: App.tsx\n@@\n-  <Code2 size={15} />\n+  <Code2 size={16} />\n*** End Patch";
-        let parsed = parse_apply_patch(patch).expect("parse patch");
-        let failure = apply_parsed_patch(&parsed, &sandbox).expect_err("ambiguous hunk fails");
-        assert!(failure.message.contains("ambiguous patch hunk"));
-        assert!(failure.message.contains("lines 2"));
-        assert!(failure.message.contains("5"));
-
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-
-    #[test]
-    fn apply_patch_preserves_template_expression_dollar() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-        let target = sandbox.join("App.tsx");
-
-        let patch = "*** Begin Patch\n*** Add File: App.tsx\n+const className = `${active ? \"on\" : \"off\"}`;\n*** End Patch";
-        let parsed = parse_apply_patch(patch).expect("parse patch");
-        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
-        assert!(outcome.warnings.is_empty());
-        assert_eq!(
-            std::fs::read_to_string(&target).expect("read update"),
-            "const className = `${active ? \"on\" : \"off\"}`;\n"
-        );
-
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-
-    #[test]
-    fn apply_patch_warns_on_escaped_template_expression() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-
-        let patch = "*** Begin Patch\n*** Add File: App.tsx\n+const className = `\\${active}`;\n*** End Patch";
-        let parsed = parse_apply_patch(patch).expect("parse patch");
-        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("`\\${`")));
-
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-
-    #[test]
-    fn apply_patch_add_file_overwrites_like_codex_and_records_delta() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-        let target = sandbox.join("existing.txt");
-        std::fs::write(&target, "old\n").expect("write existing");
-
-        let patch = "*** Begin Patch\n*** Add File: existing.txt\n+new\n*** End Patch";
-        let parsed = parse_apply_patch(patch).expect("parse patch");
-        let outcome = apply_parsed_patch(&parsed, &sandbox).expect("apply patch");
-        assert_eq!(outcome.summary.added, vec!["existing.txt"]);
-        assert_eq!(
-            std::fs::read_to_string(&target).expect("read existing"),
-            "new\n"
-        );
-        match outcome.delta.changes.as_slice() {
-            [AppliedPatchChange::Add {
-                path,
-                content,
-                overwritten_content,
-            }] => {
-                assert!(Path::new(path).ends_with("existing.txt"));
-                assert_eq!(content, "new\n");
-                assert_eq!(overwritten_content.as_deref(), Some("old\n"));
-            }
-            other => panic!("unexpected delta: {other:?}"),
-        }
-
-        let _ = std::fs::remove_dir_all(&sandbox);
-    }
-
-    #[test]
-    fn apply_patch_model_delta_omits_full_file_contents() {
-        let delta = AppliedPatchDelta {
+    fn file_edit_model_delta_omits_full_file_contents() {
+        let delta = FileEditDelta {
             exact: true,
-            changes: vec![AppliedPatchChange::Update {
+            changes: vec![FileEditChange::Update {
                 path: "src/lib.rs".to_string(),
                 move_path: None,
                 old_content: "old\ncontent\n".to_string(),
@@ -7306,25 +7182,12 @@ mod tests {
             }],
         };
 
-        let model_delta = patch_delta_for_model(&delta);
+        let model_delta = edit_delta_for_model(&delta);
         let serialized = serde_json::to_string(&model_delta).expect("serialize model delta");
         assert!(serialized.contains("oldContentBytes"));
         assert!(serialized.contains("newContentBytes"));
         assert!(!serialized.contains("old\\ncontent"));
         assert!(!serialized.contains("new\\ncontent"));
-    }
-
-    #[test]
-    fn apply_patch_failure_reports_committed_delta() {
-        let sandbox = std::env::temp_dir().join(format!("gateway-patch-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&sandbox).expect("create sandbox");
-        let patch = "*** Begin Patch\n*** Add File: added.txt\n+new file\n*** Delete File: missing.txt\n*** End Patch";
-        let parsed = parse_apply_patch(patch).expect("parse patch");
-        let failure = apply_parsed_patch(&parsed, &sandbox).expect_err("delete should fail");
-        assert_eq!(failure.delta.changes.len(), 1);
-        assert!(sandbox.join("added.txt").exists());
-
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     #[test]
@@ -7335,10 +7198,12 @@ mod tests {
         std::fs::write(&target, "alpha\nbeta\nbeta\ngamma\n").expect("write update");
 
         let args = MultiEditFileArgs {
-            path: "update.txt".to_string(),
+            path: Some("update.txt".to_string()),
             cwd: None,
             skill_token: None,
             planning_id: None,
+            files: Vec::new(),
+            operations: Vec::new(),
             edits: vec![
                 MultiEditFileEdit {
                     old_string: "alpha".to_string(),
@@ -7355,14 +7220,19 @@ mod tests {
             ],
         };
 
-        let outcome = apply_multi_edit_file(&target, &args).expect("apply multi edit");
-        assert_eq!(outcome.summary.modified, vec!["update.txt"]);
+        let operations = normalize_multi_edit_operations(&args).expect("normalize operations");
+        let outcome = apply_multi_edit_file(&sandbox, &operations).expect("apply multi edit");
+        assert!(outcome
+            .summary
+            .modified
+            .iter()
+            .any(|path| Path::new(path).ends_with("update.txt")));
         assert_eq!(
             std::fs::read_to_string(&target).expect("read update"),
             "ALPHA\nbeta\nBETA\ngamma\n"
         );
         match outcome.delta.changes.as_slice() {
-            [AppliedPatchChange::Update {
+            [FileEditChange::Update {
                 path,
                 old_content,
                 new_content,
@@ -7386,10 +7256,12 @@ mod tests {
         std::fs::write(&target, "alpha\nbeta\nbeta\n").expect("write update");
 
         let args = MultiEditFileArgs {
-            path: "update.txt".to_string(),
+            path: Some("update.txt".to_string()),
             cwd: None,
             skill_token: None,
             planning_id: None,
+            files: Vec::new(),
+            operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
                 old_string: "beta".to_string(),
                 new_string: "BETA".to_string(),
@@ -7398,8 +7270,9 @@ mod tests {
             }],
         };
 
+        let operations = normalize_multi_edit_operations(&args).expect("normalize operations");
         let failure =
-            apply_multi_edit_file(&target, &args).expect_err("ambiguous edit should fail");
+            apply_multi_edit_file(&sandbox, &operations).expect_err("ambiguous edit should fail");
         assert!(failure.message.contains("found 2 matches"));
         assert_eq!(
             std::fs::read_to_string(&target).expect("read update"),
@@ -7417,10 +7290,12 @@ mod tests {
         std::fs::write(&target, "alpha\r\nbeta\r\n").expect("write update");
 
         let args = MultiEditFileArgs {
-            path: "update.txt".to_string(),
+            path: Some("update.txt".to_string()),
             cwd: None,
             skill_token: None,
             planning_id: None,
+            files: Vec::new(),
+            operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
                 old_string: "alpha\nbeta".to_string(),
                 new_string: "ALPHA\nBETA".to_string(),
@@ -7429,7 +7304,8 @@ mod tests {
             }],
         };
 
-        apply_multi_edit_file(&target, &args).expect("apply multi edit");
+        let operations = normalize_multi_edit_operations(&args).expect("normalize operations");
+        apply_multi_edit_file(&sandbox, &operations).expect("apply multi edit");
         assert_eq!(
             std::fs::read_to_string(&target).expect("read update"),
             "ALPHA\r\nBETA\r\n"
@@ -7446,10 +7322,12 @@ mod tests {
         std::fs::write(&target, "fn outer() {\n    value();\n}\n").expect("write update");
 
         let args = MultiEditFileArgs {
-            path: "lib.rs".to_string(),
+            path: Some("lib.rs".to_string()),
             cwd: None,
             skill_token: None,
             planning_id: None,
+            files: Vec::new(),
+            operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
                 old_string: "    value();\n}".to_string(),
                 new_string: "    value();".to_string(),
@@ -7458,7 +7336,8 @@ mod tests {
             }],
         };
 
-        let outcome = apply_multi_edit_file(&target, &args).expect("apply multi edit");
+        let operations = normalize_multi_edit_operations(&args).expect("normalize operations");
+        let outcome = apply_multi_edit_file(&sandbox, &operations).expect("apply multi edit");
         assert!(outcome
             .warnings
             .iter()
@@ -7468,12 +7347,103 @@ mod tests {
     }
 
     #[test]
+    fn multi_edit_file_applies_multi_file_create_delete_and_move_operations() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-multi-ops-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        std::fs::write(sandbox.join("a.txt"), "alpha\n").expect("write a");
+        std::fs::write(sandbox.join("delete.txt"), "remove\n").expect("write delete");
+        std::fs::write(sandbox.join("old.txt"), "move me\n").expect("write move");
+
+        let operations = vec![
+            MultiEditFileOperation::Edit {
+                path: "a.txt".to_string(),
+                edits: vec![MultiEditFileEdit {
+                    old_string: "alpha".to_string(),
+                    new_string: "ALPHA".to_string(),
+                    replace_all: false,
+                    start_line: None,
+                }],
+            },
+            MultiEditFileOperation::Create {
+                path: "created.txt".to_string(),
+                content: "created\n".to_string(),
+                overwrite: false,
+            },
+            MultiEditFileOperation::Delete {
+                path: "delete.txt".to_string(),
+            },
+            MultiEditFileOperation::Move {
+                from: "old.txt".to_string(),
+                to: "new.txt".to_string(),
+                overwrite: false,
+            },
+        ];
+
+        let outcome = apply_multi_edit_file(&sandbox, &operations).expect("apply operations");
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("a.txt")).expect("read a"),
+            "ALPHA\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("created.txt")).expect("read created"),
+            "created\n"
+        );
+        assert!(!sandbox.join("delete.txt").exists());
+        assert!(!sandbox.join("old.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("new.txt")).expect("read moved"),
+            "move me\n"
+        );
+        assert_eq!(outcome.delta.changes.len(), 4);
+        assert_eq!(outcome.summary.added.len(), 1);
+        assert_eq!(outcome.summary.deleted.len(), 1);
+        assert_eq!(outcome.summary.moved.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn multi_edit_file_validates_all_operations_before_writing() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-multi-ops-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        std::fs::write(sandbox.join("a.txt"), "alpha\n").expect("write a");
+
+        let operations = vec![
+            MultiEditFileOperation::Create {
+                path: "created.txt".to_string(),
+                content: "created\n".to_string(),
+                overwrite: false,
+            },
+            MultiEditFileOperation::Edit {
+                path: "a.txt".to_string(),
+                edits: vec![MultiEditFileEdit {
+                    old_string: "missing".to_string(),
+                    new_string: "MISSING".to_string(),
+                    replace_all: false,
+                    start_line: None,
+                }],
+            },
+        ];
+
+        let failure =
+            apply_multi_edit_file(&sandbox, &operations).expect_err("second operation should fail");
+        assert!(failure.message.contains("old_string not found"));
+        assert!(!sandbox.join("created.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("a.txt")).expect("read a"),
+            "alpha\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
     fn disabled_builtin_tool_not_in_tool_definitions() {
         let os = "Windows";
         let now = "2024-01-01T00:00:00Z";
         let cfg = BuiltinToolsConfig {
+            read_file: true,
             shell_command: false,
-            apply_patch: true,
             multi_edit_file: true,
             task_planning: true,
             chrome_cdp: true,
@@ -7485,7 +7455,6 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect();
         assert!(!names.contains(&"shell_command"));
-        assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"multi_edit_file"));
     }
 
@@ -7494,8 +7463,8 @@ mod tests {
         let os = "Windows";
         let now = "2024-01-01T00:00:00Z";
         let cfg = BuiltinToolsConfig {
+            read_file: false,
             shell_command: false,
-            apply_patch: false,
             multi_edit_file: false,
             task_planning: false,
             chrome_cdp: true,
@@ -7515,14 +7484,99 @@ mod tests {
         assert_eq!(builtin_tools(&all_enabled).len(), 6);
 
         let all_disabled = BuiltinToolsConfig {
+            read_file: false,
             shell_command: false,
-            apply_patch: false,
             multi_edit_file: false,
             task_planning: false,
             chrome_cdp: false,
             chat_plus_adapter_debugger: false,
         };
         assert_eq!(builtin_tools(&all_disabled).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn read_file_returns_line_window_every_time() {
+        let service = SkillsService::new();
+        let sandbox = std::env::temp_dir().join(format!("gateway-read-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("sample.txt");
+        std::fs::write(&target, "one\ntwo\nthree\nfour\n").expect("write sample");
+
+        let mut config = GatewayConfig::default();
+        config.skills.builtin_tools.task_planning = false;
+        config.skills.policy.path_guard.enabled = true;
+        config.skills.policy.path_guard.whitelist_dirs = vec![normalize_display_path(
+            &normalize_root_path(sandbox.clone()),
+        )];
+
+        let token = builtin_skill_token(BuiltinTool::ReadFile);
+        let args = json!({
+            "path": "sample.txt",
+            "cwd": normalize_display_path(&sandbox),
+            "offset": 2,
+            "limit": 2,
+            "skillToken": token
+        });
+
+        let first = service
+            .execute_builtin_tool(&config, BuiltinTool::ReadFile, args.clone(), "scope:read")
+            .await
+            .expect("first read");
+        assert!(!first.is_error);
+        assert_eq!(first.structured["startLine"], 2);
+        assert_eq!(first.structured["endLine"], 3);
+        assert_eq!(first.structured["numLines"], 2);
+        assert!(first.text.contains("2\ttwo"));
+        assert!(first.text.contains("3\tthree"));
+
+        let second = service
+            .execute_builtin_tool(&config, BuiltinTool::ReadFile, args, "scope:read")
+            .await
+            .expect("second read");
+        assert!(!second.is_error);
+        assert_eq!(second.structured["startLine"], 2);
+        assert_eq!(second.structured["endLine"], 3);
+        assert_eq!(second.structured["numLines"], 2);
+        assert!(second.text.contains("2\ttwo"));
+        assert!(second.text.contains("3\tthree"));
+        assert!(second.structured["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("2\ttwo")));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_binary_files() {
+        let service = SkillsService::new();
+        let sandbox = std::env::temp_dir().join(format!("gateway-read-bin-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        std::fs::write(sandbox.join("sample.bin"), b"abc\0def").expect("write binary");
+
+        let mut config = GatewayConfig::default();
+        config.skills.builtin_tools.task_planning = false;
+        config.skills.policy.path_guard.enabled = true;
+        config.skills.policy.path_guard.whitelist_dirs = vec![normalize_display_path(
+            &normalize_root_path(sandbox.clone()),
+        )];
+
+        let result = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::ReadFile,
+                json!({
+                    "path": "sample.bin",
+                    "cwd": normalize_display_path(&sandbox),
+                    "skillToken": builtin_skill_token(BuiltinTool::ReadFile)
+                }),
+                "scope:read-bin",
+            )
+            .await
+            .expect("read result");
+        assert!(result.is_error);
+        assert!(result.text.contains("binary"));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     #[tokio::test]
@@ -7713,45 +7767,17 @@ mod tests {
             )
             .await;
         assert!(after_rg_shell.shell_command_reminder.is_none());
-        let reset_by_patch = service
+        let reset_by_edit = service
             .planning_success_hints(
                 &config,
                 "session:changed",
                 Some(&planning_id),
-                BuiltinTool::ApplyPatch,
+                BuiltinTool::MultiEditFile,
                 None,
             )
             .await;
-        assert!(reset_by_patch.shell_command_reminder.is_none());
+        assert!(reset_by_edit.shell_command_reminder.is_none());
 
-        assert!(service
-            .planning_edit_failure_reminder(
-                &config,
-                "session:changed",
-                Some(&planning_id),
-                BuiltinTool::ApplyPatch,
-            )
-            .await
-            .is_none());
-        assert!(service
-            .planning_edit_failure_reminder(
-                &config,
-                "session:changed",
-                Some(&planning_id),
-                BuiltinTool::ApplyPatch,
-            )
-            .await
-            .is_none());
-        let edit_failure_reminder = service
-            .planning_edit_failure_reminder(
-                &config,
-                "session:changed",
-                Some(&planning_id),
-                BuiltinTool::ApplyPatch,
-            )
-            .await
-            .expect("third edit failure reminder");
-        assert!(edit_failure_reminder.contains("apply_patch has failed 3 times"));
         assert!(service
             .planning_edit_failure_reminder(
                 &config,
@@ -7761,6 +7787,25 @@ mod tests {
             )
             .await
             .is_none());
+        assert!(service
+            .planning_edit_failure_reminder(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::MultiEditFile,
+            )
+            .await
+            .is_none());
+        let edit_failure_reminder = service
+            .planning_edit_failure_reminder(
+                &config,
+                "session:changed",
+                Some(&planning_id),
+                BuiltinTool::MultiEditFile,
+            )
+            .await
+            .expect("third edit failure reminder");
+        assert!(edit_failure_reminder.contains("multi_edit_file has failed 3 times"));
         let edit_error = tool_error_with_edit_failure_reminder(
             "failed".to_string(),
             json!({"status": "failed"}),
