@@ -873,7 +873,7 @@ function App() {
     if (!isSkillRuleFormValid(skillRuleForm)) return;
     const nextRules = editingSkillRuleId
       ? skills.policy.rules.map((rule) =>
-          rule.id === editingSkillRuleId ? formToRule(skillRuleForm, rule.id) : rule
+          rule.id === editingSkillRuleId ? formToRule(skillRuleForm, rule.id, rule) : rule
         )
       : [...skills.policy.rules, formToRule(skillRuleForm, createSkillRuleId(skills.policy.rules))];
     syncSkillRules(nextRules);
