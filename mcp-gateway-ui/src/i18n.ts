@@ -505,7 +505,8 @@ const translations = {
 } as const;
 
 export type TKey = keyof typeof translations.zh;
+export type TFunction = (key: TKey) => string;
 
-export function useT(lang: Lang) {
+export function useT(lang: Lang): TFunction {
   return (key: TKey): string => translations[lang][key];
 }
