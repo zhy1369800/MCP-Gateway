@@ -19,6 +19,7 @@ impl SkillsService {
                 cwd: String::new(),
                 affected_paths: Vec::new(),
                 preview: raw_command.to_string(),
+                reason_key: String::new(),
             },
         )
         .await
@@ -72,6 +73,7 @@ impl SkillsService {
             affected_paths: metadata.affected_paths,
             preview: metadata.preview,
             reason: reason.to_string(),
+            reason_key: metadata.reason_key,
         };
 
         guard.insert(

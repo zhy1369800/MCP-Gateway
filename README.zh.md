@@ -31,7 +31,7 @@ MCP Gateway 是一个 MCP（Model Context Protocol）服务器网关。
 
 ![Image two](./image2.png)
 
-最新版 SKILLS 设置页展示了 Skill MCP 开关、Skill 服务名、自带 Skill 列表，以及外部 Skill 根目录。每个外部根目录都可以单独浏览、检测、启用/禁用和删除。
+最新版 Skill 页面展示自带 Skill 列表、外部 Skill 根目录和固定 Skill MCP 端点。每个外部根目录都可以单独浏览、检测、启用/禁用和删除。
 
 ### Image three（可视化策略规则管理）
 
@@ -87,22 +87,22 @@ MCP Gateway 是一个 MCP（Model Context Protocol）服务器网关。
 
 ## 2. 新增 SKILLS 功能说明
 
-`SKILLS` 标签页用于启用并管理内置 Skill MCP 服务：
+Skill 页面用于管理外部 Skill 根目录和内置 Skill 工具：
 
-1. 打开 `启用内置 SKILL MCP`。
-2. 设置 `Skill 服务名`（默认 `__skills__`）。
-3. 查看自带 Skill：`read_file`、`shell_command`、`multi_edit_file`、`chrome-cdp`、`chat-plus-adapter-debugger`。每个自带 Skill 可单独开关。普通源码/配置文件读取优先用 `read_file`，它会做访问边界检查、按行号窗口返回内容，并更好配合编辑工具。
-4. 添加 `外部 Skill 根目录`，检测每个目录下是否直接存在 `SKILL.md`，并只启用需要暴露的根目录。
-5. 配置 `允许访问目录`。启用 Skill MCP 时访问边界为必填；命令执行和文件修改都必须留在允许访问目录内，除非你选择的越界动作允许继续。
-6. 选择越界动作：`allow / confirm / deny`。
-7. 设置执行限制：`执行超时（毫秒）`（最小 `1000`）和 `最大输出（字节）`（最小 `1024`）。
-8. 在可视化规则管理中维护策略规则。规则支持 `拒绝` 和 `需要确认`，可按命令开头匹配、关键词匹配，并支持搜索、新增、编辑、复制、删除；高级 JSON 编辑仍保留，用于批量粘贴或手工迁移。
-9. 运行后可在 `待确认命令` 中审批高风险命令，也可以通过确认弹窗直接处理。
+1. 查看自带 Skill：`read_file`、`shell_command`、`multi_edit_file`、`chrome-cdp`、`chat-plus-adapter-debugger`。每个自带 Skill 可单独开关。普通源码/配置文件读取优先用 `read_file`，它会做访问边界检查、按行号窗口返回内容，并更好配合编辑工具。
+2. 添加 `外部 Skill 根目录`，检测每个目录下是否直接存在 `SKILL.md`，并只启用需要暴露的根目录。
+3. 配置 `允许访问目录`。命令执行和文件修改都必须留在允许访问目录内，除非你选择的越界动作允许继续。
+4. 选择越界动作：`allow / confirm / deny`。
+5. 设置执行限制：`执行超时（毫秒）`（最小 `1000`）和 `最大输出（字节）`（最小 `1024`）。
+6. 在可视化规则管理中维护策略规则。规则支持 `拒绝` 和 `需要确认`，可按命令开头匹配、关键词匹配，并支持搜索、新增、编辑、复制、删除；高级 JSON 编辑仍保留，用于批量粘贴或手工迁移。
+7. 运行后可在 `待确认命令` 中审批高风险命令，也可以通过确认弹窗直接处理。
 
-当网关运行且 SKILLS 已启用时，界面会展示：
+当网关运行时，界面会展示固定 Skill 端点：
 
-- `Skill SSE`：`http://<监听地址><SSE路径>/<skillsServerName>`
-- `Skill HTTP`：`http://<监听地址><HTTP路径>/<skillsServerName>`
+- `外部 Skill SSE`：`http://<监听地址><SSE路径>/__skills__`
+- `外部 Skill HTTP`：`http://<监听地址><HTTP路径>/__skills__`
+- `内置 Skill SSE`：`http://<监听地址><SSE路径>/__builtin_skills__`
+- `内置 Skill HTTP`：`http://<监听地址><HTTP路径>/__builtin_skills__`
 
 ## 3. 推荐使用流程
 

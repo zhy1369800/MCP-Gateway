@@ -87,23 +87,22 @@ Example (Playwright MCP):
 
 ## 2. New SKILLS Feature
 
-The `SKILLS` tab is used to enable and manage the built-in Skill MCP service:
+The Skill pages are used to manage external Skill roots and built-in Skill tools:
 
-1. Set `External Skill Server Name` (default `__skills__`) and `Built-in Skill Server Name` (default `__builtin_skills__`). These two names must be different.
-2. Review bundled Skills: `read_file`, `shell_command`, `multi_edit_file`, `chrome-cdp`, and `chat-plus-adapter-debugger`. Each can be toggled individually. Prefer `read_file` for source/config file reads before editing; it enforces allowed directories, returns line-numbered windows, and works with the editing tools.
-3. Add `External Skill Roots`, validate that `SKILL.md` exists directly in each directory, and enable only the roots you want to expose.
-4. Configure `Allowed Directories`. Commands and file edits must stay inside the allowed directories unless the selected violation action says otherwise.
-6. Choose the violation action: `allow / confirm / deny`.
-7. Configure execution limits: `Execution Timeout (ms)` (minimum `1000`) and `Max Output (bytes)` (minimum `1024`).
-8. Manage policy rules in the visual rule manager. Rules support `deny` and `confirm`, command-prefix matching, keyword matching, search, add, edit, copy, and delete. The advanced JSON editor remains available for bulk paste or manual migration.
-9. After running, approve or reject high-risk commands in `Pending Confirmations` or from the confirmation popup.
+1. Review bundled Skills: `read_file`, `shell_command`, `multi_edit_file`, `chrome-cdp`, and `chat-plus-adapter-debugger`. Each can be toggled individually. Prefer `read_file` for source/config file reads before editing; it enforces allowed directories, returns line-numbered windows, and works with the editing tools.
+2. Add `External Skill Roots`, validate that `SKILL.md` exists directly in each directory, and enable only the roots you want to expose.
+3. Configure `Allowed Directories`. Commands and file edits must stay inside the allowed directories unless the selected violation action says otherwise.
+4. Choose the violation action: `allow / confirm / deny`.
+5. Configure execution limits: `Execution Timeout (ms)` (minimum `1000`) and `Max Output (bytes)` (minimum `1024`).
+6. Manage policy rules in the visual rule manager. Rules support `deny` and `confirm`, command-prefix matching, keyword matching, search, add, edit, copy, and delete. The advanced JSON editor remains available for bulk paste or manual migration.
+7. After running, approve or reject high-risk commands in `Pending Confirmations` or from the confirmation popup.
 
 When the gateway is running, the UI shows external and built-in Skill endpoints:
 
-- `External Skill SSE`: `http://<listenAddress><ssePath>/<skillsServerName>`
-- `External Skill HTTP`: `http://<listenAddress><httpPath>/<skillsServerName>`
-- `Built-in Skill SSE`: `http://<listenAddress><ssePath>/<builtinServerName>`
-- `Built-in Skill HTTP`: `http://<listenAddress><httpPath>/<builtinServerName>`
+- `External Skill SSE`: `http://<listenAddress><ssePath>/__skills__`
+- `External Skill HTTP`: `http://<listenAddress><httpPath>/__skills__`
+- `Built-in Skill SSE`: `http://<listenAddress><ssePath>/__builtin_skills__`
+- `Built-in Skill HTTP`: `http://<listenAddress><httpPath>/__builtin_skills__`
 
 ## 3. Recommended Workflow
 

@@ -68,14 +68,14 @@ cargo test --workspace
 
 ## Skills MCP Usage
 
-The gateway exposes two Skill MCP servers. External skills discovered from configured roots use `skills.serverName`; bundled tools use `skills.builtinServerName`.
+The gateway exposes two fixed Skill MCP servers. External skills discovered from configured roots use `__skills__`; bundled tools use `__builtin_skills__`.
 
-- `POST /api/v2/mcp/{skills.serverName}`
-- `GET|POST /api/v2/sse/{skills.serverName}`
-- `POST /api/v2/mcp/{skills.builtinServerName}`
-- `GET|POST /api/v2/sse/{skills.builtinServerName}`
+- `POST /api/v2/mcp/__skills__`
+- `GET|POST /api/v2/sse/__skills__`
+- `POST /api/v2/mcp/__builtin_skills__`
+- `GET|POST /api/v2/sse/__builtin_skills__`
 
-Default external server name is `__skills__`; default built-in server name is `__builtin_skills__`. The two names must be different.
+These server names are reserved and are not user-configurable.
 
 ### Browser JSON-RPC Example
 

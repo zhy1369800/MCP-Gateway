@@ -183,6 +183,7 @@ pub struct SkillConfirmation {
     pub affected_paths: Vec<String>,
     pub preview: String,
     pub reason: String,
+    pub reason_key: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ToSchema, PartialEq, Eq)]
@@ -359,7 +360,10 @@ struct ToolResult {
 #[derive(Debug)]
 enum PolicyDecision {
     Allow,
-    Confirm(String),
+    Confirm {
+        reason: String,
+        reason_key: String,
+    },
     Deny(String),
 }
 
@@ -386,6 +390,7 @@ struct ConfirmationMetadata {
     cwd: String,
     affected_paths: Vec<String>,
     preview: String,
+    reason_key: String,
 }
 
 #[derive(Debug)]

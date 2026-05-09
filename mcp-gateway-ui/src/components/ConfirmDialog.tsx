@@ -1,12 +1,13 @@
 import type { TFunction } from "../i18n";
 
-export function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: {
+export function ConfirmDialog({ open, title, message, onCancel, onConfirm, t, confirmText }: {
   open: boolean;
   title: string;
   message: string;
   onCancel: () => void;
   onConfirm: () => void;
   t: TFunction;
+  confirmText?: string;
 }) {
   if (!open) return null;
   return (
@@ -18,7 +19,7 @@ export function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: 
         </div>
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={onCancel}>{t("cancel")}</button>
-          <button className="btn btn-danger" onClick={onConfirm}>{t("confirmDelete")}</button>
+          <button className="btn btn-danger" onClick={onConfirm}>{confirmText ?? t("confirmDelete")}</button>
         </div>
       </div>
     </div>

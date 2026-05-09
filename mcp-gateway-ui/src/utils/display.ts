@@ -22,7 +22,7 @@ export function runtimeDisplayValue(
     return t("runtimeDetectFailed");
   }
   if (!runtime.installed) {
-    return t("runtimeNotInstalled");
+    return t("runtimeInstallPathHint");
   }
   return runtime.version?.trim() || t("runtimeDetectFailed");
 }

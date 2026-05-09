@@ -165,12 +165,12 @@ impl SkillsService {
                         "tool": BuiltinTool::MultiEditFile.name(),
                         "cwd": normalize_display_path(&cwd),
                         "policyAction": "deny",
-                        "policyHelp": mcp_gateway_policy_denied_help(),
+                        "policyHelp": mcp_gateway_policy_denied_help(&reason),
                         "affectedPaths": affected_paths.iter().map(|path| normalize_display_path(path)).collect::<Vec<_>>()
                     }),
                 ));
             }
-            PolicyDecision::Confirm(reason) => {
+            PolicyDecision::Confirm { reason, reason_key } => {
                 let metadata = ConfirmationMetadata {
                     kind: "edit".to_string(),
                     cwd: normalize_display_path(&cwd),
@@ -179,6 +179,7 @@ impl SkillsService {
                         .map(|path| normalize_display_path(path))
                         .collect(),
                     preview: truncate_preview(&preview, 4000),
+                    reason_key,
                 };
                 let confirmation_id = match self
                     .create_confirmation_with_metadata(

@@ -59,11 +59,11 @@ impl SkillsService {
                         "tool": tool_name,
                         "command": command_preview,
                         "policyAction": "deny",
-                        "policyHelp": mcp_gateway_policy_denied_help()
+                        "policyHelp": mcp_gateway_policy_denied_help(&reason)
                     }),
                 ));
             }
-            PolicyDecision::Confirm(reason) => {
+            PolicyDecision::Confirm { reason, reason_key } => {
                 let (confirmation_id, already_decided) = match self
                     .create_confirmation_with_metadata(
                         &skill.skill,
@@ -76,6 +76,7 @@ impl SkillsService {
                             cwd: normalize_display_path(&skill.path),
                             affected_paths: Vec::new(),
                             preview: command_preview.clone(),
+                            reason_key,
                         },
                     )
                     .await

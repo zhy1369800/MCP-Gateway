@@ -14,6 +14,7 @@ export function SkillDirectoryListEditor({
   onToggleEnabled,
   enableToggle = false,
   showValidation = true,
+  showAddButton = true,
   t,
 }: {
   title: string;
@@ -27,6 +28,7 @@ export function SkillDirectoryListEditor({
   onToggleEnabled?: (id: string) => void;
   enableToggle?: boolean;
   showValidation?: boolean;
+  showAddButton?: boolean;
   t: TFunction;
 }) {
   const statusLabel = (status: SkillDirStatus): string => {
@@ -40,8 +42,8 @@ export function SkillDirectoryListEditor({
   return (
     <div className="skills-dir-panel">
       <div className="skills-dir-panel-head">
-        <label className="field-label">{title}</label>
-        <button className="btn-add-dir" title={t("addFolderPath")} onClick={onAdd}>+</button>
+        {title && <label className="field-label">{title}</label>}
+        {showAddButton && <button className="btn-add-dir" title={t("addFolderPath")} onClick={onAdd}>+</button>}
       </div>
       <div className="skills-dir-list">
         {items.map((item) => (
@@ -84,7 +86,7 @@ export function SkillDirectoryListEditor({
           </div>
         ))}
       </div>
-      <span className="json-hint">{hint}</span>
+      {hint && <span className="json-hint">{hint}</span>}
     </div>
   );
 }

@@ -107,16 +107,17 @@ impl SkillsService {
                         "command": command_preview,
                         "cwd": normalize_display_path(&cwd),
                         "policyAction": "deny",
-                        "policyHelp": mcp_gateway_policy_denied_help()
+                        "policyHelp": mcp_gateway_policy_denied_help(&reason)
                     }),
                 ));
             }
-            PolicyDecision::Confirm(reason) => {
+            PolicyDecision::Confirm { reason, reason_key } => {
                 let metadata = ConfirmationMetadata {
                     kind: "shell".to_string(),
                     cwd: normalize_display_path(&cwd),
                     affected_paths: Vec::new(),
                     preview: command_preview.clone(),
+                    reason_key,
                 };
                 let confirmation_id = match self
                     .create_confirmation_with_metadata(

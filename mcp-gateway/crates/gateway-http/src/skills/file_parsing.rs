@@ -199,8 +199,9 @@ mod tests {
         );
 
         match decision {
-            PolicyDecision::Confirm(reason) => {
+            PolicyDecision::Confirm { reason, reason_key } => {
                 assert!(reason.contains("confirm-rm"));
+                assert_eq!(reason_key, "file_deletion");
             }
             _ => panic!("expected confirm decision"),
         }
@@ -352,8 +353,9 @@ mod tests {
         );
 
         match decision {
-            PolicyDecision::Confirm(reason) => {
+            PolicyDecision::Confirm { reason, reason_key } => {
                 assert!(reason.contains("confirm-set-content"));
+                assert_eq!(reason_key, "text_editing");
             }
             _ => panic!("expected confirm decision"),
         }
@@ -367,6 +369,53 @@ mod tests {
         assert!(text.contains("已拒绝此命令"));
         assert!(text.contains("confirm"));
         assert!(text.contains("删除或禁用"));
+    }
+
+    #[test]
+    fn path_guard_denied_text_explains_allowed_directory_boundary() {
+        let text =
+            mcp_gateway_policy_denied_text("path 'D:/outside/file.txt' is outside allowed directories");
+
+        assert!(text.contains("可访问目录"));
+        assert!(text.contains("越界访问策略"));
+        assert!(text.contains("越界动作"));
+        assert!(text.contains("加入“可访问目录”"));
+
+        let help = mcp_gateway_policy_denied_help("path 'D:/outside/file.txt' is outside allowed directories");
+        assert_eq!(help["decisionScope"], "this_request_only");
+        assert!(help["suggestedActions"]
+            .as_array()
+            .expect("suggested actions")
+            .iter()
+            .any(|item| item == "add_trusted_directory_to_allowed_directories"));
+    }
+
+    #[test]
+    fn confirmation_rejected_text_explains_one_time_scope() {
+        let result = confirmation_rejected_result("shell_command", "confirm-1", false);
+
+        assert!(result.is_error);
+        assert!(result.text.contains("拒绝本次"));
+        assert!(result.text.contains("只针对本次请求"));
+        assert_eq!(result.structured["reason"], "user_rejected");
+        assert_eq!(result.structured["decisionScope"], "this_request_only");
+        assert_eq!(
+            result.structured["decisionAppliesOnlyToCurrentRequest"],
+            true
+        );
+    }
+
+    #[test]
+    fn confirmation_timeout_text_explains_retry_hold() {
+        let result = confirmation_rejected_result("shell_command", "confirm-2", true);
+
+        assert!(result.is_error);
+        assert!(result.text.contains("60 秒"));
+        assert!(result.text.contains("120 秒"));
+        assert!(result.text.contains("只针对本次请求"));
+        assert_eq!(result.structured["reason"], "timeout");
+        assert_eq!(result.structured["decisionTimeoutSeconds"], 60);
+        assert_eq!(result.structured["timeoutRetryHoldSeconds"], 120);
     }
 
     #[test]
@@ -761,8 +810,9 @@ mod tests {
         );
 
         match decision {
-            PolicyDecision::Confirm(reason) => {
+            PolicyDecision::Confirm { reason, reason_key } => {
                 assert!(reason.contains("confirm-remove-item"));
+                assert_eq!(reason_key, "powershell_deletion");
             }
             _ => panic!("expected confirm decision"),
         }

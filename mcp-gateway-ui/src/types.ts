@@ -53,6 +53,7 @@ export interface SkillCommandRule {
   commandTree: string[];
   contains: string[];
   reason: string;
+  reasonKey?: string;
 }
 
 export interface SkillRootEntry {
@@ -70,8 +71,6 @@ export interface BuiltinToolsConfig {
 }
 
 export interface SkillsConfig {
-  serverName: string;
-  builtinServerName: string;
   roots: string[];
   rootEntries?: SkillRootEntry[];
   policy: SkillsPolicyConfig;
@@ -184,6 +183,7 @@ export interface SkillConfirmation {
   affectedPaths?: string[];
   preview?: string;
   reason: string;
+  reasonKey?: string;
 }
 
 export interface SkillSummary {
@@ -198,6 +198,10 @@ export interface SkillDirectoryValidation {
   exists: boolean;
   isDir: boolean;
   hasSkillMd: boolean;
+}
+
+export interface SkillDirectoryScanResult {
+  path: string;
 }
 
 export interface LocalRuntimeAvailability {
@@ -216,6 +220,11 @@ export interface TerminalEncodingStatus {
 }
 
 export interface LocalRuntimeSummary {
+  system: {
+    os: string;
+    arch: string;
+    family: string;
+  };
   python: LocalRuntimeAvailability;
   node: LocalRuntimeAvailability;
   uv: LocalRuntimeAvailability;

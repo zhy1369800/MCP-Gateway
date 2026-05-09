@@ -72,32 +72,6 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
         }
     }
 
-    if cfg.skills.server_name.trim().is_empty() {
-        return Err(AppError::Validation(
-            "skills.serverName cannot be empty".to_string(),
-        ));
-    }
-    if cfg.skills.server_name.contains('/') || cfg.skills.server_name.contains('\\') {
-        return Err(AppError::Validation(
-            "skills.serverName cannot contain path separators".to_string(),
-        ));
-    }
-    if cfg.skills.builtin_server_name.trim().is_empty() {
-        return Err(AppError::Validation(
-            "skills.builtinServerName cannot be empty".to_string(),
-        ));
-    }
-    if cfg.skills.builtin_server_name.contains('/') || cfg.skills.builtin_server_name.contains('\\')
-    {
-        return Err(AppError::Validation(
-            "skills.builtinServerName cannot contain path separators".to_string(),
-        ));
-    }
-    if cfg.skills.server_name == cfg.skills.builtin_server_name {
-        return Err(AppError::Validation(
-            "skills.serverName and skills.builtinServerName must be different".to_string(),
-        ));
-    }
     if cfg.servers.iter().any(|server| {
         server.name == cfg.skills.server_name || server.name == cfg.skills.builtin_server_name
     }) {

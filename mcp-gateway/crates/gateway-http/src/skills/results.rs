@@ -274,10 +274,13 @@ fn confirmation_rejected_result(
     confirmation_id: &str,
     timed_out: bool,
 ) -> ToolResult {
+    const DECISION_SCOPE: &str = "this_request_only";
+    const DECISION_TIMEOUT_SECONDS: u64 = 60;
+    const TIMEOUT_RETRY_HOLD_SECONDS: u64 = 120;
     let text = if timed_out {
-        "MCP Gateway 已拒绝此命令：确认请求 60 秒内未被批准，命令没有执行。要执行该命令，请重新提交并在 Pending Confirmations 中批准；或者把匹配的 skills.policy 规则改为 allow，让它默认运行。"
+        "MCP Gateway 已拒绝此命令：本次确认请求在 60 秒内没有被用户批准，因此本次命令没有执行。这个超时拒绝只针对本次请求，不会永久拒绝同类命令。注意：如果你在超时后立刻重复提交完全相同的命令，网关会在最多 120 秒内复用刚才的超时结果并直接返回超时拒绝，避免同一条命令反复弹窗；等待保留期结束，或调整命令内容后再次提交，才会重新创建确认请求。要执行该命令，请重新提交并在待确认列表中选择“允许本次”；如果你希望以后不再确认，请把匹配的 skills.policy 规则改为 allow。"
     } else {
-        "MCP Gateway 已拒绝此命令：用户拒绝了确认请求，命令没有执行。要执行该命令，请重新提交并在 Pending Confirmations 中批准；或者把匹配的 skills.policy 规则改为 allow，让它默认运行。"
+        "MCP Gateway 已拒绝此命令：用户选择了“拒绝本次”，因此本次命令没有执行。这个拒绝只针对本次请求，不会永久拒绝同类命令；后续再次触发相同命令时，仍会重新进入待确认流程。要执行该命令，请重新提交并在待确认列表中选择“允许本次”；如果你希望以后不再确认，请把匹配的 skills.policy 规则改为 allow。"
     };
     let reason = if timed_out {
         "timeout"
@@ -285,24 +288,54 @@ fn confirmation_rejected_result(
         "user_rejected"
     };
     let status = if timed_out { "timeout" } else { "rejected" };
+    let mut structured = json!({
+        "status": status,
+        "tool": tool_name,
+        "reason": reason,
+        "confirmationId": confirmation_id,
+        "decisionScope": DECISION_SCOPE,
+        "decisionAppliesOnlyToCurrentRequest": true,
+        "nextStep": "Resubmit the command and approve it in pending confirmations if you want it to run once.",
+        "policyChangeRequiredForPermanentAllow": "Change the matching skills.policy rule to allow if future matching commands should run without confirmation."
+    });
+    if timed_out {
+        structured["decisionTimeoutSeconds"] = json!(DECISION_TIMEOUT_SECONDS);
+        structured["timeoutRetryHoldSeconds"] = json!(TIMEOUT_RETRY_HOLD_SECONDS);
+        structured["timeoutRetryBehavior"] = json!(
+            "After a timeout, an immediately repeated identical command may reuse the timeout result for up to 120 seconds and will not open a new confirmation dialog."
+        );
+    }
     tool_error(
         text.to_string(),
-        json!({
-            "status": status,
-            "tool": tool_name,
-            "reason": reason,
-            "confirmationId": confirmation_id
-        }),
+        structured,
     )
 }
 
 fn mcp_gateway_policy_denied_text(reason: &str) -> String {
+    if reason.contains("outside whitelist") || reason.contains("outside allowed directories") {
+        return format!(
+            "MCP Gateway 已拒绝此命令：该操作访问了“可访问目录”之外的路径，因此命中了越界访问策略，命令没有执行。匹配原因：{reason}。这是目录边界保护，不是永久规则变更；如果你确认本次路径访问应该允许，请在网关设置里把“越界动作”改为“需要确认/confirm”，让此类越界访问先弹窗请求用户批准；如果这个目录以后应长期可用，请把它加入“可访问目录”。"
+        );
+    }
+
     format!(
         "MCP Gateway 已拒绝此命令：该命令命中了当前网关策略中的拒绝规则（deny）或默认拒绝动作，因此没有执行。匹配原因：{reason}。如果你确认此类命令应该可以运行，请在可视化规则管理中把匹配规则从“拒绝/deny”改为“用户确认/confirm”，让它在执行前请求用户批准；也可以删除或禁用这条拒绝规则，让后续规则或默认动作接管。"
     )
 }
 
-fn mcp_gateway_policy_denied_help() -> Value {
+fn mcp_gateway_policy_denied_help(reason: &str) -> Value {
+    if reason.contains("outside whitelist") || reason.contains("outside allowed directories") {
+        return json!({
+            "message": "This operation tried to access a path outside the configured allowed directories and was not executed.",
+            "uiHint": "Open Skill settings. Either change the violation action to confirm for one-time approval prompts, or add the trusted directory to allowed directories.",
+            "decisionScope": "this_request_only",
+            "suggestedActions": [
+                "change_path_guard_violation_action_to_confirm",
+                "add_trusted_directory_to_allowed_directories"
+            ]
+        });
+    }
+
     json!({
         "message": "This command was blocked by MCP Gateway policy and was not executed.",
         "uiHint": "Open visual policy rule management, find the matching deny rule, then change it to confirm or remove/disable it.",

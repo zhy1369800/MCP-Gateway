@@ -2,6 +2,9 @@ import type { TFunction } from "../../i18n";
 import type { SkillCommandRule, SkillPolicyAction, SkillRootEntry, SkillsConfig } from "../../types";
 import { argsToStr, strToArgs } from "../../utils/serverConfig";
 
+export const EXTERNAL_SKILL_SERVER_NAME = "__skills__";
+export const BUILTIN_SKILL_SERVER_NAME = "__builtin_skills__";
+
 export function parseRulesJson(input: string): SkillCommandRule[] {
   const parsed = JSON.parse(input) as unknown;
   if (!Array.isArray(parsed)) {
@@ -23,6 +26,7 @@ export function parseRulesJson(input: string): SkillCommandRule[] {
       commandTree: Array.isArray(row.commandTree) ? row.commandTree.map((item) => String(item)) : [],
       contains: Array.isArray(row.contains) ? row.contains.map((item) => String(item)) : [],
       reason: typeof row.reason === "string" ? row.reason : "",
+      reasonKey: typeof row.reasonKey === "string" ? row.reasonKey : undefined,
     };
   });
 }
@@ -68,7 +72,7 @@ export function ruleToForm(rule: SkillCommandRule): SkillRuleFormState {
 
 export function normalizeContainsInput(value: string): string[] {
   return value
-    .split(/\r?\n|,/)
+    .split(/\r?\n/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
 }
@@ -86,6 +90,7 @@ export function formToRule(form: SkillRuleFormState, id: string): SkillCommandRu
     commandTree,
     contains,
     reason: form.reason.trim(),
+    reasonKey: undefined,
   };
 }
 
@@ -228,8 +233,6 @@ export function ensureSkillsConfig(
   }
 
   return {
-    serverName: raw?.serverName?.trim() || "__skills__",
-    builtinServerName: raw?.builtinServerName?.trim() || "__builtin_skills__",
     roots: rootEntries.filter((entry) => entry.enabled).map((entry) => entry.path),
     rootEntries,
     policy: {
@@ -244,6 +247,7 @@ export function ensureSkillsConfig(
           ? rule.contains.map((item) => item.trim()).filter((item) => item.length > 0)
           : [],
         reason: (rule.reason ?? "").trim(),
+        reasonKey: rule.reasonKey?.trim() || undefined,
       })),
       pathGuard: {
         enabled: raw?.policy?.pathGuard?.enabled ?? false,

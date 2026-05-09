@@ -102,9 +102,9 @@ impl Default for GatewayConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsConfig {
-    #[serde(default = "default_skills_server_name")]
+    #[serde(default = "default_skills_server_name", skip_serializing)]
     pub server_name: String,
-    #[serde(default = "default_builtin_skills_server_name")]
+    #[serde(default = "default_builtin_skills_server_name", skip_serializing)]
     pub builtin_server_name: String,
     #[serde(default = "default_skills_roots")]
     pub roots: Vec<String>,
@@ -199,6 +199,8 @@ pub struct SkillCommandRule {
     pub contains: Vec<String>,
     #[serde(default)]
     pub reason: String,
+    #[serde(default)]
+    pub reason_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -437,13 +439,14 @@ fn default_skills_roots() -> Vec<String> {
 }
 
 fn default_skills_command_rules() -> Vec<SkillCommandRule> {
-    vec![
+    let mut rules = vec![
         SkillCommandRule {
             id: "deny-rm-root".to_string(),
             action: SkillPolicyAction::Deny,
             command_tree: vec!["rm".to_string()],
             contains: vec!["-rf".to_string(), "/".to_string()],
             reason: "Potential root destructive deletion".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-remove-item-root".to_string(),
@@ -451,6 +454,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["remove-item".to_string()],
             contains: vec!["-recurse".to_string(), "c:\\".to_string()],
             reason: "Potential recursive deletion on drive root".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-sudo".to_string(),
@@ -458,6 +462,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["sudo".to_string()],
             contains: Vec::new(),
             reason: "Privilege escalation command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-su".to_string(),
@@ -465,6 +470,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["su".to_string()],
             contains: Vec::new(),
             reason: "User switching command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-doas".to_string(),
@@ -472,6 +478,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["doas".to_string()],
             contains: Vec::new(),
             reason: "Privilege escalation command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-chmod".to_string(),
@@ -479,6 +486,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["chmod".to_string()],
             contains: Vec::new(),
             reason: "Permission modification command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-chown".to_string(),
@@ -486,6 +494,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["chown".to_string()],
             contains: Vec::new(),
             reason: "Ownership modification command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-chgrp".to_string(),
@@ -493,6 +502,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["chgrp".to_string()],
             contains: Vec::new(),
             reason: "Group ownership modification command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-takeown".to_string(),
@@ -500,6 +510,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["takeown".to_string()],
             contains: Vec::new(),
             reason: "Windows ownership takeover command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-icacls".to_string(),
@@ -507,6 +518,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["icacls".to_string()],
             contains: Vec::new(),
             reason: "Windows ACL modification command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-reg".to_string(),
@@ -514,6 +526,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["reg".to_string()],
             contains: Vec::new(),
             reason: "Registry modification command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-bcdedit".to_string(),
@@ -521,6 +534,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["bcdedit".to_string()],
             contains: Vec::new(),
             reason: "Boot configuration command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-netsh".to_string(),
@@ -528,6 +542,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["netsh".to_string()],
             contains: Vec::new(),
             reason: "Network configuration command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-runas".to_string(),
@@ -535,6 +550,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["runas".to_string()],
             contains: Vec::new(),
             reason: "Privilege escalation command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-taskkill".to_string(),
@@ -542,6 +558,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["taskkill".to_string()],
             contains: Vec::new(),
             reason: "Process termination command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-diskpart".to_string(),
@@ -549,6 +566,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["diskpart".to_string()],
             contains: Vec::new(),
             reason: "Disk partition command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-format".to_string(),
@@ -556,6 +574,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["format".to_string()],
             contains: Vec::new(),
             reason: "Disk formatting command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-certutil".to_string(),
@@ -563,6 +582,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["certutil".to_string()],
             contains: Vec::new(),
             reason: "Download or certificate manipulation command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-bitsadmin".to_string(),
@@ -570,6 +590,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["bitsadmin".to_string()],
             contains: Vec::new(),
             reason: "Background transfer command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-msiexec".to_string(),
@@ -577,6 +598,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["msiexec".to_string()],
             contains: Vec::new(),
             reason: "Installer execution command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-regsvr32".to_string(),
@@ -584,6 +606,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["regsvr32".to_string()],
             contains: Vec::new(),
             reason: "Binary registration command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-rundll32".to_string(),
@@ -591,6 +614,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["rundll32".to_string()],
             contains: Vec::new(),
             reason: "Dynamic library execution command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-schtasks".to_string(),
@@ -598,6 +622,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["schtasks".to_string()],
             contains: Vec::new(),
             reason: "Task scheduler command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-sc".to_string(),
@@ -605,6 +630,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["sc".to_string()],
             contains: Vec::new(),
             reason: "Service controller command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-systemctl".to_string(),
@@ -612,6 +638,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["systemctl".to_string()],
             contains: Vec::new(),
             reason: "Service controller command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-service".to_string(),
@@ -619,6 +646,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["service".to_string()],
             contains: Vec::new(),
             reason: "Service controller command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-pkexec".to_string(),
@@ -626,6 +654,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["pkexec".to_string()],
             contains: Vec::new(),
             reason: "Privilege escalation command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-kill".to_string(),
@@ -633,6 +662,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["kill".to_string()],
             contains: Vec::new(),
             reason: "Process termination command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-pkill".to_string(),
@@ -640,6 +670,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["pkill".to_string()],
             contains: Vec::new(),
             reason: "Process termination command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-killall".to_string(),
@@ -647,6 +678,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["killall".to_string()],
             contains: Vec::new(),
             reason: "Process termination command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-apt".to_string(),
@@ -654,6 +686,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["apt".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-apt-get".to_string(),
@@ -661,6 +694,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["apt-get".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-yum".to_string(),
@@ -668,6 +702,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["yum".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-dnf".to_string(),
@@ -675,6 +710,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["dnf".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-pacman".to_string(),
@@ -682,6 +718,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["pacman".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-zypper".to_string(),
@@ -689,6 +726,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["zypper".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-apk".to_string(),
@@ -696,6 +734,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["apk".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-brew".to_string(),
@@ -703,6 +742,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["brew".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-winget".to_string(),
@@ -710,6 +750,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["winget".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-choco".to_string(),
@@ -717,6 +758,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["choco".to_string()],
             contains: Vec::new(),
             reason: "Package manager command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-iptables".to_string(),
@@ -724,6 +766,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["iptables".to_string()],
             contains: Vec::new(),
             reason: "Firewall command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-nft".to_string(),
@@ -731,6 +774,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["nft".to_string()],
             contains: Vec::new(),
             reason: "Firewall command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-ufw".to_string(),
@@ -738,6 +782,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["ufw".to_string()],
             contains: Vec::new(),
             reason: "Firewall command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-ip".to_string(),
@@ -745,6 +790,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["ip".to_string()],
             contains: Vec::new(),
             reason: "Network configuration command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-ifconfig".to_string(),
@@ -752,6 +798,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["ifconfig".to_string()],
             contains: Vec::new(),
             reason: "Network configuration command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-route".to_string(),
@@ -759,6 +806,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["route".to_string()],
             contains: Vec::new(),
             reason: "Routing configuration command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-dd".to_string(),
@@ -766,6 +814,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["dd".to_string()],
             contains: Vec::new(),
             reason: "Raw disk write command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-mkfs".to_string(),
@@ -773,6 +822,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["mkfs".to_string()],
             contains: Vec::new(),
             reason: "Filesystem creation command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-fdisk".to_string(),
@@ -780,6 +830,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["fdisk".to_string()],
             contains: Vec::new(),
             reason: "Disk partition command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-parted".to_string(),
@@ -787,6 +838,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["parted".to_string()],
             contains: Vec::new(),
             reason: "Disk partition command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-mount".to_string(),
@@ -794,6 +846,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["mount".to_string()],
             contains: Vec::new(),
             reason: "Mount command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-umount".to_string(),
@@ -801,6 +854,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["umount".to_string()],
             contains: Vec::new(),
             reason: "Unmount command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-chattr".to_string(),
@@ -808,6 +862,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["chattr".to_string()],
             contains: Vec::new(),
             reason: "File attribute modification command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-setfacl".to_string(),
@@ -815,6 +870,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["setfacl".to_string()],
             contains: Vec::new(),
             reason: "ACL modification command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-useradd".to_string(),
@@ -822,6 +878,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["useradd".to_string()],
             contains: Vec::new(),
             reason: "User management command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-usermod".to_string(),
@@ -829,6 +886,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["usermod".to_string()],
             contains: Vec::new(),
             reason: "User management command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-userdel".to_string(),
@@ -836,6 +894,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["userdel".to_string()],
             contains: Vec::new(),
             reason: "User management command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-groupadd".to_string(),
@@ -843,6 +902,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["groupadd".to_string()],
             contains: Vec::new(),
             reason: "Group management command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-groupdel".to_string(),
@@ -850,6 +910,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["groupdel".to_string()],
             contains: Vec::new(),
             reason: "Group management command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-launchctl".to_string(),
@@ -857,6 +918,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["launchctl".to_string()],
             contains: Vec::new(),
             reason: "macOS service controller command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-defaults".to_string(),
@@ -864,6 +926,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["defaults".to_string()],
             contains: Vec::new(),
             reason: "macOS preferences write command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-spctl".to_string(),
@@ -871,6 +934,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["spctl".to_string()],
             contains: Vec::new(),
             reason: "macOS security policy command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-csrutil".to_string(),
@@ -878,6 +942,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["csrutil".to_string()],
             contains: Vec::new(),
             reason: "macOS SIP command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-security".to_string(),
@@ -885,6 +950,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["security".to_string()],
             contains: Vec::new(),
             reason: "macOS keychain command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-osascript".to_string(),
@@ -892,6 +958,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["osascript".to_string()],
             contains: Vec::new(),
             reason: "AppleScript execution command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-diskutil".to_string(),
@@ -899,6 +966,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["diskutil".to_string()],
             contains: Vec::new(),
             reason: "Disk utility command is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-powershell".to_string(),
@@ -906,6 +974,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["powershell".to_string()],
             contains: Vec::new(),
             reason: "Nested shell launch is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-pwsh".to_string(),
@@ -913,6 +982,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["pwsh".to_string()],
             contains: Vec::new(),
             reason: "Nested shell launch is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-cmd".to_string(),
@@ -920,6 +990,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["cmd".to_string()],
             contains: Vec::new(),
             reason: "Nested shell launch is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-bash-c".to_string(),
@@ -927,6 +998,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["bash".to_string()],
             contains: vec!["-c".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-bash-lc".to_string(),
@@ -934,6 +1006,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["bash".to_string()],
             contains: vec!["-lc".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-sh-c".to_string(),
@@ -941,6 +1014,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["sh".to_string()],
             contains: vec!["-c".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-sh-lc".to_string(),
@@ -948,6 +1022,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["sh".to_string()],
             contains: vec!["-lc".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-zsh-c".to_string(),
@@ -955,6 +1030,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["zsh".to_string()],
             contains: vec!["-c".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-zsh-lc".to_string(),
@@ -962,6 +1038,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["zsh".to_string()],
             contains: vec!["-lc".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-dash-c".to_string(),
@@ -969,6 +1046,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["dash".to_string()],
             contains: vec!["-c".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-dash-lc".to_string(),
@@ -976,6 +1054,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["dash".to_string()],
             contains: vec!["-lc".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-ksh-c".to_string(),
@@ -983,6 +1062,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["ksh".to_string()],
             contains: vec!["-c".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-ksh-lc".to_string(),
@@ -990,6 +1070,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["ksh".to_string()],
             contains: vec!["-lc".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-fish-c".to_string(),
@@ -997,6 +1078,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["fish".to_string()],
             contains: vec!["-c".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-tcsh-c".to_string(),
@@ -1004,6 +1086,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["tcsh".to_string()],
             contains: vec!["-c".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-csh-c".to_string(),
@@ -1011,6 +1094,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["csh".to_string()],
             contains: vec!["-c".to_string()],
             reason: "Shell wrapper command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-invoke-expression".to_string(),
@@ -1018,6 +1102,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["invoke-expression".to_string()],
             contains: Vec::new(),
             reason: "Dynamic command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-iex".to_string(),
@@ -1025,6 +1110,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["iex".to_string()],
             contains: Vec::new(),
             reason: "Dynamic command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "deny-invoke-command".to_string(),
@@ -1032,34 +1118,39 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["invoke-command".to_string()],
             contains: Vec::new(),
             reason: "Remote command execution is blocked".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
-            id: "deny-curl".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-curl".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["curl".to_string()],
             contains: Vec::new(),
-            reason: "Network download command is blocked".to_string(),
+            reason: "Network download command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
-            id: "deny-wget".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-wget".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["wget".to_string()],
             contains: Vec::new(),
-            reason: "Network download command is blocked".to_string(),
+            reason: "Network download command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
-            id: "deny-invoke-webrequest".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-invoke-webrequest".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["invoke-webrequest".to_string()],
             contains: Vec::new(),
-            reason: "Network download command is blocked".to_string(),
+            reason: "Network download command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
-            id: "deny-irm".to_string(),
-            action: SkillPolicyAction::Deny,
+            id: "confirm-irm".to_string(),
+            action: SkillPolicyAction::Confirm,
             command_tree: vec!["irm".to_string()],
             contains: Vec::new(),
-            reason: "Network download command is blocked".to_string(),
+            reason: "Network download command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-set-content".to_string(),
@@ -1067,6 +1158,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["set-content".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-add-content".to_string(),
@@ -1074,6 +1166,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["add-content".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-clear-content".to_string(),
@@ -1081,6 +1174,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["clear-content".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-out-file".to_string(),
@@ -1088,6 +1182,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["out-file".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-tee".to_string(),
@@ -1095,6 +1190,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["tee".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-sed".to_string(),
@@ -1102,6 +1198,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["sed".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-awk".to_string(),
@@ -1109,6 +1206,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["awk".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-perl".to_string(),
@@ -1116,6 +1214,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["perl".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-ed".to_string(),
@@ -1123,6 +1222,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["ed".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-ex".to_string(),
@@ -1130,6 +1230,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["ex".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-vi".to_string(),
@@ -1137,6 +1238,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["vi".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-vim".to_string(),
@@ -1144,6 +1246,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["vim".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-nvim".to_string(),
@@ -1151,6 +1254,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["nvim".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-nano".to_string(),
@@ -1158,6 +1262,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["nano".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-notepad".to_string(),
@@ -1165,6 +1270,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["notepad".to_string()],
             contains: Vec::new(),
             reason: "Text editing command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-rm".to_string(),
@@ -1172,6 +1278,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["rm".to_string()],
             contains: Vec::new(),
             reason: "File deletion command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-del".to_string(),
@@ -1179,6 +1286,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["del".to_string()],
             contains: Vec::new(),
             reason: "File deletion command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-rmdir".to_string(),
@@ -1186,6 +1294,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["rmdir".to_string()],
             contains: Vec::new(),
             reason: "Directory deletion command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-remove-item".to_string(),
@@ -1193,6 +1302,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["remove-item".to_string()],
             contains: Vec::new(),
             reason: "PowerShell deletion command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-unlink".to_string(),
@@ -1200,6 +1310,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["unlink".to_string()],
             contains: Vec::new(),
             reason: "File unlink command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-mv".to_string(),
@@ -1207,6 +1318,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["mv".to_string()],
             contains: Vec::new(),
             reason: "File move command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-move".to_string(),
@@ -1214,6 +1326,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["move".to_string()],
             contains: Vec::new(),
             reason: "File move command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-move-item".to_string(),
@@ -1221,6 +1334,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["move-item".to_string()],
             contains: Vec::new(),
             reason: "File move command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-cp".to_string(),
@@ -1228,6 +1342,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["cp".to_string()],
             contains: Vec::new(),
             reason: "File copy command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-copy".to_string(),
@@ -1235,6 +1350,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["copy".to_string()],
             contains: Vec::new(),
             reason: "File copy command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-copy-item".to_string(),
@@ -1242,6 +1358,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["copy-item".to_string()],
             contains: Vec::new(),
             reason: "File copy command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-rename".to_string(),
@@ -1249,6 +1366,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["rename".to_string()],
             contains: Vec::new(),
             reason: "File rename command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-ren".to_string(),
@@ -1256,6 +1374,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["ren".to_string()],
             contains: Vec::new(),
             reason: "File rename command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-rename-item".to_string(),
@@ -1263,6 +1382,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["rename-item".to_string()],
             contains: Vec::new(),
             reason: "File rename command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-new-item".to_string(),
@@ -1270,6 +1390,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["new-item".to_string()],
             contains: Vec::new(),
             reason: "File/directory creation command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-mkdir".to_string(),
@@ -1277,6 +1398,7 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["mkdir".to_string()],
             contains: Vec::new(),
             reason: "Directory creation command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
         SkillCommandRule {
             id: "confirm-touch".to_string(),
@@ -1284,8 +1406,86 @@ fn default_skills_command_rules() -> Vec<SkillCommandRule> {
             command_tree: vec!["touch".to_string()],
             contains: Vec::new(),
             reason: "File creation/timestamp update command requires confirmation".to_string(),
+            reason_key: String::new(),
         },
-    ]
+    ];
+    populate_skill_rule_reason_keys(&mut rules);
+    rules
+}
+
+fn populate_skill_rule_reason_keys(rules: &mut [SkillCommandRule]) {
+    for rule in rules {
+        if rule.reason_key.trim().is_empty() {
+            rule.reason_key = infer_skill_rule_reason_key(&rule.id, &rule.reason).to_string();
+        } else {
+            rule.reason_key = rule.reason_key.trim().to_ascii_lowercase();
+        }
+    }
+}
+
+fn infer_skill_rule_reason_key(id: &str, reason: &str) -> &'static str {
+    match id {
+        "deny-rm-root" => "root_destructive_deletion",
+        "deny-remove-item-root" => "drive_root_recursive_deletion",
+        "confirm-route" => "routing_configuration",
+        "confirm-unlink" => "file_unlink",
+        _ => match reason {
+            "Privilege escalation command is blocked" => "privilege_escalation",
+            "User switching command is blocked" => "user_switching",
+            "Permission modification command is blocked" => "permission_modification",
+            "Ownership modification command is blocked" => "ownership_modification",
+            "Group ownership modification command is blocked" => "group_ownership_modification",
+            "Windows ownership takeover command is blocked" => "windows_ownership_takeover",
+            "Windows ACL modification command is blocked" => "windows_acl_modification",
+            "Registry modification command is blocked" => "registry_modification",
+            "Boot configuration command is blocked" => "boot_configuration",
+            "Network configuration command requires confirmation" => "network_configuration",
+            "Process termination command requires confirmation" => "process_termination",
+            "Disk partition command is blocked" => "disk_partition",
+            "Disk formatting command is blocked" => "disk_formatting",
+            "Download or certificate manipulation command is blocked" => "download_or_certificate",
+            "Background transfer command is blocked" => "background_transfer",
+            "Installer execution command requires confirmation" => "installer_execution",
+            "Binary registration command is blocked" => "binary_registration",
+            "Dynamic library execution command is blocked" => "dynamic_library_execution",
+            "Task scheduler command is blocked" => "task_scheduler",
+            "Service controller command requires confirmation" => "service_controller",
+            "Package manager command requires confirmation" => "package_manager",
+            "Firewall command is blocked" => "firewall",
+            "Raw disk write command is blocked" => "raw_disk_write",
+            "Filesystem creation command is blocked" => "filesystem_creation",
+            "Mount command requires confirmation" => "mount",
+            "Unmount command requires confirmation" => "unmount",
+            "File attribute modification command is blocked" => "file_attribute_modification",
+            "ACL modification command is blocked" => "acl_modification",
+            "User management command is blocked" => "user_management",
+            "Group management command is blocked" => "group_management",
+            "macOS service controller command requires confirmation" => "macos_service_controller",
+            "macOS preferences write command requires confirmation" => "macos_preferences",
+            "macOS security policy command is blocked" => "macos_security_policy",
+            "macOS SIP command is blocked" => "macos_sip",
+            "macOS keychain command is blocked" => "macos_keychain",
+            "AppleScript execution command requires confirmation" => "applescript_execution",
+            "Disk utility command is blocked" => "disk_utility",
+            "Nested shell launch is blocked" => "nested_shell",
+            "Shell wrapper command execution is blocked" => "shell_wrapper",
+            "Dynamic command execution is blocked" => "dynamic_command_execution",
+            "Remote command execution is blocked" => "remote_command_execution",
+            "Network download command requires confirmation"
+            | "Network download command is blocked" => "network_download",
+            "Text editing command requires confirmation" => "text_editing",
+            "File deletion command requires confirmation" => "file_deletion",
+            "Directory deletion command requires confirmation" => "directory_deletion",
+            "PowerShell deletion command requires confirmation" => "powershell_deletion",
+            "File move command requires confirmation" => "file_move",
+            "File copy command requires confirmation" => "file_copy",
+            "File rename command requires confirmation" => "file_rename",
+            "File/directory creation command requires confirmation" => "file_or_directory_creation",
+            "Directory creation command requires confirmation" => "directory_creation",
+            "File creation/timestamp update command requires confirmation" => "file_touch",
+            _ => "custom",
+        },
+    }
 }
 
 fn default_path_guard_violation_action() -> SkillPolicyAction {
@@ -1421,14 +1621,8 @@ pub fn normalize_config_in_place(cfg: &mut GatewayConfig) {
             .collect();
     }
 
-    cfg.skills.server_name = cfg.skills.server_name.trim().to_string();
-    if cfg.skills.server_name.is_empty() {
-        cfg.skills.server_name = default_skills_server_name();
-    }
-    cfg.skills.builtin_server_name = cfg.skills.builtin_server_name.trim().to_string();
-    if cfg.skills.builtin_server_name.is_empty() {
-        cfg.skills.builtin_server_name = default_builtin_skills_server_name();
-    }
+    cfg.skills.server_name = default_skills_server_name();
+    cfg.skills.builtin_server_name = default_builtin_skills_server_name();
 
     cfg.skills.roots = cfg
         .skills
@@ -1459,6 +1653,7 @@ pub fn normalize_config_in_place(cfg: &mut GatewayConfig) {
                 .filter(|token| !token.is_empty())
                 .collect(),
             reason: rule.reason.trim().to_string(),
+            reason_key: rule.reason_key.trim().to_ascii_lowercase(),
         })
         .filter(|rule| !rule.command_tree.is_empty() || !rule.contains.is_empty())
         .collect();
@@ -1499,6 +1694,7 @@ pub fn normalize_config_in_place(cfg: &mut GatewayConfig) {
                 command_tree: Vec::new(),
                 contains: vec![keyword.clone()],
                 reason: format!("Legacy confirm keyword: {keyword}"),
+                reason_key: "legacy_confirm_keyword".to_string(),
             });
         }
     }
@@ -1510,12 +1706,14 @@ pub fn normalize_config_in_place(cfg: &mut GatewayConfig) {
                 command_tree: Vec::new(),
                 contains: vec![keyword.clone()],
                 reason: format!("Legacy deny keyword: {keyword}"),
+                reason_key: "legacy_deny_keyword".to_string(),
             });
         }
     }
 
     cfg.skills.policy.confirm_keywords.clear();
     cfg.skills.policy.deny_keywords.clear();
+    populate_skill_rule_reason_keys(&mut cfg.skills.policy.rules);
 }
 
 fn normalize_path(input: &str, fallback: &str) -> String {
@@ -1570,11 +1768,15 @@ mod tests {
         check_action("deny-pkexec", SkillPolicyAction::Deny);
         check_action("confirm-launchctl", SkillPolicyAction::Confirm);
         check_action("deny-invoke-expression", SkillPolicyAction::Deny);
-        check_action("deny-curl", SkillPolicyAction::Deny);
+        check_action("confirm-curl", SkillPolicyAction::Confirm);
+        check_action("confirm-wget", SkillPolicyAction::Confirm);
+        check_action("confirm-invoke-webrequest", SkillPolicyAction::Confirm);
+        check_action("confirm-irm", SkillPolicyAction::Confirm);
         check_action("deny-bash-lc", SkillPolicyAction::Deny);
         check_action("confirm-set-content", SkillPolicyAction::Confirm);
         check_action("confirm-sed", SkillPolicyAction::Confirm);
         check_action("confirm-vim", SkillPolicyAction::Confirm);
+        assert!(rules.iter().all(|rule| !rule.reason_key.is_empty()));
     }
 
     #[test]

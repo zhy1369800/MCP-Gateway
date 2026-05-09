@@ -172,7 +172,7 @@ fn evaluate_policy(
                     "{} (rule: {}, source: {})",
                     base_reason, rule.id, invocation.source
                 );
-                return action_to_decision(&rule.action, reason);
+                return action_to_decision(&rule.action, reason, rule.reason_key.clone());
             }
         }
     }
@@ -196,20 +196,29 @@ fn evaluate_policy(
                 resolved.to_string_lossy(),
                 source
             );
-            return action_to_decision(&skills.policy.path_guard.on_violation, reason);
+            return action_to_decision(
+                &skills.policy.path_guard.on_violation,
+                reason,
+                "path_outside_allowed_dir".to_string(),
+            );
         }
     }
 
     action_to_decision(
         &skills.policy.default_action,
         "matched default policy".to_string(),
+        "default_policy".to_string(),
     )
 }
 
-fn action_to_decision(action: &SkillPolicyAction, reason: String) -> PolicyDecision {
+fn action_to_decision(
+    action: &SkillPolicyAction,
+    reason: String,
+    reason_key: String,
+) -> PolicyDecision {
     match action {
         SkillPolicyAction::Allow => PolicyDecision::Allow,
-        SkillPolicyAction::Confirm => PolicyDecision::Confirm(reason),
+        SkillPolicyAction::Confirm => PolicyDecision::Confirm { reason, reason_key },
         SkillPolicyAction::Deny => PolicyDecision::Deny(reason),
     }
 }
@@ -586,7 +595,11 @@ fn evaluate_paths_policy(skills: &SkillsConfig, paths: &[PathBuf]) -> PolicyDeci
                 "path '{}' is outside allowed directories",
                 resolved.to_string_lossy()
             );
-            return action_to_decision(&skills.policy.path_guard.on_violation, reason);
+            return action_to_decision(
+                &skills.policy.path_guard.on_violation,
+                reason,
+                "path_outside_allowed_dir".to_string(),
+            );
         }
     }
 

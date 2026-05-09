@@ -25,7 +25,7 @@ export function UpdateBanner({ info, lang, onDismiss }: UpdateBannerProps) {
   return (
     <div className="update-banner" role="status" aria-live="polite">
       <span className="update-banner-text">
-        {t("updateAvailable")}&nbsp;<strong>{info.latestVersion}</strong>，{t("updateCurrentOutdated")}
+        {t("updateBannerMessage").replace("{version}", info.latestVersion)}
       </span>
       <button
         className="update-banner-link"

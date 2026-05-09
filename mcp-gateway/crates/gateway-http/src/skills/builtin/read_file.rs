@@ -106,17 +106,18 @@ impl SkillsService {
                         "tool": BuiltinTool::ReadFile.name(),
                         "cwd": normalize_display_path(&cwd),
                         "policyAction": "deny",
-                        "policyHelp": mcp_gateway_policy_denied_help(),
+                        "policyHelp": mcp_gateway_policy_denied_help(&reason),
                         "affectedPaths": [normalize_display_path(&target)]
                     }),
                 ));
             }
-            PolicyDecision::Confirm(reason) => {
+            PolicyDecision::Confirm { reason, reason_key } => {
                 let metadata = ConfirmationMetadata {
                     kind: "read".to_string(),
                     cwd: normalize_display_path(&cwd),
                     affected_paths: vec![normalize_display_path(&target)],
                     preview: format!("Read {}", normalize_display_path(&target)),
+                    reason_key,
                 };
                 let confirmation_id = match self
                     .create_confirmation_with_metadata(
