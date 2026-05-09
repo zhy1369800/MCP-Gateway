@@ -15,7 +15,8 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
     ];
     let mut defs = builders
         .into_iter()
-        .filter_map(|(tool, build)| enabled.contains(&tool).then(|| build(os, now, cfg)))
+        .filter(|(tool, _)| enabled.contains(tool))
+        .map(|(_, build)| build(os, now, cfg))
         .collect::<Vec<_>>();
 
     if cfg.task_planning {

@@ -1,4 +1,3 @@
-import { execSync } from "child_process";
 import { readFileSync, writeFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { resolve } from "path";
@@ -16,18 +15,6 @@ function resolveVersion() {
     || process.env.GITHUB_REF_NAME;
   if (envVersion?.trim()) {
     return normalizeVersion(envVersion);
-  }
-
-  try {
-    const tag = execSync("git describe --tags --abbrev=0", {
-      cwd: rootDir,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).toString().trim();
-    if (tag) {
-      return normalizeVersion(tag);
-    }
-  } catch {
-    // Ignore and fall back to existing package.json version.
   }
 
   const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8"));
