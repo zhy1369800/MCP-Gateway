@@ -1,0 +1,7 @@
+target/
+.git/
+.github/
+image*.png
+*.md
+LICENSE
+set-version.mjs
