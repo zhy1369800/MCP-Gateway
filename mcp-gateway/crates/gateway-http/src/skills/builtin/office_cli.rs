@@ -333,3 +333,78 @@ impl SkillsService {
         }
     }
 }
+
+/// Run `binary --version` and return the version string, or empty string on failure.
+pub(crate) fn run_officecli_version(binary: &str) -> String {
+    std::process::Command::new(binary)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                String::from_utf8(out.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Full detection: PATH → config dir → script default dir.
+pub(crate) fn detect_officecli(cfg: &BuiltinToolsConfig) -> (bool, Option<String>) {
+    if check_officecli_command(None) {
+        return (true, None);
+    }
+    if let Some(ref dir) = cfg.office_cli_path {
+        let exe_name = if cfg!(target_os = "windows") {
+            "officecli.exe"
+        } else {
+            "officecli"
+        };
+        let path = std::path::PathBuf::from(dir).join(exe_name);
+        if path.is_file() && check_officecli_command(Some(&path.to_string_lossy())) {
+            return (true, Some(path.to_string_lossy().into_owned()));
+        }
+    }
+    (false, None)
+}
+
+/// Run the official install script synchronously.
+pub(crate) fn install_officecli() -> Result<(), String> {
+    let status = if cfg!(target_os = "windows") {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "irm https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.ps1 | iex",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .and_then(|mut c| c.wait())
+    } else {
+        std::process::Command::new("bash")
+            .args([
+                "-c",
+                "curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .and_then(|mut c| c.wait())
+    };
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!(
+            "install script exited with code {}",
+            s.code().unwrap_or(-1)
+        )),
+        Err(e) => Err(e.to_string()),
+    }
+}

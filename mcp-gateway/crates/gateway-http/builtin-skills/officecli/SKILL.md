@@ -12,6 +12,23 @@ description: >-
 
 AI-friendly CLI for .docx, .xlsx, .pptx. Single binary, no dependencies, no Office installation needed.
 
+## IMPORTANT: How to Use This Tool
+
+This is a **dedicated built-in tool** named `officecli`. You MUST follow these rules:
+
+1. **Do NOT use `shell_command` to run officecli commands.** The gateway will block any attempt to run `officecli` through `shell_command`. Always use this `officecli` tool directly.
+
+2. **Executing commands (skillToken required):**
+   - Every `exec` value MUST start with the `officecli` prefix.
+   - You MUST include the `skillToken` returned from step 2.
+   - Example: `officecli({"exec": "officecli create report.docx", "skillToken": "<token>"})`
+
+3. **The `exec` field always requires the `officecli` command prefix.** Do NOT omit it.
+   - ✅ Correct: `"exec": "officecli help"`
+   - ✅ Correct: `"exec": "officecli create file.docx"`
+   - ❌ Wrong: `"exec": "help"`
+   - ❌ Wrong: `"exec": "create file.docx"`
+
 ## Prerequisites
 
 The `officecli` binary must be installed and available in PATH before this tool can be enabled.
@@ -28,11 +45,11 @@ from https://github.com/iOfficeAI/OfficeCLI/releases.
 
 When unsure about property names, value formats, or command syntax, ALWAYS run help instead of guessing.
 
-```bash
-officecli help                                  # All commands + global options
-officecli help docx                             # List all docx elements
-officecli help docx paragraph                   # Full schema
-officecli help docx set paragraph               # Verb-filtered
+```
+officecli({"exec": "officecli help", "skillToken": "<token>"})
+officecli({"exec": "officecli help docx", "skillToken": "<token>"})
+officecli({"exec": "officecli help docx paragraph", "skillToken": "<token>"})
+officecli({"exec": "officecli help docx set paragraph", "skillToken": "<token>"})
 ```
 
 Format aliases: `word`→`docx`, `excel`→`xlsx`, `ppt`/`powerpoint`→`pptx`.
@@ -40,23 +57,43 @@ Format aliases: `word`→`docx`, `excel`→`xlsx`, `ppt`/`powerpoint`→`pptx`.
 ## Quick Start
 
 **PPT:**
-```bash
-officecli create slides.pptx
-officecli add slides.pptx / --type slide --prop title="Q4 Report"
-officecli add slides.pptx '/slide[1]' --type shape --prop text="Revenue grew 25%"
+```
+officecli({"exec": "officecli create slides.pptx", "skillToken": "<token>"})
+officecli({"exec": "officecli add slides.pptx / --type slide --prop title=\"Q4 Report\"", "skillToken": "<token>"})
+officecli({"exec": "officecli add slides.pptx '/slide[1]' --type shape --prop text=\"Revenue grew 25%\"", "skillToken": "<token>"})
 ```
 
 **Word:**
-```bash
-officecli create report.docx
-officecli add report.docx /body --type paragraph --prop text="Executive Summary" --prop style=Heading1
+```
+officecli({"exec": "officecli create report.docx", "skillToken": "<token>"})
+officecli({"exec": "officecli add report.docx /body --type paragraph --prop text=\"Executive Summary\" --prop style=Heading1", "skillToken": "<token>"})
 ```
 
 **Excel:**
-```bash
-officecli create data.xlsx
-officecli set data.xlsx /Sheet1/A1 --prop value="Name" --prop bold=true
 ```
+officecli({"exec": "officecli create data.xlsx", "skillToken": "<token>"})
+officecli({"exec": "officecli set data.xlsx /Sheet1/A1 --prop value=\"Name\" --prop bold=true", "skillToken": "<token>"})
+```
+
+## REQUIRED: WPS Compatibility Fix
+
+OfficeCLI writes `<Application>OfficeCLI/x.x.x</Application>` into `docProps/app.xml` when creating files. WPS Office does not recognize this application identifier and will refuse to open the file ("format not recognized").
+
+**After every `officecli create`, you MUST run this cleanup step:**
+
+```bash
+officecli raw-set <file> docProps/app.xml --xpath "//ap:Application" --action delete
+```
+
+Example full flow:
+```
+officecli({"exec": "officecli create report.docx", "skillToken": "<token>"})
+officecli({"exec": "officecli raw-set report.docx docProps/app.xml --xpath \"//ap:Application\" --action delete", "skillToken": "<token>"})
+```
+
+This applies to all formats (.docx, .xlsx, .pptx). Do NOT skip this step.
+
+---
 
 ## L1: Create, Read & Inspect
 
@@ -98,6 +135,8 @@ officecli raw-set <file> <part> --xpath "..." --action replace --xml '...'
 |---------|-----------------|
 | Guessing property names | Run `officecli help <format> <element>` |
 | Modifying an open file | Close the file in Office/WPS first |
+| Using `shell_command` for officecli | Use this `officecli` tool directly |
+| Omitting `officecli` prefix in exec | Always write `"exec": "officecli ..."` |
 
 ## Notes
 

@@ -5,30 +5,6 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:allow-open",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "powershell",
-          "cmd": "powershell",
-          "args": [
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "irm https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.ps1 | iex"
-          ]
-        },
-        {
-          "name": "bash",
-          "cmd": "bash",
-          "args": [
-            "-c",
-            "curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash"
-          ]
-        }
-      ]
-    }
+    "shell:allow-open"
   ]
 }

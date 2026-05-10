@@ -342,7 +342,19 @@ fn builtin_skill_doc_arg(arg: &str) -> Option<(BuiltinTool, String)> {
         return None;
     }
 
-    for tool in builtin_tools(&BuiltinToolsConfig::default()) {
+    // Iterate over ALL builtin tools regardless of enabled/disabled state.
+    // Reading documentation should always be allowed without skillToken.
+    const ALL_BUILTIN_TOOLS: &[BuiltinTool] = &[
+        BuiltinTool::ReadFile,
+        BuiltinTool::ShellCommand,
+        BuiltinTool::MultiEditFile,
+        BuiltinTool::TaskPlanning,
+        BuiltinTool::ChromeCdp,
+        BuiltinTool::ChatPlusAdapterDebugger,
+        BuiltinTool::OfficeCli,
+    ];
+
+    for &tool in ALL_BUILTIN_TOOLS {
         let uri = builtin_skill_uri(tool);
         if candidate.eq_ignore_ascii_case(&uri) {
             return Some((tool, uri));

@@ -88,6 +88,30 @@ impl SkillsService {
         let program = tokens[0].clone();
         let command_args = tokens[1..].to_vec();
 
+        // Block officecli commands from being executed through shell_command when
+        // the dedicated officecli tool is enabled — force AI to use the proper tool.
+        if config.skills.builtin_tools.office_cli {
+            let normalized = program.to_lowercase();
+            let stem = std::path::Path::new(&normalized)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if stem == "officecli" {
+                return Ok(tool_error(
+                    "officecli commands must be executed through the dedicated `officecli` tool, not `shell_command`. Use the `officecli` tool instead.".to_string(),
+                    json!({
+                        "status": "blocked",
+                        "reason": "officecli is a dedicated built-in tool; do not run it via shell_command",
+                        "tool": BuiltinTool::ShellCommand.name(),
+                        "command": command_preview,
+                        "cwd": normalize_display_path(&cwd),
+                        "policyAction": "deny",
+                        "redirectTo": BuiltinTool::OfficeCli.name()
+                    }),
+                ));
+            }
+        }
+
         let policy = evaluate_policy(
             &config.skills,
             &program,

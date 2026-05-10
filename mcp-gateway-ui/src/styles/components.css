@@ -1324,6 +1324,65 @@ html, body {
   background: rgba(137, 180, 250, 0.1);
 }
 
+.officecli-reinstall-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+.officecli-reinstall-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.officecli-reinstall-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.officecli-reinstall-btn.active {
+  color: var(--accent-blue);
+  background: rgba(137, 180, 250, 0.1);
+}
+
+/* popover */
+.officecli-reinstall-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  z-index: 100;
+  white-space: nowrap;
+}
+
+.officecli-reinstall-popover-text {
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.officecli-reinstall-popover-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 /* path input row — full width below desc */
 .officecli-path-row {
   display: flex;
@@ -1365,6 +1424,18 @@ html, body {
   font-size: 11px;
   color: var(--accent-red);
   line-height: 1.5;
+  word-break: break-all;
+}
+
+/* 通用内联链接：用于把纯文本里的 URL 渲染成带下划线的可点击链接 */
+.inline-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.inline-link:hover {
+  color: var(--accent-blue);
 }
 
 /* Skills 执行配置 */

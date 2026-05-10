@@ -178,4 +178,8 @@ export class ApiClient {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
     return this.request<{ installed: boolean; version?: string; error?: string }>("GET", `/admin/skills/officecli/check${query}`);
   }
+
+  async installOfficeCli(): Promise<{ ok: boolean; error?: string }> {
+    return this.request<{ ok: boolean; error?: string }>("POST", "/admin/skills/officecli/install");
+  }
 }

@@ -20,6 +20,8 @@ use tauri::{Manager, State};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
+mod officecli;
+
 const EMBEDDED_RUNTIME_ID: &str = "embedded://gateway-runtime";
 
 #[cfg(target_os = "windows")]
@@ -1060,7 +1062,11 @@ pub fn run() {
             scan_skill_directories,
             detect_local_runtimes,
             open_config_file,
-            reset_default_config
+            reset_default_config,
+            officecli::officecli_check,
+            officecli::officecli_install,
+            officecli::officecli_uninstall,
+            officecli::officecli_open_releases
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
