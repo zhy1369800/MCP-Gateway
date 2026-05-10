@@ -8,14 +8,16 @@ fn truncate_preview(input: &str, max_chars: usize) -> String {
 }
 
 fn normalize_root_path(path: PathBuf) -> PathBuf {
-    if path.exists() {
-        match std::fs::canonicalize(&path) {
+    let lexical = normalize_lexical_path(&path);
+    let normalized = if lexical.exists() {
+        match std::fs::canonicalize(&lexical) {
             Ok(value) => value,
-            Err(_) => normalize_lexical_path(&path),
+            Err(_) => lexical,
         }
     } else {
-        normalize_lexical_path(&path)
-    }
+        normalize_existing_ancestor_path(&lexical).unwrap_or(lexical)
+    };
+    normalize_windows_verbatim_path(normalize_lexical_path(&normalized))
 }
 
 fn normalize_lexical_path(path: &Path) -> PathBuf {
@@ -32,6 +34,63 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+fn normalize_existing_ancestor_path(path: &Path) -> Option<PathBuf> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        suffix.push(ancestor.file_name()?.to_os_string());
+        ancestor = ancestor.parent()?;
+    }
+
+    let mut normalized = std::fs::canonicalize(ancestor)
+        .unwrap_or_else(|_| normalize_lexical_path(ancestor));
+    for component in suffix.iter().rev() {
+        normalized.push(component);
+    }
+    Some(normalized)
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy().to_string();
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    path
+}
+
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    let path = normalize_root_path(path.to_path_buf());
+    let root = normalize_root_path(root.to_path_buf());
+
+    #[cfg(target_os = "windows")]
+    {
+        let path_components = path_case_folded_components(&path);
+        let root_components = path_case_folded_components(&root);
+        path_components.starts_with(&root_components)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.starts_with(root)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn path_case_folded_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect()
 }
 
 fn expand_home_path(token: &str) -> String {
@@ -238,6 +297,124 @@ mod tests {
             }
             _ => panic!("expected deny decision"),
         }
+    }
+
+    #[test]
+    fn path_guard_allows_nonexistent_descendant_under_allowed_root() {
+        let temp_root = std::env::temp_dir().join(format!("mcp-gateway-{}", Uuid::new_v4()));
+        let allowed = temp_root.join("allowed");
+        fs::create_dir_all(&allowed).expect("create allowed test dir");
+        let target = allowed.join("child").join("new-file.txt");
+
+        let mut skills = SkillsConfig::default();
+        skills.policy.path_guard.enabled = true;
+        skills.policy.path_guard.whitelist_dirs = vec![allowed.to_string_lossy().to_string()];
+        skills.policy.path_guard.on_violation = SkillPolicyAction::Deny;
+        skills.policy.rules.clear();
+        skills.policy.default_action = SkillPolicyAction::Allow;
+
+        let raw = format!("New-Item {}", target.to_string_lossy());
+        let decision = evaluate_policy(
+            &skills,
+            "New-Item",
+            &[target.to_string_lossy().to_string()],
+            &raw,
+            &allowed,
+            None,
+        );
+
+        match decision {
+            PolicyDecision::Allow => {}
+            other => panic!("expected allow decision for descendant path, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn path_guard_does_not_treat_sibling_prefix_as_descendant() {
+        let temp_root = std::env::temp_dir().join(format!("mcp-gateway-{}", Uuid::new_v4()));
+        let allowed = temp_root.join("allowed");
+        let sibling = temp_root.join("allowed-sibling").join("target.txt");
+        fs::create_dir_all(&allowed).expect("create allowed test dir");
+
+        let mut skills = SkillsConfig::default();
+        skills.policy.path_guard.enabled = true;
+        skills.policy.path_guard.whitelist_dirs = vec![allowed.to_string_lossy().to_string()];
+        skills.policy.path_guard.on_violation = SkillPolicyAction::Deny;
+        skills.policy.rules.clear();
+        skills.policy.default_action = SkillPolicyAction::Allow;
+
+        let raw = format!("New-Item {}", sibling.to_string_lossy());
+        let decision = evaluate_policy(
+            &skills,
+            "New-Item",
+            &[sibling.to_string_lossy().to_string()],
+            &raw,
+            &allowed,
+            None,
+        );
+
+        match decision {
+            PolicyDecision::Deny(reason) => {
+                assert!(reason.contains("outside whitelist"));
+            }
+            other => panic!("expected deny decision for sibling path, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn path_guard_allows_windows_child_with_different_drive_case() {
+        let temp_root = std::env::temp_dir().join(format!("mcp-gateway-{}", Uuid::new_v4()));
+        let allowed = temp_root.join("allowed");
+        fs::create_dir_all(&allowed).expect("create allowed test dir");
+
+        let allowed_text = allowed.to_string_lossy().to_string();
+        let target_text = flip_windows_drive_case(&allowed_text) + r"\child\new-file.txt";
+
+        let mut skills = SkillsConfig::default();
+        skills.policy.path_guard.enabled = true;
+        skills.policy.path_guard.whitelist_dirs = vec![allowed_text];
+        skills.policy.path_guard.on_violation = SkillPolicyAction::Deny;
+        skills.policy.rules.clear();
+        skills.policy.default_action = SkillPolicyAction::Allow;
+
+        let raw = format!("New-Item {target_text}");
+        let decision = evaluate_policy(
+            &skills,
+            "New-Item",
+            &[target_text],
+            &raw,
+            &allowed,
+            None,
+        );
+
+        match decision {
+            PolicyDecision::Allow => {}
+            other => panic!("expected allow decision for case-varied child path, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn flip_windows_drive_case(path: &str) -> String {
+        let mut chars = path.chars();
+        let Some(first) = chars.next() else {
+            return path.to_string();
+        };
+        let Some(':') = chars.next() else {
+            return path.to_string();
+        };
+        let flipped = if first.is_ascii_lowercase() {
+            first.to_ascii_uppercase()
+        } else {
+            first.to_ascii_lowercase()
+        };
+        format!("{flipped}:{}", chars.collect::<String>())
     }
 
     #[test]
@@ -1448,6 +1625,8 @@ mod tests {
             task_planning: true,
             chrome_cdp: true,
             chat_plus_adapter_debugger: true,
+            office_cli: false,
+            office_cli_path: None,
         };
         let tools = builtin_tool_definitions(os, now, &cfg);
         let names: Vec<&str> = tools
@@ -1469,6 +1648,8 @@ mod tests {
             task_planning: false,
             chrome_cdp: true,
             chat_plus_adapter_debugger: false,
+            office_cli: false,
+            office_cli_path: None,
         };
         let tools = builtin_tool_definitions(os, now, &cfg);
         assert_eq!(tools.len(), 1);
@@ -1481,7 +1662,7 @@ mod tests {
     #[test]
     fn disabled_tool_rejected_in_execute_builtin_tool() {
         let all_enabled = BuiltinToolsConfig::default();
-        assert_eq!(builtin_tools(&all_enabled).len(), 6);
+        assert_eq!(builtin_tools(&all_enabled).len(), 7);
 
         let all_disabled = BuiltinToolsConfig {
             read_file: false,
@@ -1490,6 +1671,8 @@ mod tests {
             task_planning: false,
             chrome_cdp: false,
             chat_plus_adapter_debugger: false,
+            office_cli: false,
+            office_cli_path: None,
         };
         assert_eq!(builtin_tools(&all_disabled).len(), 0);
     }

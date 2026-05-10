@@ -13,6 +13,7 @@ import {
   ListChecks,
   Chrome,
   Bug,
+  FileSpreadsheet,
   List,
   Languages,
   Save,
@@ -25,8 +26,10 @@ import {
   Plug,
   Pencil,
   RotateCcw,
+  Download,
+  FolderOpen,
 } from "lucide-react";
-import { open } from "@tauri-apps/plugin-shell";
+import { open, Command } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
 import {
   clearServerAuthLocal,
@@ -241,6 +244,10 @@ function App() {
   }>({
     open: false, kind: "roots", id: ""
   });
+
+  const [officeCliState, setOfficeCliState] = useState<{ installed: boolean; version?: string; error?: string; installing?: boolean } | null>(null);
+  const [showOfficeCliPath, setShowOfficeCliPath] = useState(false);
+  const [officeCliCustomPath, setOfficeCliCustomPath] = useState("");
 
   const knownPendingIdsRef = useRef<Set<string>>(new Set());
   const dismissedPopupIdsRef = useRef<Set<string>>(new Set());
@@ -1394,6 +1401,100 @@ function App() {
     t,
   ]);
 
+  // OfficeCLI detection and install
+  useEffect(() => {
+    let cancelled = false;
+    async function check() {
+      try {
+        const result = await apiClient.checkOfficeCli();
+        if (!cancelled) setOfficeCliState({ installed: result.installed, version: result.version, error: result.error });
+      } catch {
+        if (!cancelled) setOfficeCliState({ installed: false });
+      }
+    }
+    check();
+    return () => { cancelled = true; };
+  }, [apiClient, listen, adminToken]);
+
+  const handleInstallOfficeCli = async () => {
+    setOfficeCliState(prev => ({ ...(prev || { installed: false }), installing: true, error: undefined }));
+    try {
+      const isWin = /win/i.test(navigator.platform || '');
+      if (isWin) {
+        // Windows: execute install.ps1 via PowerShell
+        try {
+          const cmd = Command.create('powershell', [
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-Command',
+            'irm https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.ps1 | iex'
+          ]);
+          await cmd.execute();
+        } catch { /* Command.execute might throw on some platforms, fallback to open */
+          try {
+            await open('https://github.com/iOfficeAI/OfficeCLI/releases');
+          } catch { /* ignore */ }
+        }
+      } else {
+        // macOS/Linux: run install.sh via bash
+        try {
+          const cmd = Command.create('bash', [
+            '-c',
+            'curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash'
+          ]);
+          await cmd.execute();
+        } catch { /* fallback to open */
+          try {
+            await open('https://github.com/iOfficeAI/OfficeCLI/releases');
+          } catch { /* ignore */ }
+        }
+      }
+      // Wait and auto-recheck
+      await new Promise(r => setTimeout(r, 6000));
+      try {
+        const result = await apiClient.checkOfficeCli();
+        if (result.installed) {
+          setOfficeCliState({ installed: true, version: result.version });
+          return;
+        }
+      } catch { /* check failed, fall through */ }
+      // Installed but not in PATH — prompt for manual path
+      setOfficeCliState(prev => ({
+        ...(prev || { installed: false }),
+        installing: false,
+        error: undefined
+      }));
+      setShowOfficeCliPath(true);
+    } catch {
+      setOfficeCliState(prev => ({
+        ...(prev || { installed: false }),
+        installing: false,
+        error: "Auto-install failed. Download from: https://github.com/iOfficeAI/OfficeCLI/releases"
+      }));
+    }
+  };
+
+  const handleVerifyOfficeCliPath = async () => {
+    const p = officeCliCustomPath.trim();
+    if (!p) return;
+    setOfficeCliState(prev => ({ ...(prev || { installed: false }), installing: true, error: undefined }));
+    try {
+      const result = await apiClient.checkOfficeCli(p);
+      if (result.installed) {
+        setOfficeCliState({ installed: true, version: result.version, error: undefined });
+        // Save the custom path to config so backend can use it for tools/list and handler
+        setSkills(prev => ({
+          ...prev,
+          builtinTools: { ...prev.builtinTools, officeCliPath: p }
+        }));
+      } else {
+        setOfficeCliState({ installed: false, error: result.error || undefined });
+      }
+    } catch {
+      setOfficeCliState({ installed: false });
+    }
+  };
+
   const handleCopy = async (name: string, type: EndpointTransportType, url: string, key: string) => {
     const snippet = createMcpClientEntryJson(name, type, url, mcpToken);
     await navigator.clipboard.writeText(snippet);
@@ -1948,6 +2049,67 @@ function App() {
                       <div className="built-in-tool-body">
                         <div className="built-in-tool-name">chat-plus-adapter-debugger</div>
                         <div className="built-in-tool-desc">{t("builtInChatPlusAdapterDesc")}</div>
+                      </div>
+                    </div>
+                    <div className={`built-in-tool officecli-tool${!officeCliState ? " officecli-checking" : ""}${officeCliState?.installed ? " officecli-ready" : ""}`}>
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.officeCli ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => {
+                          if (!officeCliState?.installed) return;
+                          setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCli: !prev.builtinTools.officeCli } }))
+                        }}
+                        title={officeCliState?.installed ? (skills.builtinTools.officeCli ? t("enabledClick") : t("disabledClick")) : t("builtInOfficeCliNotInstalled")}
+                        aria-label={`${skills.builtinTools.officeCli ? t("enabledClick") : t("disabledClick")} officecli`}
+                        aria-pressed={skills.builtinTools.officeCli}
+                        disabled={!officeCliState?.installed}
+                      />
+                      <div className="built-in-tool-icon"><FileSpreadsheet size={15} /></div>
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">
+                          officecli
+                          {officeCliState?.installed && (
+                            <span className="officecli-badge ok" title={officeCliState.version || t("builtInOfficeCliInstalled")}>
+                              <span className="officecli-dot" />
+                              {officeCliState.version && <>v{officeCliState.version}</>}
+                            </span>
+                          )}
+                          {officeCliState && !officeCliState.installed && !officeCliState.installing && (
+                            <span className="officecli-badge warn">
+                              {t("builtInOfficeCliNotInstalled")}
+                              <button className="btn-icon officecli-action-btn" title={t("builtInOfficeCliInstallBtn")} onClick={handleInstallOfficeCli}>
+                                <Download size={13} />
+                              </button>
+                              <button
+                                className={`btn-icon officecli-action-btn${showOfficeCliPath ? " active" : ""}`}
+                                title={t("builtInOfficeCliManualPath")}
+                                onClick={() => setShowOfficeCliPath(!showOfficeCliPath)}
+                              >
+                                <FolderOpen size={13} />
+                              </button>
+                            </span>
+                          )}
+                          {(!officeCliState || officeCliState?.installing) && (
+                            <span className="officecli-badge muted">{t("builtInOfficeCliInstalling")}</span>
+                          )}
+                        </div>
+                        <div className="built-in-tool-desc">{t("builtInOfficeCliDesc")}</div>
+                        {officeCliState && !officeCliState.installed && !officeCliState.installing && showOfficeCliPath && (
+                          <div className="officecli-path-row">
+                            <Terminal size={13} className="officecli-path-icon" />
+                            <input
+                              className="officecli-path-input"
+                              type="text"
+                              placeholder={t("builtInOfficeCliPathPlaceholder")}
+                              value={officeCliCustomPath}
+                              onChange={(e) => setOfficeCliCustomPath(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") handleVerifyOfficeCliPath(); }}
+                            />
+                            <button className="btn-icon officecli-action-btn" title={t("builtInOfficeCliVerifyBtn")} onClick={handleVerifyOfficeCliPath}>
+                              <Check size={14} />
+                            </button>
+                          </div>
+                        )}
+                        {officeCliState?.error && <div className="officecli-error">{officeCliState.error}</div>}
                       </div>
                     </div>
                   </div>

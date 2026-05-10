@@ -20,6 +20,7 @@ impl BuiltinTool {
             value if value.eq_ignore_ascii_case(Self::ChatPlusAdapterDebugger.name()) => {
                 Some(Self::ChatPlusAdapterDebugger)
             }
+            value if value.eq_ignore_ascii_case(Self::OfficeCli.name()) => Some(Self::OfficeCli),
             _ => None,
         }
     }
@@ -32,6 +33,7 @@ impl BuiltinTool {
             Self::TaskPlanning => "task-planning",
             Self::ChromeCdp => "chrome-cdp",
             Self::ChatPlusAdapterDebugger => "chat-plus-adapter-debugger",
+            Self::OfficeCli => "officecli",
         }
     }
 }

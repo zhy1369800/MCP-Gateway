@@ -173,4 +173,9 @@ export class ApiClient {
       `/admin/skills/confirmations/${encodeURIComponent(id)}/reject`,
     );
   }
+
+  async checkOfficeCli(path?: string): Promise<{ installed: boolean; version?: string; error?: string }> {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    return this.request<{ installed: boolean; version?: string; error?: string }>("GET", `/admin/skills/officecli/check${query}`);
+  }
 }

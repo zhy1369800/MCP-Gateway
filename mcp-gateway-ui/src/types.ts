@@ -68,6 +68,8 @@ export interface BuiltinToolsConfig {
   taskPlanning: boolean;
   chromeCdp: boolean;
   chatPlusAdapterDebugger: boolean;
+  officeCli: boolean;
+  officeCliPath?: string;
 }
 
 export interface SkillsConfig {

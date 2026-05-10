@@ -43,6 +43,11 @@ impl SkillsService {
                 self.handle_builtin_chat_plus_adapter_debugger(config, args, planning_scope)
                     .await
             }
+            BuiltinTool::OfficeCli => {
+                let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
+                self.handle_builtin_office_cli(config, args, planning_scope)
+                    .await
+            }
         }
     }
 }

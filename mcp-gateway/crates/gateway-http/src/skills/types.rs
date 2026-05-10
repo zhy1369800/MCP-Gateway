@@ -20,6 +20,8 @@ const BUILTIN_CHROME_CDP_SKILL_MD: &str = include_str!("../../builtin-skills/chr
 const BUILTIN_CHROME_CDP_MJS: &str = include_str!("../../builtin-skills/chrome-cdp/scripts/cdp.mjs");
 const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
     include_str!("../../builtin-skills/chat-plus-adapter-debugger/SKILL.md");
+const BUILTIN_OFFICECLI_SKILL_MD: &str =
+    include_str!("../../builtin-skills/officecli/SKILL.md");
 const BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "windows")]
@@ -382,6 +384,7 @@ enum BuiltinTool {
     TaskPlanning,
     ChromeCdp,
     ChatPlusAdapterDebugger,
+    OfficeCli,
 }
 
 #[derive(Debug, Clone)]

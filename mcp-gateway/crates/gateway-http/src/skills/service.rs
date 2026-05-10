@@ -66,11 +66,19 @@ impl SkillsService {
                     (discovered, summaries)
                 };
                 let tools = if is_builtin {
-                    Value::Array(builtin_tool_definitions(
+                    let mut defs = builtin_tool_definitions(
                         std::env::consts::OS,
                         &Utc::now().to_rfc3339(),
                         &config.skills.builtin_tools,
-                    ))
+                    );
+                    // If officecli is enabled in config but binary is not callable, hide it
+                    if config.skills.builtin_tools.office_cli && !check_officecli_available(&config.skills.builtin_tools) {
+                        defs.retain(|def| {
+                            def.get("name").and_then(Value::as_str)
+                                != Some(BuiltinTool::OfficeCli.name())
+                        });
+                    }
+                    Value::Array(defs)
                 } else {
                     external_skill_tool_definitions(&discovered)
                 };

@@ -269,6 +269,8 @@ export function ensureSkillsConfig(
       taskPlanning: raw?.builtinTools?.taskPlanning ?? true,
       chromeCdp: raw?.builtinTools?.chromeCdp ?? true,
       chatPlusAdapterDebugger: raw?.builtinTools?.chatPlusAdapterDebugger ?? true,
+      officeCli: raw?.builtinTools?.officeCli ?? false,
+      officeCliPath: raw?.builtinTools?.officeCliPath ?? undefined,
     },
   };
 }

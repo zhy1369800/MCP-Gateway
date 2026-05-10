@@ -400,7 +400,9 @@ fn find_outside_whitelist_path(
         if resolved == script_file {
             continue;
         }
-        let allowed = whitelist.iter().any(|root| resolved.starts_with(root));
+        let allowed = whitelist
+            .iter()
+            .any(|root| path_is_within_root(&resolved, root));
         if !allowed {
             return Some((token, source, resolved));
         }
@@ -488,7 +490,7 @@ fn resolve_builtin_cwd(
     let normalized = normalize_root_path(selected);
     if !allowed_roots
         .iter()
-        .any(|root| normalized.starts_with(root))
+        .any(|root| path_is_within_root(&normalized, root))
     {
         let message = "cwd must be inside one configured allowed directory";
         return Err(cwd_error_result(
@@ -589,7 +591,9 @@ fn evaluate_paths_policy(skills: &SkillsConfig, paths: &[PathBuf]) -> PolicyDeci
 
     for path in paths {
         let resolved = normalize_root_path(path.clone());
-        let allowed = whitelist.iter().any(|root| resolved.starts_with(root));
+        let allowed = whitelist
+            .iter()
+            .any(|root| path_is_within_root(&resolved, root));
         if !allowed {
             let reason = format!(
                 "path '{}' is outside allowed directories",

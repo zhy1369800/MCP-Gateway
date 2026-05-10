@@ -41,6 +41,10 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
         )
         .route(&format!("{}/admin/skills", prefix), get(get_skills))
         .route(
+            &format!("{}/admin/skills/officecli/check", prefix),
+            get(check_officecli),
+        )
+        .route(
             &format!("{}/admin/skills/events", prefix),
             get(get_skill_events),
         )
@@ -492,6 +496,81 @@ pub async fn reject_skill_confirmation(
         .await
         .map_err(response::err_response)?;
     Ok(response::ok(updated))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OfficeCliCheckQuery {
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/admin/skills/officecli/check",
+    params(("path" = Option<String>, Query, description = "Optional custom path to officecli binary")),
+    responses((status = 200, description = "OfficeCLI installation check"))
+)]
+pub async fn check_officecli(Query(query): Query<OfficeCliCheckQuery>) -> ApiResult<Value> {
+    let binary = crate::skills::resolve_officecli_binary(query.path.as_deref());
+    let result = std::process::Command::new(&binary)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    match result {
+        Ok(mut child) => {
+            let start = std::time::Instant::now();
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(s)) => break Some(s),
+                    Ok(None) => {
+                        if start.elapsed() > std::time::Duration::from_secs(5) {
+                            let _ = child.kill();
+                            break None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            match status {
+                Some(s) if s.success() => {
+                    use std::io::Read;
+                    let mut stdout = String::new();
+                    let _ = child
+                        .stdout
+                        .as_mut()
+                        .and_then(|o| o.read_to_string(&mut stdout).ok());
+                    Ok(response::ok(json!({
+                        "installed": true,
+                        "version": stdout.trim(),
+                        "path": binary
+                    })))
+                }
+                Some(s) => {
+                    use std::io::Read;
+                    let mut stderr = String::new();
+                    let _ = child
+                        .stderr
+                        .as_mut()
+                        .and_then(|e| e.read_to_string(&mut stderr).ok());
+                    Ok(response::ok(json!({
+                        "installed": false,
+                        "error": format!("exit code {}", s.code().unwrap_or(-1)),
+                        "stderr": stderr.trim()
+                    })))
+                }
+                None => Ok(response::ok(json!({
+                    "installed": false,
+                    "error": "Command timed out after 5 seconds"
+                }))),
+            }
+        }
+        Err(e) => Ok(response::ok(json!({
+            "installed": false,
+            "error": e.to_string()
+        }))),
+    }
 }
 
 fn gateway_base_url(listen: &str) -> Result<String, AppError> {

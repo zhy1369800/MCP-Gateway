@@ -2,7 +2,7 @@ type BuiltinToolDefinitionFn = fn(&str, &str, &BuiltinToolsConfig) -> Value;
 
 fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Vec<Value> {
     let enabled: Vec<BuiltinTool> = builtin_tools(cfg);
-    let builders: [(BuiltinTool, BuiltinToolDefinitionFn); 6] = [
+    let builders: [(BuiltinTool, BuiltinToolDefinitionFn); 7] = [
         (BuiltinTool::ReadFile, read_file_tool_definition),
         (BuiltinTool::ShellCommand, shell_command_tool_definition),
         (BuiltinTool::MultiEditFile, multi_edit_file_tool_definition),
@@ -12,6 +12,7 @@ fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Ve
             BuiltinTool::ChatPlusAdapterDebugger,
             chat_plus_adapter_debugger_tool_definition,
         ),
+        (BuiltinTool::OfficeCli, office_cli_tool_definition),
     ];
     let mut defs = builders
         .into_iter()
@@ -83,7 +84,8 @@ fn render_builtin_tool_description(
         }
         BuiltinTool::TaskPlanning
         | BuiltinTool::ChromeCdp
-        | BuiltinTool::ChatPlusAdapterDebugger => {
+        | BuiltinTool::ChatPlusAdapterDebugger
+        | BuiltinTool::OfficeCli => {
             format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Preferred documentation read: {doc_read_hint}.")
         }
     };
@@ -129,6 +131,7 @@ fn builtin_skill_md_content(tool: BuiltinTool) -> &'static str {
         BuiltinTool::TaskPlanning => BUILTIN_TASK_PLANNING_SKILL_MD,
         BuiltinTool::ChromeCdp => BUILTIN_CHROME_CDP_SKILL_MD,
         BuiltinTool::ChatPlusAdapterDebugger => BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD,
+        BuiltinTool::OfficeCli => BUILTIN_OFFICECLI_SKILL_MD,
     }
 }
 
