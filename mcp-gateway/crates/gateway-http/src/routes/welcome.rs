@@ -26,11 +26,22 @@ async fn get_static_asset(AxumPath(path): AxumPath<String>) -> Response {
         return (StatusCode::BAD_REQUEST, "invalid path").into_response();
     };
 
-    let full_path = Path::new(WELCOME_ROOT).join(safe_path);
-    match tokio::fs::read(&full_path).await {
+    let base_root = Path::new(WELCOME_ROOT);
+    let candidate = if safe_path.extension().is_none() {
+        let html_path = base_root.join(format!("{}.html", safe_path.to_string_lossy()));
+        if tokio::fs::metadata(&html_path).await.is_ok() {
+            html_path
+        } else {
+            base_root.join(&safe_path)
+        }
+    } else {
+        base_root.join(&safe_path)
+    };
+
+    match tokio::fs::read(&candidate).await {
         Ok(bytes) => {
             let mut headers = HeaderMap::new();
-            headers.insert(header::CONTENT_TYPE, content_type_for(&full_path));
+            headers.insert(header::CONTENT_TYPE, content_type_for(&candidate));
             (headers, bytes).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
