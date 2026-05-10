@@ -12,6 +12,7 @@
     "test": "vitest run",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "download:ripgrep": "node scripts/ensure-ripgrep.mjs --all",
     "tauri": "node scripts/tauri-with-tools.mjs"
   },
   "dependencies": {
