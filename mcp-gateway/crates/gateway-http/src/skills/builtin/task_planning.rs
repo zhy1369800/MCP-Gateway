@@ -135,6 +135,9 @@ impl SkillsService {
                         explanation: args.explanation.clone(),
                         consecutive_shell_commands: 0,
                         consecutive_multi_edit_file_failures: 0,
+                        consecutive_read_file_failures: 0,
+                        consecutive_chrome_cdp_failures: 0,
+                        officecli_pending_wps_cleanup: None,
                         updated_at: now,
                     },
                 );
@@ -187,6 +190,9 @@ impl SkillsService {
                 })?;
                 state.consecutive_shell_commands = 0;
                 state.consecutive_multi_edit_file_failures = 0;
+                state.consecutive_read_file_failures = 0;
+                state.consecutive_chrome_cdp_failures = 0;
+                state.officecli_pending_wps_cleanup = None;
                 let item_index = match args.item {
                     Some(item) if item == 0 || item > state.plan.len() => {
                         return Err(AppError::BadRequest(format!(

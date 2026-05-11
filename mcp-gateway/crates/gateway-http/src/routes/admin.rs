@@ -530,7 +530,9 @@ pub async fn check_officecli(
                 "path": binary
             })));
         }
-        return Ok(response::ok(json!({"installed": false, "error": "officecli not found in the specified directory"})));
+        return Ok(response::ok(
+            json!({"installed": false, "error": "officecli not found in the specified directory"}),
+        ));
     }
 
     // No path given — full detection: PATH → config dir → script defaults
@@ -551,7 +553,9 @@ pub async fn check_officecli(
 pub async fn install_officecli(State(_state): State<AppState>) -> ApiResult<Value> {
     let result = tokio::task::spawn_blocking(|| crate::skills::install_officecli())
         .await
-        .map_err(|_| response::err_response(AppError::Internal("install task panicked".to_string())))?;
+        .map_err(|_| {
+            response::err_response(AppError::Internal("install task panicked".to_string()))
+        })?;
     match result {
         Ok(()) => Ok(response::ok(json!({"ok": true}))),
         Err(error) => Ok(response::ok(json!({"ok": false, "error": error}))),

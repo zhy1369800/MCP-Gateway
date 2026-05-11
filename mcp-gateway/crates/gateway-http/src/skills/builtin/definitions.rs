@@ -2,22 +2,11 @@ type BuiltinToolDefinitionFn = fn(&str, &str, &BuiltinToolsConfig) -> Value;
 
 fn builtin_tool_definitions(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Vec<Value> {
     let enabled: Vec<BuiltinTool> = builtin_tools(cfg);
-    let builders: [(BuiltinTool, BuiltinToolDefinitionFn); 7] = [
-        (BuiltinTool::ReadFile, read_file_tool_definition),
-        (BuiltinTool::ShellCommand, shell_command_tool_definition),
-        (BuiltinTool::MultiEditFile, multi_edit_file_tool_definition),
-        (BuiltinTool::TaskPlanning, task_planning_tool_definition),
-        (BuiltinTool::ChromeCdp, chrome_cdp_tool_definition),
-        (
-            BuiltinTool::ChatPlusAdapterDebugger,
-            chat_plus_adapter_debugger_tool_definition,
-        ),
-        (BuiltinTool::OfficeCli, office_cli_tool_definition),
-    ];
-    let mut defs = builders
-        .into_iter()
-        .filter(|(tool, _)| enabled.contains(tool))
-        .map(|(_, build)| build(os, now, cfg))
+    let mut defs = BuiltinTool::ALL
+        .iter()
+        .copied()
+        .filter(|tool| enabled.contains(tool))
+        .map(|tool| tool.definition_builder()(os, now, cfg))
         .collect::<Vec<_>>();
 
     if cfg.task_planning {
@@ -344,17 +333,7 @@ fn builtin_skill_doc_arg(arg: &str) -> Option<(BuiltinTool, String)> {
 
     // Iterate over ALL builtin tools regardless of enabled/disabled state.
     // Reading documentation should always be allowed without skillToken.
-    const ALL_BUILTIN_TOOLS: &[BuiltinTool] = &[
-        BuiltinTool::ReadFile,
-        BuiltinTool::ShellCommand,
-        BuiltinTool::MultiEditFile,
-        BuiltinTool::TaskPlanning,
-        BuiltinTool::ChromeCdp,
-        BuiltinTool::ChatPlusAdapterDebugger,
-        BuiltinTool::OfficeCli,
-    ];
-
-    for &tool in ALL_BUILTIN_TOOLS {
+    for &tool in BuiltinTool::ALL {
         let uri = builtin_skill_uri(tool);
         if candidate.eq_ignore_ascii_case(&uri) {
             return Some((tool, uri));

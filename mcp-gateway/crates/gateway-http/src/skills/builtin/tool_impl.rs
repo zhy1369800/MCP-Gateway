@@ -1,4 +1,38 @@
 impl BuiltinTool {
+    pub(crate) const ALL: &'static [BuiltinTool] = &[
+        BuiltinTool::ReadFile,
+        BuiltinTool::ShellCommand,
+        BuiltinTool::MultiEditFile,
+        BuiltinTool::TaskPlanning,
+        BuiltinTool::ChromeCdp,
+        BuiltinTool::ChatPlusAdapterDebugger,
+        BuiltinTool::OfficeCli,
+    ];
+
+    pub(crate) fn is_enabled(self, cfg: &BuiltinToolsConfig) -> bool {
+        match self {
+            BuiltinTool::ReadFile => cfg.read_file,
+            BuiltinTool::ShellCommand => cfg.shell_command,
+            BuiltinTool::MultiEditFile => cfg.multi_edit_file,
+            BuiltinTool::TaskPlanning => cfg.task_planning,
+            BuiltinTool::ChromeCdp => cfg.chrome_cdp,
+            BuiltinTool::ChatPlusAdapterDebugger => cfg.chat_plus_adapter_debugger,
+            BuiltinTool::OfficeCli => cfg.office_cli,
+        }
+    }
+
+    pub(crate) fn definition_builder(self) -> BuiltinToolDefinitionFn {
+        match self {
+            BuiltinTool::ReadFile => read_file_tool_definition,
+            BuiltinTool::ShellCommand => shell_command_tool_definition,
+            BuiltinTool::MultiEditFile => multi_edit_file_tool_definition,
+            BuiltinTool::TaskPlanning => task_planning_tool_definition,
+            BuiltinTool::ChromeCdp => chrome_cdp_tool_definition,
+            BuiltinTool::ChatPlusAdapterDebugger => chat_plus_adapter_debugger_tool_definition,
+            BuiltinTool::OfficeCli => office_cli_tool_definition,
+        }
+    }
+
     fn from_name(name: &str) -> Option<Self> {
         match name {
             value

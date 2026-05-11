@@ -227,6 +227,7 @@ impl SkillsService {
                 ))
             }
             Err(error) => {
+                let error_message = error.to_string();
                 self.record_tool_event_data(
                     &call_id,
                     BuiltinTool::ReadFile.name(),
@@ -234,20 +235,31 @@ impl SkillsService {
                     SkillToolEventData {
                         status: Some("failed".to_string()),
                         affected_paths: vec![normalize_display_path(&target)],
-                        text: Some(error.to_string()),
+                        text: Some(error_message.clone()),
                         ..SkillToolEventData::default()
                     },
                 )
                 .await;
-                Ok(tool_error(
-                    error.to_string(),
+                let kind = ReadFailureKind::classify(&error_message);
+                let reminder = self
+                    .planning_read_failure_reminder(
+                        config,
+                        planning_scope,
+                        args.planning_id.as_deref(),
+                        kind,
+                    )
+                    .await;
+                Ok(tool_error_with_failure_reminder(
+                    error_message.clone(),
                     json!({
                         "status": "failed",
                         "tool": BuiltinTool::ReadFile.name(),
                         "path": normalize_display_path(&target),
                         "cwd": normalize_display_path(&cwd),
-                        "message": error.to_string()
+                        "message": error_message
                     }),
+                    "readFailureReminder",
+                    reminder,
                 ))
             }
         }

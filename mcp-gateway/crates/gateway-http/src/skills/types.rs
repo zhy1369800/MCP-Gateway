@@ -146,13 +146,25 @@ struct PlanningState {
     explanation: Option<String>,
     consecutive_shell_commands: u32,
     consecutive_multi_edit_file_failures: u32,
+    consecutive_read_file_failures: u32,
+    consecutive_chrome_cdp_failures: u32,
+    officecli_pending_wps_cleanup: Option<OfficeCliPendingCleanup>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct OfficeCliPendingCleanup {
+    file: String,
+    created_at: Instant,
 }
 
 #[derive(Debug, Default)]
 struct PlanningSuccessHints {
     planning_reminder: Option<String>,
     shell_command_reminder: Option<String>,
+    read_failure_reminder: Option<String>,
+    cdp_stuck_reminder: Option<String>,
+    office_cli_post_create_reminder: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

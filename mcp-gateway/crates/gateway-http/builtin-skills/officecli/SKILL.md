@@ -143,3 +143,18 @@ officecli raw-set <file> <part> --xpath "..." --action replace --xml '...'
 - Paths are **1-based**: `'/body/p[3]'` = third paragraph
 - After modifications, verify with `validate` and/or `view issues`
 - When unsure, run `officecli help <format> <element>` instead of guessing
+
+## Companion Tools
+
+The `officecli` skill only owns `.docx` / `.xlsx` / `.pptx` documents. Any
+secondary files (Markdown notes, JSON dumps from `officecli view --json`, unit
+fixtures, extracted plain text) must go through the other bundled skills:
+
+- Persist or rewrite secondary files with `multi_edit_file` so the gateway has
+  a reviewable diff and path allowlist enforcement; do not use
+  `shell_command` redirection, `Set-Content`, or here-documents for that.
+- Inspect the current contents of those files with `read_file` so output is
+  line-numbered and size-capped; do not use `shell_command` with `cat`,
+  `Get-Content`, `type`, `sed`, `head`, or `tail`.
+- Never wrap an `officecli` invocation inside `shell_command`. The gateway
+  rejects that path. Call this `officecli` tool directly.

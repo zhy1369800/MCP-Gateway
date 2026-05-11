@@ -73,7 +73,10 @@ http://127.0.0.1:8765/api/v2/sse/playwright
 - `multi_edit_file`
 - `task-planning`
 - `chrome-cdp`
-- `chat-plus-adapter-debugger`
+- `chat-plus-adapter-debugger`（业务场景专用）
+- `officecli`
+
+`chat-plus-adapter-debugger` 专门服务于 Chat Plus 站点适配流程，不是通用能力；做通用智能体时建议关掉它，避免上下文被业务规则占用。
 
 这些能力可以让普通 MCP 客户端具备更接近智能体的工作流：查看项目、读取文档、修改代码、执行命令、验证结果、操作浏览器，并且所有调用仍然走标准 MCP 接口。
 

@@ -1661,8 +1661,11 @@ mod tests {
 
     #[test]
     fn disabled_tool_rejected_in_execute_builtin_tool() {
+        // officecli is gated: it stays disabled until the admin UI detects or installs the binary.
+        // Defaults therefore enable every builtin except officecli, so ALL.len() - 1 = 6.
         let all_enabled = BuiltinToolsConfig::default();
-        assert_eq!(builtin_tools(&all_enabled).len(), 7);
+        assert_eq!(builtin_tools(&all_enabled).len(), BuiltinTool::ALL.len() - 1);
+        assert!(!all_enabled.office_cli);
 
         let all_disabled = BuiltinToolsConfig {
             read_file: false,
@@ -1902,7 +1905,7 @@ mod tests {
             json!({"status": "completed"}),
             PlanningSuccessHints {
                 planning_reminder: Some(planning_reminder),
-                shell_command_reminder: None,
+                ..PlanningSuccessHints::default()
             },
         );
         assert_eq!(reminder.text, "done");
@@ -2053,4 +2056,323 @@ mod tests {
             .expect("completed planning id should be closed");
         assert_eq!(closed.structured["reason"], "unknown planningId");
     }
+
+
+    #[tokio::test]
+    async fn builtin_tool_all_covers_every_variant() {
+        // The ALL constant must list every BuiltinTool variant so registry / definitions
+        // iteration stays complete. We check via from_name round-tripping against ALL.
+        let names: Vec<&'static str> = BuiltinTool::ALL.iter().map(|t| t.name()).collect();
+        for name in &names {
+            let tool = BuiltinTool::from_name(name).expect("from_name returns a variant");
+            assert!(BuiltinTool::ALL.contains(&tool));
+        }
+        assert_eq!(names.len(), BuiltinTool::ALL.len());
+        let cfg_all_on = BuiltinToolsConfig {
+            read_file: true,
+            shell_command: true,
+            multi_edit_file: true,
+            task_planning: true,
+            chrome_cdp: true,
+            chat_plus_adapter_debugger: true,
+            office_cli: true,
+            office_cli_path: None,
+        };
+        for tool in BuiltinTool::ALL {
+            assert!(tool.is_enabled(&cfg_all_on));
+            let builder = tool.definition_builder();
+            let def = builder("linux", "2024-01-01", &cfg_all_on);
+            assert!(def.get("name").is_some(), "definition for {:?} has no name", tool);
+            assert!(def.get("inputSchema").is_some());
+        }
+        let cfg_all_off = BuiltinToolsConfig {
+            read_file: false,
+            shell_command: false,
+            multi_edit_file: false,
+            task_planning: false,
+            chrome_cdp: false,
+            chat_plus_adapter_debugger: false,
+            office_cli: false,
+            office_cli_path: None,
+        };
+        for tool in BuiltinTool::ALL {
+            assert!(!tool.is_enabled(&cfg_all_off));
+        }
+    }
+
+    #[tokio::test]
+    async fn planning_read_failure_reminder_triggers_after_three_failures() {
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let scope = "session:read-fail";
+        let token = builtin_skill_token(BuiltinTool::TaskPlanning);
+        let updated = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "update",
+                    "plan": [
+                        {"step": "Inspect", "status": "in_progress"}
+                    ],
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("planning update");
+        let planning_id = updated.structured["planning"]["planningId"]
+            .as_str()
+            .expect("planning id")
+            .to_string();
+
+        assert!(service
+            .planning_read_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                ReadFailureKind::NotFound,
+            )
+            .await
+            .is_none());
+        assert!(service
+            .planning_read_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                ReadFailureKind::NotFound,
+            )
+            .await
+            .is_none());
+        let reminder = service
+            .planning_read_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                ReadFailureKind::NotFound,
+            )
+            .await
+            .expect("reminder after three failures");
+        assert!(reminder.contains("read_file has failed 3 times"));
+
+        // `rg --files` success should reset the counter.
+        let _ = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::ShellCommand,
+                Some("rg --files"),
+            )
+            .await;
+        assert!(service
+            .planning_read_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                ReadFailureKind::Binary,
+            )
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn planning_read_failure_reminder_disabled_when_task_planning_off() {
+        let service = SkillsService::new();
+        let mut config = GatewayConfig::default();
+        config.skills.builtin_tools.task_planning = false;
+        let scope = "session:read-off";
+        for _ in 0..5 {
+            assert!(service
+                .planning_read_failure_reminder(
+                    &config,
+                    scope,
+                    Some("plan-disabled"),
+                    ReadFailureKind::NotFound,
+                )
+                .await
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn planning_cdp_failure_reminder_requires_stuck_signals() {
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let scope = "session:cdp";
+        let token = builtin_skill_token(BuiltinTool::TaskPlanning);
+        let updated = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "update",
+                    "plan": [
+                        {"step": "Debug browser", "status": "in_progress"}
+                    ],
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("planning update");
+        let planning_id = updated.structured["planning"]["planningId"]
+            .as_str()
+            .expect("planning id")
+            .to_string();
+
+        assert!(service
+            .planning_cdp_failure_reminder(&config, scope, Some(&planning_id), "", "something else")
+            .await
+            .is_none());
+        for _ in 0..2 {
+            assert!(service
+                .planning_cdp_failure_reminder(
+                    &config,
+                    scope,
+                    Some(&planning_id),
+                    "",
+                    "WebSocket connection timed out",
+                )
+                .await
+                .is_none());
+        }
+        let reminder = service
+            .planning_cdp_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                "",
+                "WebSocket connection timed out",
+            )
+            .await
+            .expect("reminder on third stuck signal");
+        assert!(reminder.contains("chrome-cdp has looked stuck"));
+
+        let _ = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::ChromeCdp,
+                Some("stop"),
+            )
+            .await;
+        assert!(service
+            .planning_cdp_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                "",
+                "target not found",
+            )
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn planning_office_cli_post_create_reminder_cycle() {
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let scope = "session:office";
+        let token = builtin_skill_token(BuiltinTool::TaskPlanning);
+        let updated = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "update",
+                    "plan": [
+                        {"step": "Build report", "status": "in_progress"}
+                    ],
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("planning update");
+        let planning_id = updated.structured["planning"]["planningId"]
+            .as_str()
+            .expect("planning id")
+            .to_string();
+
+        // officecli create records pending cleanup but does not fire reminder on the same call.
+        let create_hints = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::OfficeCli,
+                Some("officecli create report.docx"),
+            )
+            .await;
+        assert!(create_hints.office_cli_post_create_reminder.is_none());
+
+        // Any other tool call with pending cleanup triggers the reminder.
+        let other_tool_hints = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::ReadFile,
+                None,
+            )
+            .await;
+        let reminder = other_tool_hints
+            .office_cli_post_create_reminder
+            .expect("pending cleanup reminder");
+        assert!(reminder.contains("report.docx"));
+
+        // The matching raw-set call clears the pending flag.
+        let clear_hints = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::OfficeCli,
+                Some("officecli raw-set report.docx docProps/app.xml --xpath \"//ap:Application\" --action delete"),
+            )
+            .await;
+        assert!(clear_hints.office_cli_post_create_reminder.is_none());
+
+        let after_clear = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::ReadFile,
+                None,
+            )
+            .await;
+        assert!(after_clear.office_cli_post_create_reminder.is_none());
+    }
+
+    #[tokio::test]
+    async fn planning_office_cli_reminder_absent_when_planning_disabled() {
+        let service = SkillsService::new();
+        let mut config = GatewayConfig::default();
+        config.skills.builtin_tools.task_planning = false;
+        let scope = "session:office-off";
+        let hints = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some("plan-disabled"),
+                BuiltinTool::OfficeCli,
+                Some("officecli create report.docx"),
+            )
+            .await;
+        assert!(hints.office_cli_post_create_reminder.is_none());
+        assert!(hints.planning_reminder.is_none());
+    }
+
+    #[test]
+    fn render_builtin_skill_md_planning_integration_is_conditional() {
+        let with_planning = render_builtin_skill_md(BuiltinTool::ReadFile, true);
+        assert!(with_planning.contains("## Planning Integration"));
+        let without_planning = render_builtin_skill_md(BuiltinTool::ReadFile, false);
+        assert!(!without_planning.contains("## Planning Integration"));
+        assert!(!without_planning.contains("planningId"));
+    }
+
 }
