@@ -1756,6 +1756,7 @@ mod tests {
             chat_plus_adapter_debugger: true,
             office_cli: false,
             office_cli_path: None,
+            shell_env: HashMap::new(),
         };
         let tools = builtin_tool_definitions(os, now, &cfg);
         let names: Vec<&str> = tools
@@ -1779,6 +1780,7 @@ mod tests {
             chat_plus_adapter_debugger: false,
             office_cli: false,
             office_cli_path: None,
+            shell_env: HashMap::new(),
         };
         let tools = builtin_tool_definitions(os, now, &cfg);
         assert_eq!(tools.len(), 1);
@@ -1805,6 +1807,7 @@ mod tests {
             chat_plus_adapter_debugger: false,
             office_cli: false,
             office_cli_path: None,
+            shell_env: HashMap::new(),
         };
         assert_eq!(builtin_tools(&all_disabled).len(), 0);
     }
@@ -2206,6 +2209,7 @@ mod tests {
             chat_plus_adapter_debugger: true,
             office_cli: true,
             office_cli_path: None,
+            shell_env: HashMap::new(),
         };
         for tool in BuiltinTool::ALL {
             assert!(tool.is_enabled(&cfg_all_on));
@@ -2223,6 +2227,7 @@ mod tests {
             chat_plus_adapter_debugger: false,
             office_cli: false,
             office_cli_path: None,
+            shell_env: HashMap::new(),
         };
         for tool in BuiltinTool::ALL {
             assert!(!tool.is_enabled(&cfg_all_off));

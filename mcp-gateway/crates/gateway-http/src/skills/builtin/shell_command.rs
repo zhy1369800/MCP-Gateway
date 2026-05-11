@@ -2,7 +2,7 @@ fn shell_command_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
     let mut desc = render_builtin_tool_description(BuiltinTool::ShellCommand, os, now, cfg.task_planning, cfg.read_file);
     if !cfg.shell_env.is_empty() {
         desc.push_str("\n\nUser-configured environment variables available in this terminal session:\n");
-        for (key, _) in &cfg.shell_env {
+        for key in cfg.shell_env.keys() {
             desc.push_str(&format!("- {key}\n"));
         }
     }
