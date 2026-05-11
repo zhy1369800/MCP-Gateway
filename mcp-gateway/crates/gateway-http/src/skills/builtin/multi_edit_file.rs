@@ -226,7 +226,26 @@ impl SkillsService {
             PolicyDecision::Allow => {}
         }
 
-        match apply_multi_edit_file(&cwd, &operations) {
+        // Serialize concurrent edits against the same file. Without this lock
+        // two parallel multi_edit_file calls (common with agent-driven MCP
+        // clients) can both read the same version, each write their own, and
+        // silently lose one side's changes -- or the later writer hits an
+        // old_string mismatch because the file already moved under it.
+        let _file_locks = self.acquire_file_locks(&affected_paths).await;
+
+        // Move the synchronous read/write work off the async runtime so it
+        // does not stall other tasks on the shared thread pool.
+        let cwd_for_apply = cwd.clone();
+        let operations_for_apply = operations.clone();
+        let apply_result = tokio::task::spawn_blocking(move || {
+            apply_multi_edit_file(&cwd_for_apply, &operations_for_apply)
+        })
+        .await
+        .map_err(|join_error| {
+            AppError::Internal(format!("multi_edit_file worker panicked: {join_error}"))
+        })?;
+
+        match apply_result {
             Ok(outcome) => {
                 let text = file_edit_summary_text(&outcome.summary);
                 self.record_tool_event_data(
@@ -272,6 +291,7 @@ impl SkillsService {
                     SkillToolEventData {
                         status: Some("failed".to_string()),
                         delta: Some(failure.delta.clone()),
+                        warnings: failure.warnings.clone(),
                         ..SkillToolEventData::default()
                     },
                 )
@@ -283,7 +303,8 @@ impl SkillsService {
                         "tool": BuiltinTool::MultiEditFile.name(),
                         "cwd": normalize_display_path(&cwd),
                         "message": failure.message,
-                        "delta": edit_delta_for_model(&failure.delta)
+                        "delta": edit_delta_for_model(&failure.delta),
+                        "warnings": failure.warnings
                     }),
                     self.planning_edit_failure_reminder(
                         config,
@@ -302,6 +323,7 @@ fn edit_failure(error: AppError, delta: &FileEditDelta) -> FileEditFailure {
     FileEditFailure {
         message: error.to_string(),
         delta: delta.clone(),
+        warnings: Vec::new(),
     }
 }
 
@@ -461,9 +483,23 @@ fn apply_multi_edit_file(
     }
 
     let mut delta = FileEditDelta::default();
+    // Track successfully-committed stages so we can best-effort roll them
+    // back if a later stage's disk write fails. Without this, a two-file
+    // multi_edit that succeeds on file A and then fails on file B leaves
+    // file A silently mutated with only `delta.exact = false` to signal it.
+    let mut committed: Vec<StagedFileOperation> = Vec::with_capacity(staged.len());
     for operation in staged {
-        commit_staged_file_operation(operation, &mut delta)
-            .map_err(|error| edit_failure(error, &delta))?;
+        match commit_staged_file_operation(&operation, &mut delta) {
+            Ok(()) => committed.push(operation),
+            Err(error) => {
+                let rollback_warnings = rollback_committed_operations(&committed);
+                warnings.extend(rollback_warnings);
+                let mut failure = edit_failure(error, &delta);
+                failure.delta.exact = false;
+                failure.warnings = warnings;
+                return Err(failure);
+            }
+        }
     }
 
     if delta.changes.is_empty() {
@@ -639,7 +675,7 @@ fn ensure_unique_operation_path(
 }
 
 fn commit_staged_file_operation(
-    operation: StagedFileOperation,
+    operation: &StagedFileOperation,
     delta: &mut FileEditDelta,
 ) -> Result<(), AppError> {
     match operation {
@@ -649,15 +685,15 @@ fn commit_staged_file_operation(
             new_content,
             ..
         } => {
-            fs::write(&path, &new_content).map_err(|error| {
+            fs::write(path, new_content).map_err(|error| {
                 delta.exact = false;
                 AppError::from(error)
             })?;
             delta.changes.push(FileEditChange::Update {
-                path: normalize_display_path(&path),
+                path: normalize_display_path(path),
                 move_path: None,
-                old_content,
-                new_content,
+                old_content: old_content.clone(),
+                new_content: new_content.clone(),
                 overwritten_move_content: None,
             });
         }
@@ -673,24 +709,24 @@ fn commit_staged_file_operation(
                     AppError::from(error)
                 })?;
             }
-            fs::write(&path, &content).map_err(|error| {
+            fs::write(path, content).map_err(|error| {
                 delta.exact = false;
                 AppError::from(error)
             })?;
             delta.changes.push(FileEditChange::Add {
-                path: normalize_display_path(&path),
-                content,
-                overwritten_content,
+                path: normalize_display_path(path),
+                content: content.clone(),
+                overwritten_content: overwritten_content.clone(),
             });
         }
         StagedFileOperation::Delete { path, content, .. } => {
-            fs::remove_file(&path).map_err(|error| {
+            fs::remove_file(path).map_err(|error| {
                 delta.exact = false;
                 AppError::from(error)
             })?;
             delta.changes.push(FileEditChange::Delete {
-                path: normalize_display_path(&path),
-                content: Some(content),
+                path: normalize_display_path(path),
+                content: Some(content.clone()),
             });
         }
         StagedFileOperation::Move {
@@ -706,24 +742,128 @@ fn commit_staged_file_operation(
                     AppError::from(error)
                 })?;
             }
-            fs::write(&to, &content).map_err(|error| {
+            fs::write(to, content).map_err(|error| {
                 delta.exact = false;
                 AppError::from(error)
             })?;
-            fs::remove_file(&from).map_err(|error| {
+            fs::remove_file(from).map_err(|error| {
                 delta.exact = false;
                 AppError::from(error)
             })?;
             delta.changes.push(FileEditChange::Update {
-                path: normalize_display_path(&from),
-                move_path: Some(normalize_display_path(&to)),
+                path: normalize_display_path(from),
+                move_path: Some(normalize_display_path(to)),
                 old_content: content.clone(),
-                new_content: content,
-                overwritten_move_content: overwritten_content,
+                new_content: content.clone(),
+                overwritten_move_content: overwritten_content.clone(),
             });
         }
     }
     Ok(())
+}
+
+/// Best-effort rollback of operations that already wrote to disk before a
+/// later stage in the same multi_edit call failed. Iterates in reverse order
+/// and restores the original bytes (or removes newly-created files). Any
+/// rollback failure is captured as a warning; we never bail out mid-rollback
+/// because the caller still needs the remaining undo attempts to run.
+fn rollback_committed_operations(committed: &[StagedFileOperation]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for operation in committed.iter().rev() {
+        match operation {
+            StagedFileOperation::Update { path, old_content, .. } => {
+                if let Err(error) = fs::write(path, old_content) {
+                    warnings.push(format!(
+                        "rollback failed: could not restore updated file {}: {}",
+                        normalize_display_path(path),
+                        error
+                    ));
+                }
+            }
+            StagedFileOperation::Create { path, overwritten_content, .. } => match overwritten_content {
+                Some(previous) => {
+                    if let Err(error) = fs::write(path, previous) {
+                        warnings.push(format!(
+                            "rollback failed: could not restore overwritten file {}: {}",
+                            normalize_display_path(path),
+                            error
+                        ));
+                    }
+                }
+                None => {
+                    if let Err(error) = fs::remove_file(path) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            warnings.push(format!(
+                                "rollback failed: could not remove created file {}: {}",
+                                normalize_display_path(path),
+                                error
+                            ));
+                        }
+                    }
+                }
+            },
+            StagedFileOperation::Delete { path, content } => {
+                if let Some(parent) = path.parent() {
+                    if let Err(error) = fs::create_dir_all(parent) {
+                        warnings.push(format!(
+                            "rollback failed: could not recreate parent of {}: {}",
+                            normalize_display_path(path),
+                            error
+                        ));
+                        continue;
+                    }
+                }
+                if let Err(error) = fs::write(path, content) {
+                    warnings.push(format!(
+                        "rollback failed: could not restore deleted file {}: {}",
+                        normalize_display_path(path),
+                        error
+                    ));
+                }
+            }
+            StagedFileOperation::Move { from, to, content, overwritten_content } => {
+                if let Some(parent) = from.parent() {
+                    if let Err(error) = fs::create_dir_all(parent) {
+                        warnings.push(format!(
+                            "rollback failed: could not recreate parent of {}: {}",
+                            normalize_display_path(from),
+                            error
+                        ));
+                    }
+                }
+                if let Err(error) = fs::write(from, content) {
+                    warnings.push(format!(
+                        "rollback failed: could not restore move source {}: {}",
+                        normalize_display_path(from),
+                        error
+                    ));
+                }
+                match overwritten_content {
+                    Some(previous) => {
+                        if let Err(error) = fs::write(to, previous) {
+                            warnings.push(format!(
+                                "rollback failed: could not restore overwritten move target {}: {}",
+                                normalize_display_path(to),
+                                error
+                            ));
+                        }
+                    }
+                    None => {
+                        if let Err(error) = fs::remove_file(to) {
+                            if error.kind() != std::io::ErrorKind::NotFound {
+                                warnings.push(format!(
+                                    "rollback failed: could not remove new move target {}: {}",
+                                    normalize_display_path(to),
+                                    error
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    warnings
 }
 
 fn summarize_file_edit_delta(delta: &FileEditDelta) -> FileEditSummary {

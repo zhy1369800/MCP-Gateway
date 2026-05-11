@@ -273,6 +273,40 @@ impl SkillsService {
         .await;
     }
 
+    /// Acquire an async lock for each path in `paths`, returning one owned
+    /// guard per unique path. Locks are acquired in a deterministic key order
+    /// (lowercase on Windows to avoid case-insensitive aliasing) so concurrent
+    /// callers can't deadlock against each other.
+    async fn acquire_file_locks(
+        &self,
+        paths: &[PathBuf],
+    ) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        let mut keys: Vec<String> = paths
+            .iter()
+            .map(|p| file_lock_key(p))
+            .collect();
+        keys.sort();
+        keys.dedup();
+
+        let mutexes: Vec<Arc<tokio::sync::Mutex<()>>> = {
+            let mut table = self.file_locks.lock().expect("file_locks mutex poisoned");
+            keys.iter()
+                .map(|key| {
+                    table
+                        .entry(key.clone())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone()
+                })
+                .collect()
+        };
+
+        let mut guards = Vec::with_capacity(mutexes.len());
+        for mutex in mutexes {
+            guards.push(mutex.lock_owned().await);
+        }
+        guards
+    }
+
     async fn execute_tool_call(
         &self,
         config: &GatewayConfig,

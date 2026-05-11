@@ -84,3 +84,15 @@ fn normalize_display_path(path: &Path) -> String {
     raw
 }
 
+/// Derive a key suitable for the per-path file lock table. On Windows the
+/// file system is case-insensitive, so we normalize to lowercase to prevent
+/// two spellings of the same path from bypassing each other's locks.
+fn file_lock_key(path: &Path) -> String {
+    let display = normalize_display_path(path);
+    if cfg!(windows) {
+        display.to_lowercase()
+    } else {
+        display
+    }
+}
+

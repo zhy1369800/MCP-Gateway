@@ -24,6 +24,14 @@ static INSTALLING: AtomicBool = AtomicBool::new(false);
 const REPO: &str = "iOfficeAI/OfficeCLI";
 const RELEASES_PAGE: &str = "https://github.com/iOfficeAI/OfficeCLI/releases/latest";
 const PROGRESS_EVENT: &str = "officecli://progress";
+
+/// GitHub acceleration proxy pool loaded from a single shared JSON file.
+/// To add or remove proxies, edit `github-proxy-pool.json` — both the
+/// Rust backend and the TypeScript update checker read the same source.
+fn github_proxy_pool() -> Vec<String> {
+    let raw = include_str!("../github-proxy-pool.json");
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
 /// 连接超时 & 读取超时（单个 chunk 无数据的最大等待时间）
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -87,19 +95,6 @@ fn managed_install_dir() -> Result<PathBuf, String> {
     Ok(base.join("mcp-gateway").join("officecli"))
 }
 
-/// 老脚本装到的目录（存量兼容）
-fn legacy_install_paths() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if cfg!(target_os = "windows") {
-        if let Some(local) = dirs::data_local_dir() {
-            out.push(local.join("OfficeCLI").join(binary_filename()));
-        }
-    } else if let Some(home) = dirs::home_dir() {
-        out.push(home.join(".local").join("bin").join(binary_filename()));
-    }
-    out
-}
-
 /// 把用户填的"文件或目录"解析成实际二进制路径
 fn resolve_user_path(input: &str) -> PathBuf {
     let p = PathBuf::from(input.trim());
@@ -147,31 +142,26 @@ fn run_version_check(binary: &Path) -> Option<String> {
 
 
 /// 按稳定顺序找一个能跑起来的 officecli：
-/// 1) 用户手动路径（前端传进来的 hint，可能是文件/目录/空）
-/// 2) 我们自己的固定安装目录
-/// 3) 老脚本目录（`%LOCALAPPDATA%\OfficeCLI`、`~/.local/bin`）
+/// 1) 我们自己的固定安装目录
+/// 2) 用户手动路径（前端传进来的 hint，可能是文件/目录/空）
 ///
 /// 命中即返回真实绝对路径，配合 `--version` 验证可执行。
 fn detect_officecli(hint: Option<&str>) -> Option<(PathBuf, String)> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+    let path = match hint.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(h) => resolve_user_path(h),
+        None => return None,
+    };
+    if !path.is_file() {
+        return None;
+    }
+    run_version_check(&path).map(|ver| (path, ver))
+}
 
-    if let Some(h) = hint.map(str::trim).filter(|s| !s.is_empty()) {
-        candidates.push(resolve_user_path(h));
-    }
-    if let Ok(dir) = managed_install_dir() {
-        candidates.push(dir.join(binary_filename()));
-    }
-    candidates.extend(legacy_install_paths());
-
-    for c in candidates {
-        if !c.is_file() {
-            continue;
-        }
-        if let Some(ver) = run_version_check(&c) {
-            return Some((c, ver));
-        }
-    }
-    None
+/// Returns the default managed install path for officecli binary.
+#[tauri::command]
+pub fn officecli_default_path() -> Result<String, String> {
+    let dir = managed_install_dir()?;
+    Ok(dir.join(binary_filename()).to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -330,6 +320,95 @@ async fn download_to_temp(
     Ok(downloaded)
 }
 
+/// Validate that the downloaded file starts with the expected binary magic bytes.
+/// Windows PE: MZ (0x4D 0x5A), Linux ELF: 0x7F ELF, macOS Mach-O: 0xFE 0xED or 0xCF 0xFA.
+/// Returns Err if the file is too small or has wrong magic.
+async fn validate_binary_magic(path: &Path) -> Result<(), String> {
+    let bytes = fs::read(path).await.map_err(|e| format!("read for magic check: {e}"))?;
+    if bytes.len() < 4 {
+        return Err(format!("file too small ({} bytes), not a valid binary", bytes.len()));
+    }
+    let valid = if cfg!(target_os = "windows") {
+        // PE: MZ header
+        bytes[0] == 0x4D && bytes[1] == 0x5A
+    } else if cfg!(target_os = "macos") {
+        // Mach-O: feedface, feedfacf, cafebabe, or cffaedfe
+        matches!(
+            [bytes[0], bytes[1], bytes[2], bytes[3]],
+            [0xFE, 0xED, 0xFA, 0xCE]
+                | [0xFE, 0xED, 0xFA, 0xCF]
+                | [0xCE, 0xFA, 0xED, 0xFE]
+                | [0xCF, 0xFA, 0xED, 0xFE]
+                | [0xCA, 0xFE, 0xBA, 0xBE]
+        )
+    } else {
+        // ELF: 0x7F E L F
+        bytes[0] == 0x7F && bytes[1] == 0x45 && bytes[2] == 0x4C && bytes[3] == 0x46
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid binary magic: {:02X} {:02X} {:02X} {:02X}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ))
+    }
+}
+/// Try downloading through the proxy pool in random rotation order.
+/// Returns the actual URL that succeeded (Some) so the checksum URL can be
+/// derived from the same proxy. Returns None when the direct URL was used.
+async fn download_with_proxy_pool<'a>(
+    direct_url: &'a str,
+    client: &reqwest::Client,
+    tmp: &Path,
+    emitter: &mut ProgressEmitter,
+) -> Result<Option<String>, String> {
+    let pool = github_proxy_pool();
+    // Random starting offset via subsec_nanos.
+    let offset = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0)
+        % pool.len();
+
+    let mut last_error = String::new();
+
+    for i in 0..pool.len() {
+        let proxy = &pool[(offset + i) % pool.len()];
+        let url = format!("{proxy}{direct_url}");
+        emitter.total = 0;
+        match download_to_temp(client, &url, tmp, emitter).await {
+            Ok(_) => match validate_binary_magic(tmp).await {
+                Ok(()) => return Ok(Some(url)),
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(tmp).await;
+                    last_error = format!("proxy {proxy} (bad binary: {e})");
+                }
+            },
+            Err(e) => {
+                let _ = tokio::fs::remove_file(tmp).await;
+                last_error = format!("proxy {proxy} ({e})");
+            }
+        }
+    }
+
+    // Fallback: direct GitHub
+    emitter.total = 0;
+    match download_to_temp(client, direct_url, tmp, emitter).await {
+        Ok(_) => match validate_binary_magic(tmp).await {
+            Ok(()) => Ok(None),
+            Err(e) => {
+                let _ = tokio::fs::remove_file(tmp).await;
+                Err(format!("{last_error}; direct: bad binary ({e})"))
+            }
+        },
+        Err(e) => {
+            let _ = tokio::fs::remove_file(tmp).await;
+            Err(format!("{last_error}; direct: {e}"))
+        }
+    }
+}
+
 /// 拉 SHA256SUMS 对比，拿不到或对不上返回 Err（调用方决定是否致命）
 async fn verify_sha256(
     client: &reqwest::Client,
@@ -389,10 +468,10 @@ pub async fn officecli_install(app: AppHandle) -> InstallResult {
     let final_path = install_dir.join(binary_filename());
     let tmp_path = install_dir.join(format!("{}.download", binary_filename()));
 
-    let download_url = format!(
+    let direct_download_url = format!(
         "https://github.com/{REPO}/releases/latest/download/{asset}"
     );
-    let checksum_url = format!(
+    let direct_checksum_url = format!(
         "https://github.com/{REPO}/releases/latest/download/SHA256SUMS"
     );
 
@@ -401,7 +480,7 @@ pub async fn officecli_install(app: AppHandle) -> InstallResult {
         return failure(RELEASES_PAGE, asset, "installation already in progress".to_string());
     }
 
-    let result = do_install(app, asset, install_dir, final_path, tmp_path, &download_url, &checksum_url).await;
+    let result = do_install(app, asset, install_dir, final_path, tmp_path, &direct_download_url, &direct_checksum_url).await;
     INSTALLING.store(false, Ordering::SeqCst);
     result
 }
@@ -412,8 +491,8 @@ async fn do_install(
     install_dir: PathBuf,
     final_path: PathBuf,
     tmp_path: PathBuf,
-    download_url: &str,
-    checksum_url: &str,
+    direct_download_url: &str,
+    direct_checksum_url: &str,
 ) -> InstallResult {
     let _ = &install_dir; // suppress unused warning
 
@@ -431,11 +510,17 @@ async fn do_install(
     let mut emitter = ProgressEmitter::new(app.clone(), 0);
     emitter.emit(0, true);
 
-    // 1) 下载
-    if let Err(e) = download_to_temp(&client, &download_url, &tmp_path, &mut emitter).await {
-        let _ = fs::remove_file(&tmp_path).await;
-        return failure(RELEASES_PAGE, asset, format!("download failed: {e}"));
-    }
+    // 1) 下载（代理池 + 直连兜底）
+    let download_url = download_with_proxy_pool(direct_download_url, &client, &tmp_path, &mut emitter).await;
+    let checksum_url = if let Ok(Some(ref proxy_url)) = download_url {
+        if let Some(stripped) = proxy_url.strip_suffix(direct_download_url) {
+            format!("{stripped}{direct_checksum_url}")
+        } else {
+            direct_checksum_url.to_string()
+        }
+    } else {
+        direct_checksum_url.to_string()
+    };
 
     // 2) SHA256 校验（失败 warn，不致命——老 release 可能没挂 SHA256SUMS）
     match verify_sha256(&client, &checksum_url, asset, &tmp_path).await {

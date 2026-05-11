@@ -23,6 +23,11 @@ fn shell_command_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
                     "skillToken": {
                         "type": "string",
                         "description": "Required for every non-documentation call. First read the complete builtin://shell_command/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                    },
+                    "writes": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of file paths the command will modify. Providing this makes the gateway serialize the call against other builtin tool calls (multi_edit_file, read_file, shell_command) touching the same paths, preventing lost updates from concurrent writes. Leave empty for read-only commands."
                     }
                 }
             }
@@ -187,6 +192,24 @@ impl SkillsService {
             }
             PolicyDecision::Allow => {}
         }
+
+        // If the caller declared the paths this shell command will write,
+        // serialize against the same per-path lock that multi_edit_file and
+        // read_file use. Commands that leave `writes` empty keep the
+        // previous concurrent behavior; declaring paths trades a bit of
+        // parallelism for consistency with the file-edit tools.
+        let shell_locks = if args.writes.is_empty() {
+            Vec::new()
+        } else {
+            let mut write_targets: Vec<PathBuf> = Vec::with_capacity(args.writes.len());
+            for raw in &args.writes {
+                write_targets.push(resolve_file_operation_path(&cwd, raw)?);
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            write_targets.retain(|path| seen.insert(normalize_display_path(path)));
+            self.acquire_file_locks(&write_targets).await
+        };
+        let _shell_locks = shell_locks;
 
         let timeout_ms = args
             .timeout_ms

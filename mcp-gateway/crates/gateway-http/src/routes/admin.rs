@@ -41,14 +41,6 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
         )
         .route(&format!("{}/admin/skills", prefix), get(get_skills))
         .route(
-            &format!("{}/admin/skills/officecli/check", prefix),
-            get(check_officecli),
-        )
-        .route(
-            &format!("{}/admin/skills/officecli/install", prefix),
-            post(install_officecli),
-        )
-        .route(
             &format!("{}/admin/skills/events", prefix),
             get(get_skill_events),
         )
@@ -500,66 +492,6 @@ pub async fn reject_skill_confirmation(
         .await
         .map_err(response::err_response)?;
     Ok(response::ok(updated))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OfficeCliCheckQuery {
-    #[serde(default)]
-    path: Option<String>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v2/admin/skills/officecli/check",
-    params(("path" = Option<String>, Query, description = "Optional custom path to officecli binary")),
-    responses((status = 200, description = "OfficeCLI installation check"))
-)]
-pub async fn check_officecli(
-    State(state): State<AppState>,
-    Query(query): Query<OfficeCliCheckQuery>,
-) -> ApiResult<Value> {
-    if let Some(ref dir) = query.path {
-        // User specified a directory — check that directory specifically
-        let binary = crate::skills::resolve_officecli_binary(Some(dir));
-        let installed = crate::skills::check_officecli_command(Some(&binary));
-        if installed {
-            let version = crate::skills::run_officecli_version(&binary);
-            return Ok(response::ok(json!({
-                "installed": true,
-                "version": version,
-                "path": binary
-            })));
-        }
-        return Ok(response::ok(
-            json!({"installed": false, "error": "officecli not found in the specified directory"}),
-        ));
-    }
-
-    // No path given — full detection: PATH → config dir → script defaults
-    let config = state.config_service.get_config().await;
-    let (installed, found_path) = crate::skills::detect_officecli(&config.skills.builtin_tools);
-    if installed {
-        let binary = found_path.as_deref().unwrap_or("officecli");
-        let version = crate::skills::run_officecli_version(binary);
-        return Ok(response::ok(json!({
-            "installed": true,
-            "version": version,
-            "path": binary.to_string()
-        })));
-    }
-    Ok(response::ok(json!({"installed": false})))
-}
-
-pub async fn install_officecli(State(_state): State<AppState>) -> ApiResult<Value> {
-    let result = tokio::task::spawn_blocking(crate::skills::install_officecli)
-        .await
-        .map_err(|_| {
-            response::err_response(AppError::Internal("install task panicked".to_string()))
-        })?;
-    match result {
-        Ok(()) => Ok(response::ok(json!({"ok": true}))),
-        Err(error) => Ok(response::ok(json!({"ok": false, "error": error}))),
-    }
 }
 
 fn gateway_base_url(listen: &str) -> Result<String, AppError> {

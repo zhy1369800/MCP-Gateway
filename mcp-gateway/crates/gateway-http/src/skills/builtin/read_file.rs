@@ -174,7 +174,24 @@ impl SkillsService {
             PolicyDecision::Allow => {}
         }
 
-        match read_text_file_window(&target, args.offset, args.limit) {
+        // Read side of the same per-path lock used by multi_edit_file. This
+        // stops read_file from observing a half-written file while another
+        // tool call is mid-write. Concurrent reads of different files are
+        // still free to proceed in parallel.
+        let _file_locks = self.acquire_file_locks(&[target.clone()]).await;
+
+        // Move the blocking fs::metadata / fs::read_to_string work off the
+        // async runtime so it does not stall other tasks sharing the thread.
+        let target_for_read = target.clone();
+        let read_result = tokio::task::spawn_blocking(move || {
+            read_text_file_window(&target_for_read, args.offset, args.limit)
+        })
+        .await
+        .map_err(|join_error| {
+            AppError::Internal(format!("read_file worker panicked: {join_error}"))
+        })?;
+
+        match read_result {
             Ok(output) => {
                 let text = if output.empty {
                     format!(

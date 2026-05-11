@@ -54,3 +54,8 @@ export async function listenOfficeCliProgress(
   });
 }
 
+
+/** Returns the default managed install path for officecli binary. */
+export function getOfficeCliDefaultPath(): Promise<string> {
+  return invoke<string>("officecli_default_path");
+}

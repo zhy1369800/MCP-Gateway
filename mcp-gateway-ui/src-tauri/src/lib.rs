@@ -1063,6 +1063,7 @@ pub fn run() {
             detect_local_runtimes,
             open_config_file,
             reset_default_config,
+            officecli::officecli_default_path,
             officecli::officecli_check,
             officecli::officecli_install,
             officecli::officecli_uninstall,

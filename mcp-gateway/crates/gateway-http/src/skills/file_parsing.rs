@@ -1615,6 +1615,135 @@ mod tests {
     }
 
     #[test]
+    fn multi_edit_file_rolls_back_earlier_writes_when_commit_fails_later() {
+        // op1 rewrites `a.txt`. op2 tries to create a file under
+        // `blocker.txt/child.txt`, but `blocker.txt` is already a file so
+        // `create_dir_all` during commit fails. When that happens, the
+        // already-written `a.txt` must be restored to its original contents.
+        let sandbox =
+            std::env::temp_dir().join(format!("gateway-multi-rollback-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        std::fs::write(sandbox.join("a.txt"), "alpha\n").expect("write a");
+        std::fs::write(sandbox.join("blocker.txt"), "i am a file\n").expect("write blocker");
+
+        let operations = vec![
+            MultiEditFileOperation::Edit {
+                path: "a.txt".to_string(),
+                edits: vec![MultiEditFileEdit {
+                    old_string: "alpha".to_string(),
+                    new_string: "APLHA".to_string(),
+                    replace_all: false,
+                    start_line: None,
+                }],
+            },
+            MultiEditFileOperation::Create {
+                path: "blocker.txt/child.txt".to_string(),
+                content: "new\n".to_string(),
+                overwrite: false,
+            },
+        ];
+
+        let failure = apply_multi_edit_file(&sandbox, &operations)
+            .expect_err("second commit step must fail");
+
+        assert!(
+            !failure.delta.exact,
+            "delta.exact must flip to false once a partial commit happened"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("a.txt")).expect("read a"),
+            "alpha\n",
+            "a.txt was not rolled back to its original contents"
+        );
+        assert!(
+            !sandbox.join("blocker.txt/child.txt").exists(),
+            "failed create should leave no child file"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[tokio::test]
+    async fn acquire_file_locks_serializes_same_path_concurrent_writes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc as StdArc;
+
+        let sandbox = std::env::temp_dir().join(format!("gateway-file-lock-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("shared.txt");
+
+        let service = SkillsService::default();
+        // Rendez-vous so both tasks race on acquiring the lock simultaneously.
+        let gate = StdArc::new(tokio::sync::Barrier::new(2));
+        let in_critical = StdArc::new(AtomicBool::new(false));
+        let saw_overlap = StdArc::new(AtomicBool::new(false));
+
+        let run = |who: &'static str| {
+            let service = service.clone();
+            let target = target.clone();
+            let gate = gate.clone();
+            let in_critical = in_critical.clone();
+            let saw_overlap = saw_overlap.clone();
+            async move {
+                gate.wait().await;
+                let _guards = service.acquire_file_locks(&[target.clone()]).await;
+                if in_critical.swap(true, Ordering::SeqCst) {
+                    saw_overlap.store(true, Ordering::SeqCst);
+                }
+                // Hold the lock long enough that the peer would observe
+                // overlap if serialization were broken.
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                in_critical.store(false, Ordering::SeqCst);
+                let _ = who;
+            }
+        };
+
+        let a = tokio::spawn(run("a"));
+        let b = tokio::spawn(run("b"));
+        a.await.expect("task a");
+        b.await.expect("task b");
+
+        assert!(
+            !saw_overlap.load(Ordering::SeqCst),
+            "two tasks held the same-path file lock concurrently"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[tokio::test]
+    async fn acquire_file_locks_allows_disjoint_paths_to_run_in_parallel() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-file-lock-ind-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let a = sandbox.join("a.txt");
+        let b = sandbox.join("b.txt");
+
+        let service = SkillsService::default();
+
+        let holder_service = service.clone();
+        let holder_path = a.clone();
+        // Hold the lock for `a.txt` for a bit.
+        let holder = tokio::spawn(async move {
+            let _g = holder_service.acquire_file_locks(&[holder_path]).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        // Meanwhile, locking `b.txt` should not block on `a.txt`.
+        let start = std::time::Instant::now();
+        let _g = service.acquire_file_locks(&[b]).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(80),
+            "disjoint-path lock unexpectedly waited for unrelated path: {:?}",
+            elapsed
+        );
+
+        holder.await.expect("holder task");
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
     fn disabled_builtin_tool_not_in_tool_definitions() {
         let os = "Windows";
         let now = "2024-01-01T00:00:00Z";
