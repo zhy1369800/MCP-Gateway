@@ -551,7 +551,7 @@ pub async fn check_officecli(
 }
 
 pub async fn install_officecli(State(_state): State<AppState>) -> ApiResult<Value> {
-    let result = tokio::task::spawn_blocking(|| crate::skills::install_officecli())
+    let result = tokio::task::spawn_blocking(crate::skills::install_officecli)
         .await
         .map_err(|_| {
             response::err_response(AppError::Internal("install task panicked".to_string()))

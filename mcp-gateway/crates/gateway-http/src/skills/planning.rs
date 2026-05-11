@@ -111,13 +111,12 @@ impl SkillsService {
             state.consecutive_read_file_failures = 0;
         }
 
-        if tool == BuiltinTool::ChromeCdp {
-            if shell_command
+        if tool == BuiltinTool::ChromeCdp
+            && shell_command
                 .map(cdp_command_resets_stuck_counter)
                 .unwrap_or(false)
-            {
-                state.consecutive_chrome_cdp_failures = 0;
-            }
+        {
+            state.consecutive_chrome_cdp_failures = 0;
         }
 
         let office_cli_post_create_reminder = if tool == BuiltinTool::OfficeCli {
