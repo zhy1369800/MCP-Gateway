@@ -1686,7 +1686,7 @@ mod tests {
             let saw_overlap = saw_overlap.clone();
             async move {
                 gate.wait().await;
-                let _guards = service.acquire_file_locks(&[target.clone()]).await;
+                let _guards = service.acquire_file_locks(std::slice::from_ref(&target)).await;
                 if in_critical.swap(true, Ordering::SeqCst) {
                     saw_overlap.store(true, Ordering::SeqCst);
                 }

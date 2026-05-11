@@ -178,7 +178,7 @@ impl SkillsService {
         // stops read_file from observing a half-written file while another
         // tool call is mid-write. Concurrent reads of different files are
         // still free to proceed in parallel.
-        let _file_locks = self.acquire_file_locks(&[target.clone()]).await;
+        let _file_locks = self.acquire_file_locks(std::slice::from_ref(&target)).await;
 
         // Move the blocking fs::metadata / fs::read_to_string work off the
         // async runtime so it does not stall other tasks sharing the thread.

@@ -102,7 +102,7 @@ pub struct SkillsService {
     planning: Arc<RwLock<HashMap<String, PlanningState>>>,
     /// Per-path async mutexes for serializing concurrent builtin file writes.
     /// The outer std Mutex protects the table lookup/insert; the inner
-    /// 	okio::sync::Mutex is held across await while a tool operates on the
+    ///     okio::sync::Mutex is held across await while a tool operates on the
     /// file so two concurrent multi_edit_file calls on the same path can't
     /// stomp on each other (lost update / old_string mismatch).
     file_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
