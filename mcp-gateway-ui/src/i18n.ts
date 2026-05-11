@@ -1,4 +1,4 @@
-﻿// ── 中英文翻译字典 ─────────────────────────────────────────────────
+// ── 中英文翻译字典 ─────────────────────────────────────────────────
 export type Lang = "zh" | "en";
 
 const translations = {
@@ -67,6 +67,14 @@ const translations = {
     builtInToolsHint: "网关内置的一组常用工具，以 Skill 形式供 AI 调用，并通过 MCP 服务对客户端暴露。",
     builtInReadFileDesc: "只读查看本地文本文件，可按行号读取代码、日志和配置片段，并返回带行号的内容。内置访问边界、文件大小和二进制检测，适合让 AI 先理解文件再决定下一步。",
     builtInShellDesc: "在允许目录内执行终端命令，适合构建、测试、搜索、运行本地脚本等操作。先在网关设置里配置允许访问目录，命中敏感规则时会进入确认队列。",
+    shellEnvBtn: "环境变量",
+    shellEnvTitle: "终端环境变量",
+    shellEnvHint: "配置的环境变量会注入到终端命令执行环境中，AI 可直接使用。",
+    shellEnvKeyPlaceholder: "变量名",
+    shellEnvValuePlaceholder: "变量值",
+    shellEnvAdd: "添加变量",
+    shellEnvEmpty: "暂无环境变量",
+    shellEnvCount: "{count} 个变量",
     builtInMultiEditDesc: "让 AI 对文件执行创建、移动、删除、整文件改写和多处精准替换。所有改动会先校验路径边界和匹配结果，适合批量改代码但尽量降低误写风险。",
     builtInTaskPlanningDesc: "为复杂任务提供计划记录能力，让 AI 在执行前拆解步骤、执行中更新进度、完成后清理临时计划。适合多步骤开发、排障和较长的修改流程。",
     builtInChromeCdpDesc: "需要本机安装 Google Chrome 或兼容 Chrome 的浏览器。开启后可通过 DevTools 协议操作网页、点击、截图、检查 DOM 和调试前端页面。",
@@ -371,6 +379,14 @@ const translations = {
     builtInToolsHint: "A built-in set of practical gateway tools, called by AI as Skills and exposed to clients through MCP.",
     builtInReadFileDesc: "Read local text files without modifying them, usually by line number, and return line-numbered code, log, or config snippets. Access boundaries, size checks, and binary detection help AI inspect files before taking action.",
     builtInShellDesc: "Run terminal commands inside allowed directories for builds, tests, search, and local scripts. Configure allowed directories in Gateway Settings first; sensitive matches are sent to the confirmation queue.",
+    shellEnvBtn: "Env Vars",
+    shellEnvTitle: "Terminal Environment Variables",
+    shellEnvHint: "Configured variables are injected into the terminal execution environment and available to AI directly.",
+    shellEnvKeyPlaceholder: "Variable name",
+    shellEnvValuePlaceholder: "Variable value",
+    shellEnvAdd: "Add Variable",
+    shellEnvEmpty: "No environment variables configured",
+    shellEnvCount: "{count} var(s)",
     builtInMultiEditDesc: "Let AI create, move, delete, rewrite, and precisely replace content across files. Paths and match results are validated before writing, making it suitable for batch code edits with lower write risk.",
     builtInTaskPlanningDesc: "Give AI a lightweight task plan for complex work: split steps before execution, update progress during the task, and clear the temporary plan at the end. Useful for multi-step development and troubleshooting.",
     builtInChromeCdpDesc: "Requires Google Chrome or a compatible Chrome-family browser on this machine. It uses DevTools Protocol to operate pages, click, screenshot, inspect DOM, and debug frontend behavior.",

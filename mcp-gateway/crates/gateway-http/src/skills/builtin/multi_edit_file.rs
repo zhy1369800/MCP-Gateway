@@ -579,7 +579,7 @@ fn stage_multi_edit_operation(
                     }
                     Some(existing)
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) if is_path_not_found(&error) => None,
                 Err(error) => return Err(error.into()),
             };
             warnings.extend(collect_edit_warnings(
@@ -646,7 +646,7 @@ fn stage_multi_edit_operation(
                     }
                     Some(existing)
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) if is_path_not_found(&error) => None,
                 Err(error) => return Err(error.into()),
             };
             staged.push(StagedFileOperation::Move {
@@ -1291,3 +1291,20 @@ fn file_edit_summary_text(summary: &FileEditSummary) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
+/// Returns true if the IO error indicates the path (or a component of it)
+/// does not exist. On Unix, traversing a path like `file.txt/child.txt`
+/// where `file.txt` is a regular file yields ENOTDIR (raw OS error 20)
+/// rather than ENOENT. We treat both as "target not found" during staging
+/// so that the commit phase handles the real failure with proper rollback.
+fn is_path_not_found(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+    // ENOTDIR on Linux/macOS = 20; on Windows this situation returns NotFound
+    // so this branch is effectively Unix-only.
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(20) {
+        return true;
+    }
+    false
+}

@@ -271,6 +271,7 @@ export function ensureSkillsConfig(
       chatPlusAdapterDebugger: raw?.builtinTools?.chatPlusAdapterDebugger ?? true,
       officeCli: raw?.builtinTools?.officeCli ?? false,
       officeCliPath: raw?.builtinTools?.officeCliPath ?? undefined,
+      shellEnv: raw?.builtinTools?.shellEnv ?? undefined,
     },
   };
 }

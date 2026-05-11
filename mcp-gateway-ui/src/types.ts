@@ -70,6 +70,7 @@ export interface BuiltinToolsConfig {
   chatPlusAdapterDebugger: boolean;
   officeCli: boolean;
   officeCliPath?: string;
+  shellEnv?: Record<string, string>;
 }
 
 export interface SkillsConfig {

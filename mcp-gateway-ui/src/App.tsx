@@ -13,7 +13,6 @@ import {
   ListChecks,
   Chrome,
   Bug,
-  FileSpreadsheet,
   List,
   Languages,
   Save,
@@ -28,6 +27,8 @@ import {
   RotateCcw,
   Download,
   FolderOpen,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
@@ -175,6 +176,29 @@ function BilibiliLogoIcon({ size = 15 }: { size?: number }) {
   );
 }
 
+function OfficeLogoIcon({ size = 15 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <path d="M8 8h2l2 4-2 4H8" />
+      <path d="M14 8v8" />
+      <path d="M14 8h2" />
+      <path d="M14 12h1.5" />
+      <path d="M14 16h2" />
+    </svg>
+  );
+}
+
 // ── 工具函数：将文本中的 URL 渲染为可点击链接 ──
 function renderTextWithLinks(text: string, onLinkClick: (url: string) => void) {
   const urlRegex = /(https?:\/\/[^\s)]+)/g;
@@ -280,6 +304,9 @@ function App() {
   const [officeCliCustomPath, setOfficeCliCustomPath] = useState("");
   const [installProgress, setInstallProgress] = useState(0);
   const [showReinstallConfirm, setShowReinstallConfirm] = useState(false);
+  const [showShellEnvPopover, setShowShellEnvPopover] = useState(false);
+  const [shellEnvDraftKey, setShellEnvDraftKey] = useState("");
+  const [shellEnvDraftValue, setShellEnvDraftValue] = useState("");
   /** 安装成功后跳过 useEffect 重复 check 的标记 */
   const skipNextOfficeCliCheckRef = useRef(false);
 
@@ -2089,6 +2116,7 @@ function App() {
                     {builtinToolDefs.map((tool) => {
                       const isGated = tool.requiresWhitelist && !hasValidWhitelistDir;
                       const isOn = !isGated && skills.builtinTools[tool.key] === true;
+                      const shellEnvCount = Object.keys(skills.builtinTools.shellEnv ?? {}).length;
                       return (
                         <div className="built-in-tool" key={tool.key}>
                           <button
@@ -2101,7 +2129,104 @@ function App() {
                           />
                           <div className="built-in-tool-icon">{tool.icon}</div>
                           <div className="built-in-tool-body">
-                            <div className="built-in-tool-name">{tool.name}</div>
+                            <div className="built-in-tool-name">
+                              {tool.name}
+                              {tool.key === "shellCommand" && (
+                                <span className="shell-env-wrap">
+                                  <button
+                                    className={`btn-icon shell-env-btn${showShellEnvPopover ? " active" : ""}`}
+                                    title={t("shellEnvBtn")}
+                                    onClick={() => setShowShellEnvPopover(!showShellEnvPopover)}
+                                  >
+                                    <Code2 size={13} />
+                                  </button>
+                                  {shellEnvCount > 0 && !showShellEnvPopover && (
+                                    <span className="shell-env-badge">{t("shellEnvCount").replace("{count}", String(shellEnvCount))}</span>
+                                  )}
+                                </span>
+                              )}
+                            </div>
+                            {tool.key === "shellCommand" && showShellEnvPopover && (
+                              <div className="shell-env-popover">
+                                <div className="shell-env-header">
+                                  <span className="shell-env-title">{t("shellEnvTitle")}</span>
+                                </div>
+                                <div className="shell-env-hint">{t("shellEnvHint")}</div>
+                                <div className="shell-env-list">
+                                  {Object.entries(skills.builtinTools.shellEnv ?? {}).map(([key, value]) => (
+                                    <div className="shell-env-row" key={key}>
+                                      <code className="shell-env-key">{key}</code>
+                                      <input
+                                        className="shell-env-value-input"
+                                        type="text"
+                                        value={value}
+                                        onChange={(e) => {
+                                          const next = { ...(skills.builtinTools.shellEnv ?? {}), [key]: e.target.value };
+                                          setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                        }}
+                                      />
+                                      <button
+                                        className="btn-icon shell-env-delete-btn"
+                                        title="Delete"
+                                        onClick={() => {
+                                          const next = { ...(skills.builtinTools.shellEnv ?? {}) };
+                                          delete next[key];
+                                          setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                        }}
+                                      >
+                                        <Trash2 size={12} />
+                                      </button>
+                                    </div>
+                                  ))}
+                                  {shellEnvCount === 0 && (
+                                    <div className="shell-env-empty">{t("shellEnvEmpty")}</div>
+                                  )}
+                                </div>
+                                <div className="shell-env-add-row">
+                                  <input
+                                    className="shell-env-add-input shell-env-add-key"
+                                    type="text"
+                                    placeholder={t("shellEnvKeyPlaceholder")}
+                                    value={shellEnvDraftKey}
+                                    onChange={(e) => setShellEnvDraftKey(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && shellEnvDraftKey.trim()) {
+                                        const next = { ...(skills.builtinTools.shellEnv ?? {}), [shellEnvDraftKey.trim()]: shellEnvDraftValue };
+                                        setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                        setShellEnvDraftKey(""); setShellEnvDraftValue("");
+                                      }
+                                    }}
+                                  />
+                                  <input
+                                    className="shell-env-add-input shell-env-add-value"
+                                    type="text"
+                                    placeholder={t("shellEnvValuePlaceholder")}
+                                    value={shellEnvDraftValue}
+                                    onChange={(e) => setShellEnvDraftValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && shellEnvDraftKey.trim()) {
+                                        const next = { ...(skills.builtinTools.shellEnv ?? {}), [shellEnvDraftKey.trim()]: shellEnvDraftValue };
+                                        setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                        setShellEnvDraftKey(""); setShellEnvDraftValue("");
+                                      }
+                                    }}
+                                  />
+                                  <button
+                                    className="btn-icon shell-env-add-btn"
+                                    title={t("shellEnvAdd")}
+                                    disabled={!shellEnvDraftKey.trim()}
+                                    onClick={() => {
+                                      if (!shellEnvDraftKey.trim()) return;
+                                      const next = { ...(skills.builtinTools.shellEnv ?? {}), [shellEnvDraftKey.trim()]: shellEnvDraftValue };
+                                      setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                      setShellEnvDraftKey(""); setShellEnvDraftValue("");
+                                    }}
+                                  >
+                                    <Plus size={13} />
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                             <div className="built-in-tool-desc">{t(tool.descKey)}</div>
                           </div>
                         </div>
@@ -2119,7 +2244,7 @@ function App() {
                         aria-pressed={hasValidWhitelistDir && skills.builtinTools.officeCli}
                         disabled={!hasValidWhitelistDir || !officeCliState?.installed}
                       />
-                      <div className="built-in-tool-icon"><FileSpreadsheet size={15} /></div>
+                      <div className="built-in-tool-icon"><OfficeLogoIcon size={15} /></div>
                       <div className="built-in-tool-body">
                         <div className="built-in-tool-name">
                           officecli

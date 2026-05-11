@@ -1,7 +1,14 @@
 fn shell_command_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Value {
+    let mut desc = render_builtin_tool_description(BuiltinTool::ShellCommand, os, now, cfg.task_planning, cfg.read_file);
+    if !cfg.shell_env.is_empty() {
+        desc.push_str("\n\nUser-configured environment variables available in this terminal session:\n");
+        for (key, _) in &cfg.shell_env {
+            desc.push_str(&format!("- {key}\n"));
+        }
+    }
     json!({
             "name": BuiltinTool::ShellCommand.name(),
-            "description": render_builtin_tool_description(BuiltinTool::ShellCommand, os, now, cfg.task_planning, cfg.read_file),
+            "description": desc,
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -48,13 +55,25 @@ impl SkillsService {
         }
 
         if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-            return Ok(builtin_skill_doc_result(
+            let mut result = builtin_skill_doc_result(
                 tool,
                 &command_preview,
                 matched_path,
                 builtin_skill_token(tool),
                 Self::planning_enabled(config),
-            ));
+            );
+            // Append user-configured env vars info to the SKILL.md response
+            if !config.skills.builtin_tools.shell_env.is_empty() {
+                let env_section = format!(
+                    "\n\n## User Environment Variables\nThe following environment variables are pre-configured and available in every shell session:\n{}\nYou can use these variables directly in commands without needing to set them.",
+                    config.skills.builtin_tools.shell_env.keys()
+                        .map(|k| format!("- `{k}`"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                result.text.push_str(&env_section);
+            }
+            return Ok(result);
         }
 
         if let Some(result) = validate_skill_token_result(
@@ -239,6 +258,11 @@ impl SkillsService {
             .stderr(std::process::Stdio::piped());
         configure_bundled_tool_path(&mut command);
         configure_skill_command(&mut command);
+
+        // Inject user-configured shell environment variables
+        for (key, value) in &config.skills.builtin_tools.shell_env {
+            command.env(key, value);
+        }
 
         let disable_truncation = should_disable_output_truncation(&program, &command_args);
         let output = match execute_skill_command(

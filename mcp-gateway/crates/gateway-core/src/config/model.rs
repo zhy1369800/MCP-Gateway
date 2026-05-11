@@ -240,6 +240,8 @@ pub struct BuiltinToolsConfig {
     pub office_cli: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub office_cli_path: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub shell_env: HashMap<String, String>,
 }
 
 impl Default for BuiltinToolsConfig {
@@ -253,6 +255,7 @@ impl Default for BuiltinToolsConfig {
             chat_plus_adapter_debugger: default_builtin_tool_enabled(),
             office_cli: default_builtin_tool_disabled(),
             office_cli_path: None,
+            shell_env: HashMap::new(),
         }
     }
 }
