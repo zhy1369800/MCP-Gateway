@@ -1532,7 +1532,7 @@ fn default_path_guard_violation_action() -> SkillPolicyAction {
 }
 
 fn default_skills_exec_timeout_ms() -> u64 {
-    60_000
+    180_000
 }
 
 fn default_skills_max_output_bytes() -> usize {
@@ -1830,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn default_skills_execution_timeout_is_one_minute() {
-        assert_eq!(SkillsExecutionConfig::default().timeout_ms, 60_000);
+    fn default_skills_execution_timeout_is_three_minutes() {
+        assert_eq!(SkillsExecutionConfig::default().timeout_ms, 180_000);
     }
 }

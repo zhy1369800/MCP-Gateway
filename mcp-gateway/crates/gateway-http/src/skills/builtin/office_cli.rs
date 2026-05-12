@@ -286,10 +286,43 @@ impl SkillsService {
         let duration_ms = started.elapsed().as_millis() as u64;
         let stdout = output.stdout.text;
         let stderr = output.stderr.text;
-        let exit_code = output.status.code().unwrap_or(-1);
+        let exit_code = output.status.as_ref().and_then(|s| s.code()).unwrap_or(-1);
+
+        let timed_out = output.timed_out;
+        if timed_out {
+            self.record_tool_event_data(
+                &call_id,
+                BuiltinTool::OfficeCli.name(),
+                "finished",
+                SkillToolEventData {
+                    status: Some("timed_out".to_string()),
+                    exit_code: Some(exit_code),
+                    duration_ms: Some(duration_ms),
+                    ..SkillToolEventData::default()
+                },
+            )
+            .await;
+            let timeout_text = command_timeout_text(timeout_ms, &stdout, &stderr);
+            return Ok(tool_error(
+                timeout_text,
+                json!({
+                    "status": "timed_out",
+                    "tool": BuiltinTool::OfficeCli.name(),
+                    "command": command_preview,
+                    "cwd": normalize_display_path(&cwd),
+                    "exitCode": exit_code,
+                    "durationMs": duration_ms,
+                    "stdoutTruncated": output.stdout.truncated,
+                    "stderrTruncated": output.stderr.truncated,
+                    "timeoutMs": timeout_ms
+                }),
+            ));
+        }
+
+        let status = output.status.as_ref().expect("status must be Some when not timed out");
 
         let structured = json!({
-            "status": if output.status.success() { "completed" } else { "failed" },
+            "status": if status.success() { "completed" } else { "failed" },
             "tool": BuiltinTool::OfficeCli.name(),
             "command": command_preview,
             "cwd": normalize_display_path(&cwd),
@@ -303,7 +336,7 @@ impl SkillsService {
             BuiltinTool::OfficeCli.name(),
             "finished",
             SkillToolEventData {
-                status: Some(if output.status.success() { "completed".to_string() } else { "failed".to_string() }),
+                status: Some(if status.success() { "completed".to_string() } else { "failed".to_string() }),
                 exit_code: Some(exit_code),
                 duration_ms: Some(duration_ms),
                 ..SkillToolEventData::default()
@@ -312,7 +345,7 @@ impl SkillsService {
         .await;
         let output_text = command_output_text(&stdout, &stderr);
 
-        if output.status.success() {
+        if status.success() {
             Ok(tool_success_with_planning_reminder(
                 output_text,
                 structured,

@@ -592,9 +592,10 @@ struct StreamCaptureState {
 
 #[derive(Debug)]
 struct SkillCommandExecution {
-    status: std::process::ExitStatus,
+    status: Option<std::process::ExitStatus>,
     stdout: StreamCapturedOutput,
     stderr: StreamCapturedOutput,
+    timed_out: bool,
 }
 
 

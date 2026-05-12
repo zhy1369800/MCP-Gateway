@@ -65,11 +65,12 @@ async fn execute_skill_command(
             stderr_task.abort();
             let stdout = snapshot_stream_output(&stdout_state);
             let stderr = snapshot_stream_output(&stderr_state);
-            return Err(AppError::Upstream(command_timeout_text(
-                timeout_ms,
-                &stdout.text,
-                &stderr.text,
-            )));
+            return Ok(SkillCommandExecution {
+                status: None,
+                stdout,
+                stderr,
+                timed_out: true,
+            });
         }
     };
 
@@ -83,9 +84,10 @@ async fn execute_skill_command(
     let stderr = snapshot_stream_output(&stderr_state);
 
     Ok(SkillCommandExecution {
-        status,
+        status: Some(status),
         stdout,
         stderr,
+        timed_out: false,
     })
 }
 
