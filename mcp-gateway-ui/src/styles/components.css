@@ -1245,6 +1245,199 @@ html, body {
   line-height: 1.55;
 }
 
+/* OfficeCLI built-in tool */
+.officecli-tool .toggle-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.officecli-checking .built-in-tool-icon {
+  opacity: 0.4;
+}
+
+/* badge inline next to tool name */
+.officecli-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 2px 5px 2px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  border-radius: var(--radius-sm);
+  line-height: 1.4;
+  vertical-align: middle;
+}
+
+.officecli-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.officecli-badge.ok {
+  color: var(--accent-green);
+  border: 1px solid rgba(166, 227, 161, 0.3);
+  background: rgba(166, 227, 161, 0.08);
+}
+
+.officecli-badge.ok .officecli-dot {
+  background: var(--accent-green);
+}
+
+.officecli-badge.warn {
+  color: var(--accent-yellow);
+  border: 1px solid rgba(249, 226, 175, 0.3);
+  background: rgba(249, 226, 175, 0.08);
+}
+
+.officecli-badge.muted {
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  background: transparent;
+}
+
+.officecli-badge .officecli-action-btn {
+  padding: 2px;
+  border-radius: 3px;
+  margin: -2px 0;
+}
+
+.officecli-badge .officecli-action-btn:hover {
+  background: rgba(255,255,255,0.08);
+}
+
+.officecli-action-btn {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.officecli-action-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.officecli-action-btn.active {
+  color: var(--accent-blue);
+  background: rgba(137, 180, 250, 0.1);
+}
+
+.officecli-reinstall-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+.officecli-reinstall-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.officecli-reinstall-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.officecli-reinstall-btn.active {
+  color: var(--accent-blue);
+  background: rgba(137, 180, 250, 0.1);
+}
+
+/* popover */
+.officecli-reinstall-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  z-index: 100;
+  white-space: nowrap;
+}
+
+.officecli-reinstall-popover-text {
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.officecli-reinstall-popover-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* path input row — full width below desc */
+.officecli-path-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+
+.officecli-path-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.officecli-path-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 2px;
+  font-size: 11px;
+  font-family: "Consolas", "Monaco", monospace;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.officecli-path-input::placeholder {
+  color: var(--text-muted);
+  font-family: inherit;
+}
+
+/* error message */
+.officecli-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--accent-red);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+/* 通用内联链接：用于把纯文本里的 URL 渲染成带下划线的可点击链接 */
+.inline-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.inline-link:hover {
+  color: var(--accent-blue);
+}
+
 /* Skills 执行配置 */
 .skills-execution-config {
   display: grid;
@@ -2720,4 +2913,188 @@ html, body {
 .update-banner-close:hover {
   background-color: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* ── Shell Environment Variables ── */
+.shell-env-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
+.shell-env-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.shell-env-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.shell-env-btn.active {
+  color: var(--accent-blue);
+  background: rgba(137, 180, 250, 0.1);
+}
+
+.shell-env-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  color: var(--accent-blue);
+  border: 1px solid rgba(137, 180, 250, 0.3);
+  background: rgba(137, 180, 250, 0.08);
+  border-radius: var(--radius-sm);
+  line-height: 1.4;
+  vertical-align: middle;
+}
+
+.shell-env-popover {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  min-width: 320px;
+}
+
+.shell-env-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.shell-env-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.shell-env-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.shell-env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.shell-env-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shell-env-key {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-green);
+  background: rgba(166, 227, 161, 0.08);
+  padding: 2px 6px;
+  border-radius: 3px;
+  min-width: 80px;
+  white-space: nowrap;
+}
+
+.shell-env-value-input {
+  flex: 1;
+  font-size: 11px;
+  padding: 3px 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.shell-env-value-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.shell-env-delete-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.shell-env-delete-btn:hover {
+  color: var(--accent-red, #f38ba8);
+  background: rgba(243, 139, 168, 0.1);
+  border-radius: 3px;
+}
+
+.shell-env-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 8px 0;
+}
+
+.shell-env-add-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+}
+
+.shell-env-add-input {
+  font-size: 11px;
+  padding: 3px 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.shell-env-add-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.shell-env-add-key {
+  width: 90px;
+  flex-shrink: 0;
+}
+
+.shell-env-add-value {
+  flex: 1;
+}
+
+.shell-env-add-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--accent-blue);
+  background: rgba(137, 180, 250, 0.1);
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.shell-env-add-btn:hover:not(:disabled) {
+  background: rgba(137, 180, 250, 0.2);
+}
+
+.shell-env-add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }

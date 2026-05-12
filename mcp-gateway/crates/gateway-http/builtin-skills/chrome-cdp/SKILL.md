@@ -122,11 +122,23 @@ click <target> <selector>       # CSS selector
 clickxy <target> <x> <y>        # CSS pixel coordinates
 type <target> <text>            # Input.insertText at current focus
 loadall <target> <selector> [ms]
-shot [target] [file]
+shot [target] [file] [--inline-base64]
 ```
 
 Use `type` after focusing an input with `click` or `clickxy`. It uses CDP input
 events and works better than DOM assignment for cross-origin iframes.
+
+### Screenshot output modes
+
+- Default writes the PNG to disk under the runtime directory (or `[file]`) and
+  prints its absolute path plus DPR / coordinate mapping. Choose this when the
+  image is large, must be reused across turns, or should not load the model's
+  context window.
+- `shot [target] [file] --inline-base64` skips the file write and returns a
+  `mimeType: image/png` base64 payload inside stdout (as JSON after the
+  `[inlineBase64 json]` marker), plus the same DPR / coordinate mapping lines.
+  Choose this when a multimodal model should consume the image directly in the
+  current turn.
 
 ## Network Debugging
 
@@ -207,3 +219,18 @@ running.
 If a previous managed browser crashed or the gateway was interrupted, the next
 command automatically clears stale runtime state and retries the managed browser
 connection once.
+
+## I/O Conventions
+
+Files produced by this skill (for example `netget --request-file`,
+`--response-file`, or `shot <file>`) land under allowed directories. When you
+need to look at or edit those files afterwards:
+
+- Read them with `read_file` so output stays line-numbered and capped; do not
+  use `shell_command` with `cat`, `Get-Content`, `type`, `sed`, `head`, or
+  `tail` for these files.
+- Edit or rewrite them with `multi_edit_file`; do not use `shell_command`
+  redirection, `Set-Content`, or ad-hoc scripts for normal text edits.
+
+This keeps the capture pipeline auditable and lets the gateway enforce path
+guards on every follow-up read/write.

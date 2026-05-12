@@ -20,6 +20,8 @@ const BUILTIN_CHROME_CDP_SKILL_MD: &str = include_str!("../../builtin-skills/chr
 const BUILTIN_CHROME_CDP_MJS: &str = include_str!("../../builtin-skills/chrome-cdp/scripts/cdp.mjs");
 const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
     include_str!("../../builtin-skills/chat-plus-adapter-debugger/SKILL.md");
+const BUILTIN_OFFICECLI_SKILL_MD: &str =
+    include_str!("../../builtin-skills/officecli/SKILL.md");
 const BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "windows")]
@@ -98,6 +100,12 @@ pub struct SkillsService {
     discovery_cache: Arc<RwLock<Option<SkillDiscoveryCache>>>,
     events: Arc<RwLock<SkillEventStore>>,
     planning: Arc<RwLock<HashMap<String, PlanningState>>>,
+    /// Per-path async mutexes for serializing concurrent builtin file writes.
+    /// The outer std Mutex protects the table lookup/insert; the inner
+    ///     okio::sync::Mutex is held across await while a tool operates on the
+    /// file so two concurrent multi_edit_file calls on the same path can't
+    /// stomp on each other (lost update / old_string mismatch).
+    file_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -144,13 +152,25 @@ struct PlanningState {
     explanation: Option<String>,
     consecutive_shell_commands: u32,
     consecutive_multi_edit_file_failures: u32,
+    consecutive_read_file_failures: u32,
+    consecutive_chrome_cdp_failures: u32,
+    officecli_pending_wps_cleanup: Option<OfficeCliPendingCleanup>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct OfficeCliPendingCleanup {
+    file: String,
+    created_at: Instant,
 }
 
 #[derive(Debug, Default)]
 struct PlanningSuccessHints {
     planning_reminder: Option<String>,
     shell_command_reminder: Option<String>,
+    read_failure_reminder: Option<String>,
+    cdp_stuck_reminder: Option<String>,
+    office_cli_post_create_reminder: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +280,13 @@ struct BuiltinShellArgs {
     skill_token: Option<String>,
     #[serde(default)]
     planning_id: Option<String>,
+    /// Optional list of paths the shell command is expected to write. When
+    /// provided, the gateway serializes this call against other builtin tool
+    /// calls (multi_edit_file, read_file, shell_command) targeting the same
+    /// paths so they can't stomp on each other. If the command reads or
+    /// writes other paths in addition, only the listed paths are protected.
+    #[serde(default, alias = "writesPaths", alias = "writes_paths")]
+    writes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,6 +409,7 @@ enum BuiltinTool {
     TaskPlanning,
     ChromeCdp,
     ChatPlusAdapterDebugger,
+    OfficeCli,
 }
 
 #[derive(Debug, Clone)]
@@ -486,6 +514,8 @@ pub enum FileEditChange {
 struct FileEditFailure {
     message: String,
     delta: FileEditDelta,
+    /// Accumulated warnings, notably rollback-after-commit-failure messages.
+    warnings: Vec<String>,
 }
 
 #[derive(Debug)]

@@ -665,7 +665,29 @@ async function evalStr(cdp, sid, expression) {
   return typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val ?? '');
 }
 
-async function shotStr(cdp, sid, filePath, targetId) {
+function parseShotOptions(args) {
+  const opts = { inlineBase64: false, filePath: undefined };
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i];
+    if (value === undefined || value === null) continue;
+    if (value === '--inline-base64' || value === '--inlineBase64') {
+      opts.inlineBase64 = true;
+      continue;
+    }
+    if (typeof value === 'string' && value.startsWith('--')) {
+      throw new Error(`Unknown shot option: ${value}`);
+    }
+    if (opts.filePath === undefined) {
+      opts.filePath = value;
+      continue;
+    }
+    throw new Error(`Unexpected shot argument: ${value}`);
+  }
+  return opts;
+}
+
+async function shotStr(cdp, sid, args, targetId) {
+  const { inlineBase64, filePath } = parseShotOptions(args);
   // Get device scale factor so we can report coordinate mapping
   let dpr = 1;
   try {
@@ -689,11 +711,47 @@ async function shotStr(cdp, sid, filePath, targetId) {
   }
 
   const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, sid);
+  const buffer = Buffer.from(data, 'base64');
+  let width;
+  let height;
+  try {
+    if (buffer.length >= 24 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+      width = buffer.readUInt32BE(16);
+      height = buffer.readUInt32BE(20);
+    }
+  } catch {}
+
+  if (inlineBase64) {
+    const lines = [];
+    lines.push(`Screenshot captured inline. Device pixel ratio (DPR): ${dpr}`);
+    if (width && height) lines.push(`Pixel size: ${width} x ${height}`);
+    lines.push(`Coordinate mapping:`);
+    lines.push(`  Screenshot pixels → CSS pixels (for CDP Input events): divide by ${dpr}`);
+    lines.push(`  e.g. screenshot point (${Math.round(100 * dpr)}, ${Math.round(200 * dpr)}) → CSS (100, 200) → use clickxy <target> 100 200`);
+    if (dpr !== 1) {
+      lines.push(`  On this ${dpr}x display: CSS px = screenshot px / ${dpr} ≈ screenshot px × ${Math.round(100/dpr)/100}`);
+    }
+    const payload = {
+      mimeType: 'image/png',
+      base64: data,
+      base64Length: data.length,
+      byteLength: buffer.length,
+      width,
+      height,
+      dpr,
+    };
+    lines.push(`[inlineBase64 payload: mimeType=image/png, base64Length=${data.length}, byteLength=${buffer.length}]`);
+    lines.push(`[inlineBase64 json]`);
+    lines.push(JSON.stringify(payload));
+    return lines.join('\n');
+  }
+
   const out = filePath || resolve(RUNTIME_DIR, `screenshot-${(targetId || 'unknown').slice(0, 8)}.png`);
-  writeFileSync(out, Buffer.from(data, 'base64'));
+  writeFileSync(out, buffer);
 
   const lines = [out];
   lines.push(`Screenshot saved. Device pixel ratio (DPR): ${dpr}`);
+  if (width && height) lines.push(`Pixel size: ${width} x ${height}`);
   lines.push(`Coordinate mapping:`);
   lines.push(`  Screenshot pixels → CSS pixels (for CDP Input events): divide by ${dpr}`);
   lines.push(`  e.g. screenshot point (${Math.round(100 * dpr)}, ${Math.round(200 * dpr)}) → CSS (100, 200) → use clickxy <target> 100 200`);
@@ -1126,7 +1184,7 @@ async function runDaemon(targetId) {
         }
         case 'snap': case 'snapshot': result = await snapshotStr(cdp, sessionId, true); break;
         case 'eval': result = await evalStr(cdp, sessionId, args[0]); break;
-        case 'shot': case 'screenshot': result = await shotStr(cdp, sessionId, args[0], targetId); break;
+        case 'shot': case 'screenshot': result = await shotStr(cdp, sessionId, args, targetId); break;
         case 'html': result = await htmlStr(cdp, sessionId, args[0]); break;
         case 'nav': case 'navigate': result = await navStr(cdp, sessionId, args[0]); break;
         case 'perfnet': result = await netStr(cdp, sessionId); break;
@@ -1320,7 +1378,8 @@ Usage: cdp <command> [args]
   list                              List open pages (shows unique target prefixes)
   snap  <target>                    Accessibility tree snapshot
   eval  <target> <expr>             Evaluate JS expression
-  shot  <target> [file]             Screenshot (default: screenshot-<target>.png in runtime dir); prints coordinate mapping
+  shot  <target> [file] [--inline-base64]  Screenshot (default: screenshot-<target>.png in runtime dir); prints coordinate mapping
+                                    With --inline-base64 the image is returned as base64 in stdout (skip file write) for multimodal consumption
   html  <target> [selector]         Get HTML (full page or CSS selector)
   nav   <target> <url>              Navigate to URL and wait for load completion
   net   <target>                    Network performance entries
@@ -1376,7 +1435,8 @@ Usage: cdp <command> [args]
   list                              List open pages (shows unique target prefixes)
   snap  <target>                    Accessibility tree snapshot
   eval  <target> <expr>             Evaluate JS expression
-  shot  <target> [file]             Screenshot (default: screenshot-<target>.png in runtime dir); prints coordinate mapping
+  shot  <target> [file] [--inline-base64]  Screenshot (default: screenshot-<target>.png in runtime dir); prints coordinate mapping
+                                    With --inline-base64 the image is returned as base64 in stdout (skip file write) for multimodal consumption
   html  <target> [selector]         Get HTML (full page or CSS selector)
   nav   <target> <url>              Navigate to URL and wait for load completion
   net   [target] [filter]           Search/list captured CDP Network records

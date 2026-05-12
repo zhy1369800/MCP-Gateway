@@ -236,6 +236,12 @@ pub struct BuiltinToolsConfig {
     pub chrome_cdp: bool,
     #[serde(default = "default_builtin_tool_enabled")]
     pub chat_plus_adapter_debugger: bool,
+    #[serde(default = "default_builtin_tool_disabled")]
+    pub office_cli: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office_cli_path: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub shell_env: HashMap<String, String>,
 }
 
 impl Default for BuiltinToolsConfig {
@@ -247,12 +253,19 @@ impl Default for BuiltinToolsConfig {
             task_planning: default_builtin_tool_enabled(),
             chrome_cdp: default_builtin_tool_enabled(),
             chat_plus_adapter_debugger: default_builtin_tool_enabled(),
+            office_cli: default_builtin_tool_disabled(),
+            office_cli_path: None,
+            shell_env: HashMap::new(),
         }
     }
 }
 
 fn default_builtin_tool_enabled() -> bool {
     true
+}
+
+fn default_builtin_tool_disabled() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

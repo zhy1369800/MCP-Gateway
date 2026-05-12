@@ -8,14 +8,16 @@ fn truncate_preview(input: &str, max_chars: usize) -> String {
 }
 
 fn normalize_root_path(path: PathBuf) -> PathBuf {
-    if path.exists() {
-        match std::fs::canonicalize(&path) {
+    let lexical = normalize_lexical_path(&path);
+    let normalized = if lexical.exists() {
+        match std::fs::canonicalize(&lexical) {
             Ok(value) => value,
-            Err(_) => normalize_lexical_path(&path),
+            Err(_) => lexical,
         }
     } else {
-        normalize_lexical_path(&path)
-    }
+        normalize_existing_ancestor_path(&lexical).unwrap_or(lexical)
+    };
+    normalize_windows_verbatim_path(normalize_lexical_path(&normalized))
 }
 
 fn normalize_lexical_path(path: &Path) -> PathBuf {
@@ -32,6 +34,63 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+fn normalize_existing_ancestor_path(path: &Path) -> Option<PathBuf> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        suffix.push(ancestor.file_name()?.to_os_string());
+        ancestor = ancestor.parent()?;
+    }
+
+    let mut normalized = std::fs::canonicalize(ancestor)
+        .unwrap_or_else(|_| normalize_lexical_path(ancestor));
+    for component in suffix.iter().rev() {
+        normalized.push(component);
+    }
+    Some(normalized)
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy().to_string();
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    path
+}
+
+fn path_is_within_root(path: &Path, root: &Path) -> bool {
+    let path = normalize_root_path(path.to_path_buf());
+    let root = normalize_root_path(root.to_path_buf());
+
+    #[cfg(target_os = "windows")]
+    {
+        let path_components = path_case_folded_components(&path);
+        let root_components = path_case_folded_components(&root);
+        path_components.starts_with(&root_components)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.starts_with(root)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn path_case_folded_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect()
 }
 
 fn expand_home_path(token: &str) -> String {
@@ -238,6 +297,124 @@ mod tests {
             }
             _ => panic!("expected deny decision"),
         }
+    }
+
+    #[test]
+    fn path_guard_allows_nonexistent_descendant_under_allowed_root() {
+        let temp_root = std::env::temp_dir().join(format!("mcp-gateway-{}", Uuid::new_v4()));
+        let allowed = temp_root.join("allowed");
+        fs::create_dir_all(&allowed).expect("create allowed test dir");
+        let target = allowed.join("child").join("new-file.txt");
+
+        let mut skills = SkillsConfig::default();
+        skills.policy.path_guard.enabled = true;
+        skills.policy.path_guard.whitelist_dirs = vec![allowed.to_string_lossy().to_string()];
+        skills.policy.path_guard.on_violation = SkillPolicyAction::Deny;
+        skills.policy.rules.clear();
+        skills.policy.default_action = SkillPolicyAction::Allow;
+
+        let raw = format!("New-Item {}", target.to_string_lossy());
+        let decision = evaluate_policy(
+            &skills,
+            "New-Item",
+            &[target.to_string_lossy().to_string()],
+            &raw,
+            &allowed,
+            None,
+        );
+
+        match decision {
+            PolicyDecision::Allow => {}
+            other => panic!("expected allow decision for descendant path, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn path_guard_does_not_treat_sibling_prefix_as_descendant() {
+        let temp_root = std::env::temp_dir().join(format!("mcp-gateway-{}", Uuid::new_v4()));
+        let allowed = temp_root.join("allowed");
+        let sibling = temp_root.join("allowed-sibling").join("target.txt");
+        fs::create_dir_all(&allowed).expect("create allowed test dir");
+
+        let mut skills = SkillsConfig::default();
+        skills.policy.path_guard.enabled = true;
+        skills.policy.path_guard.whitelist_dirs = vec![allowed.to_string_lossy().to_string()];
+        skills.policy.path_guard.on_violation = SkillPolicyAction::Deny;
+        skills.policy.rules.clear();
+        skills.policy.default_action = SkillPolicyAction::Allow;
+
+        let raw = format!("New-Item {}", sibling.to_string_lossy());
+        let decision = evaluate_policy(
+            &skills,
+            "New-Item",
+            &[sibling.to_string_lossy().to_string()],
+            &raw,
+            &allowed,
+            None,
+        );
+
+        match decision {
+            PolicyDecision::Deny(reason) => {
+                assert!(reason.contains("outside whitelist"));
+            }
+            other => panic!("expected deny decision for sibling path, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn path_guard_allows_windows_child_with_different_drive_case() {
+        let temp_root = std::env::temp_dir().join(format!("mcp-gateway-{}", Uuid::new_v4()));
+        let allowed = temp_root.join("allowed");
+        fs::create_dir_all(&allowed).expect("create allowed test dir");
+
+        let allowed_text = allowed.to_string_lossy().to_string();
+        let target_text = flip_windows_drive_case(&allowed_text) + r"\child\new-file.txt";
+
+        let mut skills = SkillsConfig::default();
+        skills.policy.path_guard.enabled = true;
+        skills.policy.path_guard.whitelist_dirs = vec![allowed_text];
+        skills.policy.path_guard.on_violation = SkillPolicyAction::Deny;
+        skills.policy.rules.clear();
+        skills.policy.default_action = SkillPolicyAction::Allow;
+
+        let raw = format!("New-Item {target_text}");
+        let decision = evaluate_policy(
+            &skills,
+            "New-Item",
+            &[target_text],
+            &raw,
+            &allowed,
+            None,
+        );
+
+        match decision {
+            PolicyDecision::Allow => {}
+            other => panic!("expected allow decision for case-varied child path, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn flip_windows_drive_case(path: &str) -> String {
+        let mut chars = path.chars();
+        let Some(first) = chars.next() else {
+            return path.to_string();
+        };
+        let Some(':') = chars.next() else {
+            return path.to_string();
+        };
+        let flipped = if first.is_ascii_lowercase() {
+            first.to_ascii_uppercase()
+        } else {
+            first.to_ascii_lowercase()
+        };
+        format!("{flipped}:{}", chars.collect::<String>())
     }
 
     #[test]
@@ -1438,6 +1615,135 @@ mod tests {
     }
 
     #[test]
+    fn multi_edit_file_rolls_back_earlier_writes_when_commit_fails_later() {
+        // op1 rewrites `a.txt`. op2 tries to create a file under
+        // `blocker.txt/child.txt`, but `blocker.txt` is already a file so
+        // `create_dir_all` during commit fails. When that happens, the
+        // already-written `a.txt` must be restored to its original contents.
+        let sandbox =
+            std::env::temp_dir().join(format!("gateway-multi-rollback-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        std::fs::write(sandbox.join("a.txt"), "alpha\n").expect("write a");
+        std::fs::write(sandbox.join("blocker.txt"), "i am a file\n").expect("write blocker");
+
+        let operations = vec![
+            MultiEditFileOperation::Edit {
+                path: "a.txt".to_string(),
+                edits: vec![MultiEditFileEdit {
+                    old_string: "alpha".to_string(),
+                    new_string: "APLHA".to_string(),
+                    replace_all: false,
+                    start_line: None,
+                }],
+            },
+            MultiEditFileOperation::Create {
+                path: "blocker.txt/child.txt".to_string(),
+                content: "new\n".to_string(),
+                overwrite: false,
+            },
+        ];
+
+        let failure = apply_multi_edit_file(&sandbox, &operations)
+            .expect_err("second commit step must fail");
+
+        assert!(
+            !failure.delta.exact,
+            "delta.exact must flip to false once a partial commit happened"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("a.txt")).expect("read a"),
+            "alpha\n",
+            "a.txt was not rolled back to its original contents"
+        );
+        assert!(
+            !sandbox.join("blocker.txt/child.txt").exists(),
+            "failed create should leave no child file"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[tokio::test]
+    async fn acquire_file_locks_serializes_same_path_concurrent_writes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc as StdArc;
+
+        let sandbox = std::env::temp_dir().join(format!("gateway-file-lock-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let target = sandbox.join("shared.txt");
+
+        let service = SkillsService::default();
+        // Rendez-vous so both tasks race on acquiring the lock simultaneously.
+        let gate = StdArc::new(tokio::sync::Barrier::new(2));
+        let in_critical = StdArc::new(AtomicBool::new(false));
+        let saw_overlap = StdArc::new(AtomicBool::new(false));
+
+        let run = |who: &'static str| {
+            let service = service.clone();
+            let target = target.clone();
+            let gate = gate.clone();
+            let in_critical = in_critical.clone();
+            let saw_overlap = saw_overlap.clone();
+            async move {
+                gate.wait().await;
+                let _guards = service.acquire_file_locks(std::slice::from_ref(&target)).await;
+                if in_critical.swap(true, Ordering::SeqCst) {
+                    saw_overlap.store(true, Ordering::SeqCst);
+                }
+                // Hold the lock long enough that the peer would observe
+                // overlap if serialization were broken.
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                in_critical.store(false, Ordering::SeqCst);
+                let _ = who;
+            }
+        };
+
+        let a = tokio::spawn(run("a"));
+        let b = tokio::spawn(run("b"));
+        a.await.expect("task a");
+        b.await.expect("task b");
+
+        assert!(
+            !saw_overlap.load(Ordering::SeqCst),
+            "two tasks held the same-path file lock concurrently"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[tokio::test]
+    async fn acquire_file_locks_allows_disjoint_paths_to_run_in_parallel() {
+        let sandbox = std::env::temp_dir().join(format!("gateway-file-lock-ind-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+        let a = sandbox.join("a.txt");
+        let b = sandbox.join("b.txt");
+
+        let service = SkillsService::default();
+
+        let holder_service = service.clone();
+        let holder_path = a.clone();
+        // Hold the lock for `a.txt` for a bit.
+        let holder = tokio::spawn(async move {
+            let _g = holder_service.acquire_file_locks(&[holder_path]).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        // Meanwhile, locking `b.txt` should not block on `a.txt`.
+        let start = std::time::Instant::now();
+        let _g = service.acquire_file_locks(&[b]).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(80),
+            "disjoint-path lock unexpectedly waited for unrelated path: {:?}",
+            elapsed
+        );
+
+        holder.await.expect("holder task");
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
     fn disabled_builtin_tool_not_in_tool_definitions() {
         let os = "Windows";
         let now = "2024-01-01T00:00:00Z";
@@ -1448,6 +1754,9 @@ mod tests {
             task_planning: true,
             chrome_cdp: true,
             chat_plus_adapter_debugger: true,
+            office_cli: false,
+            office_cli_path: None,
+            shell_env: HashMap::new(),
         };
         let tools = builtin_tool_definitions(os, now, &cfg);
         let names: Vec<&str> = tools
@@ -1469,6 +1778,9 @@ mod tests {
             task_planning: false,
             chrome_cdp: true,
             chat_plus_adapter_debugger: false,
+            office_cli: false,
+            office_cli_path: None,
+            shell_env: HashMap::new(),
         };
         let tools = builtin_tool_definitions(os, now, &cfg);
         assert_eq!(tools.len(), 1);
@@ -1480,8 +1792,11 @@ mod tests {
 
     #[test]
     fn disabled_tool_rejected_in_execute_builtin_tool() {
+        // officecli is gated: it stays disabled until the admin UI detects or installs the binary.
+        // Defaults therefore enable every builtin except officecli, so ALL.len() - 1 = 6.
         let all_enabled = BuiltinToolsConfig::default();
-        assert_eq!(builtin_tools(&all_enabled).len(), 6);
+        assert_eq!(builtin_tools(&all_enabled).len(), BuiltinTool::ALL.len() - 1);
+        assert!(!all_enabled.office_cli);
 
         let all_disabled = BuiltinToolsConfig {
             read_file: false,
@@ -1490,6 +1805,9 @@ mod tests {
             task_planning: false,
             chrome_cdp: false,
             chat_plus_adapter_debugger: false,
+            office_cli: false,
+            office_cli_path: None,
+            shell_env: HashMap::new(),
         };
         assert_eq!(builtin_tools(&all_disabled).len(), 0);
     }
@@ -1719,7 +2037,7 @@ mod tests {
             json!({"status": "completed"}),
             PlanningSuccessHints {
                 planning_reminder: Some(planning_reminder),
-                shell_command_reminder: None,
+                ..PlanningSuccessHints::default()
             },
         );
         assert_eq!(reminder.text, "done");
@@ -1870,4 +2188,325 @@ mod tests {
             .expect("completed planning id should be closed");
         assert_eq!(closed.structured["reason"], "unknown planningId");
     }
+
+
+    #[tokio::test]
+    async fn builtin_tool_all_covers_every_variant() {
+        // The ALL constant must list every BuiltinTool variant so registry / definitions
+        // iteration stays complete. We check via from_name round-tripping against ALL.
+        let names: Vec<&'static str> = BuiltinTool::ALL.iter().map(|t| t.name()).collect();
+        for name in &names {
+            let tool = BuiltinTool::from_name(name).expect("from_name returns a variant");
+            assert!(BuiltinTool::ALL.contains(&tool));
+        }
+        assert_eq!(names.len(), BuiltinTool::ALL.len());
+        let cfg_all_on = BuiltinToolsConfig {
+            read_file: true,
+            shell_command: true,
+            multi_edit_file: true,
+            task_planning: true,
+            chrome_cdp: true,
+            chat_plus_adapter_debugger: true,
+            office_cli: true,
+            office_cli_path: None,
+            shell_env: HashMap::new(),
+        };
+        for tool in BuiltinTool::ALL {
+            assert!(tool.is_enabled(&cfg_all_on));
+            let builder = tool.definition_builder();
+            let def = builder("linux", "2024-01-01", &cfg_all_on);
+            assert!(def.get("name").is_some(), "definition for {:?} has no name", tool);
+            assert!(def.get("inputSchema").is_some());
+        }
+        let cfg_all_off = BuiltinToolsConfig {
+            read_file: false,
+            shell_command: false,
+            multi_edit_file: false,
+            task_planning: false,
+            chrome_cdp: false,
+            chat_plus_adapter_debugger: false,
+            office_cli: false,
+            office_cli_path: None,
+            shell_env: HashMap::new(),
+        };
+        for tool in BuiltinTool::ALL {
+            assert!(!tool.is_enabled(&cfg_all_off));
+        }
+    }
+
+    #[tokio::test]
+    async fn planning_read_failure_reminder_triggers_after_three_failures() {
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let scope = "session:read-fail";
+        let token = builtin_skill_token(BuiltinTool::TaskPlanning);
+        let updated = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "update",
+                    "plan": [
+                        {"step": "Inspect", "status": "in_progress"}
+                    ],
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("planning update");
+        let planning_id = updated.structured["planning"]["planningId"]
+            .as_str()
+            .expect("planning id")
+            .to_string();
+
+        assert!(service
+            .planning_read_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                ReadFailureKind::NotFound,
+            )
+            .await
+            .is_none());
+        assert!(service
+            .planning_read_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                ReadFailureKind::NotFound,
+            )
+            .await
+            .is_none());
+        let reminder = service
+            .planning_read_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                ReadFailureKind::NotFound,
+            )
+            .await
+            .expect("reminder after three failures");
+        assert!(reminder.contains("read_file has failed 3 times"));
+
+        // `rg --files` success should reset the counter.
+        let _ = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::ShellCommand,
+                Some("rg --files"),
+            )
+            .await;
+        assert!(service
+            .planning_read_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                ReadFailureKind::Binary,
+            )
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn planning_read_failure_reminder_disabled_when_task_planning_off() {
+        let service = SkillsService::new();
+        let mut config = GatewayConfig::default();
+        config.skills.builtin_tools.task_planning = false;
+        let scope = "session:read-off";
+        for _ in 0..5 {
+            assert!(service
+                .planning_read_failure_reminder(
+                    &config,
+                    scope,
+                    Some("plan-disabled"),
+                    ReadFailureKind::NotFound,
+                )
+                .await
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn planning_cdp_failure_reminder_requires_stuck_signals() {
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let scope = "session:cdp";
+        let token = builtin_skill_token(BuiltinTool::TaskPlanning);
+        let updated = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "update",
+                    "plan": [
+                        {"step": "Debug browser", "status": "in_progress"}
+                    ],
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("planning update");
+        let planning_id = updated.structured["planning"]["planningId"]
+            .as_str()
+            .expect("planning id")
+            .to_string();
+
+        assert!(service
+            .planning_cdp_failure_reminder(&config, scope, Some(&planning_id), "", "something else")
+            .await
+            .is_none());
+        for _ in 0..2 {
+            assert!(service
+                .planning_cdp_failure_reminder(
+                    &config,
+                    scope,
+                    Some(&planning_id),
+                    "",
+                    "WebSocket connection timed out",
+                )
+                .await
+                .is_none());
+        }
+        let reminder = service
+            .planning_cdp_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                "",
+                "WebSocket connection timed out",
+            )
+            .await
+            .expect("reminder on third stuck signal");
+        assert!(reminder.contains("chrome-cdp has looked stuck"));
+
+        let _ = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::ChromeCdp,
+                Some("stop"),
+            )
+            .await;
+        assert!(service
+            .planning_cdp_failure_reminder(
+                &config,
+                scope,
+                Some(&planning_id),
+                "",
+                "target not found",
+            )
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn planning_office_cli_post_create_reminder_cycle() {
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let scope = "session:office";
+        let token = builtin_skill_token(BuiltinTool::TaskPlanning);
+        let updated = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::TaskPlanning,
+                json!({
+                    "action": "update",
+                    "plan": [
+                        {"step": "Build report", "status": "in_progress"}
+                    ],
+                    "skillToken": token
+                }),
+                scope,
+            )
+            .await
+            .expect("planning update");
+        let planning_id = updated.structured["planning"]["planningId"]
+            .as_str()
+            .expect("planning id")
+            .to_string();
+
+        // officecli create records pending cleanup but does not fire reminder on the same call.
+        let create_hints = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::OfficeCli,
+                Some("officecli create report.docx"),
+            )
+            .await;
+        assert!(create_hints.office_cli_post_create_reminder.is_none());
+
+        // Any other tool call with pending cleanup triggers the reminder.
+        let other_tool_hints = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::ReadFile,
+                None,
+            )
+            .await;
+        let reminder = other_tool_hints
+            .office_cli_post_create_reminder
+            .expect("pending cleanup reminder");
+        assert!(reminder.contains("report.docx"));
+
+        // The matching raw-set call clears the pending flag.
+        let clear_hints = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::OfficeCli,
+                Some("officecli raw-set report.docx docProps/app.xml --xpath \"//ap:Application\" --action delete"),
+            )
+            .await;
+        assert!(clear_hints.office_cli_post_create_reminder.is_none());
+
+        let after_clear = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some(&planning_id),
+                BuiltinTool::ReadFile,
+                None,
+            )
+            .await;
+        assert!(after_clear.office_cli_post_create_reminder.is_none());
+    }
+
+    #[tokio::test]
+    async fn planning_office_cli_reminder_absent_when_planning_disabled() {
+        let service = SkillsService::new();
+        let mut config = GatewayConfig::default();
+        config.skills.builtin_tools.task_planning = false;
+        let scope = "session:office-off";
+        let hints = service
+            .planning_success_hints(
+                &config,
+                scope,
+                Some("plan-disabled"),
+                BuiltinTool::OfficeCli,
+                Some("officecli create report.docx"),
+            )
+            .await;
+        assert!(hints.office_cli_post_create_reminder.is_none());
+        assert!(hints.planning_reminder.is_none());
+    }
+
+    #[test]
+    fn render_builtin_skill_md_planning_integration_is_conditional() {
+        let with_planning = render_builtin_skill_md(BuiltinTool::ReadFile, true);
+        assert!(with_planning.contains("## Planning Integration"));
+        let without_planning = render_builtin_skill_md(BuiltinTool::ReadFile, false);
+        assert!(!without_planning.contains("## Planning Integration"));
+        assert!(!without_planning.contains("planningId"));
+    }
+
 }

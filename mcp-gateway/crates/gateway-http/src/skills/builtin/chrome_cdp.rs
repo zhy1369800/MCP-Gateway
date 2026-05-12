@@ -190,14 +190,25 @@ impl SkillsService {
                     planning_scope,
                     planning_id,
                     planning_tool,
-                    None,
+                    Some(command_preview),
                 )
                 .await,
             ))
         } else {
-            Ok(tool_error(
+            let reminder = self
+                .planning_cdp_failure_reminder(
+                    config,
+                    planning_scope,
+                    planning_id,
+                    &stdout,
+                    &stderr,
+                )
+                .await;
+            Ok(tool_error_with_failure_reminder(
                 command_failure_text(exit_code, &stdout, &stderr),
                 structured,
+                "cdpStuckReminder",
+                reminder,
             ))
         }
     }

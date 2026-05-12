@@ -33,6 +33,7 @@ include!("builtin/multi_edit_file.rs");
 include!("builtin/task_planning.rs");
 include!("builtin/chrome_cdp.rs");
 include!("builtin/chat_plus_adapter_debugger.rs");
+include!("builtin/office_cli.rs");
 include!("external/handler.rs");
 include!("confirmations.rs");
 include!("results.rs");
