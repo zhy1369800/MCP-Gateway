@@ -19,6 +19,7 @@ use crate::routes;
         routes::admin::get_server_tools,
         routes::admin::export_mcp_servers_payload,
         routes::admin::get_skills,
+        routes::admin::get_skill_events,
         routes::admin::get_pending_skill_confirmations,
         routes::admin::approve_skill_confirmation,
         routes::admin::reject_skill_confirmation,

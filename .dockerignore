@@ -1,3 +1,4 @@
+<<<<<<< .mine
 target/
 mcp-gateway-ui/
 .git/
@@ -6,3 +7,13 @@ image*.png
 *.md
 LICENSE
 set-version.mjs
+=======
+target/
+.git/
+.github/
+image*.png
+*.md
+LICENSE
+set-version.mjs
+
+>>>>>>> .theirs

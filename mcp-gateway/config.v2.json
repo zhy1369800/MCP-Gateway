@@ -30,8 +30,6 @@
     "maxResponseWaitIterations": 100
   },
   "skills": {
-    "enabled": false,
-    "serverName": "__skills__",
     "roots": [],
     "policy": {
       "defaultAction": "allow",
@@ -46,7 +44,8 @@
             "-rf",
             "/"
           ],
-          "reason": "Potential root destructive deletion"
+          "reason": "Potential root destructive deletion",
+          "reasonKey": "root_destructive_deletion"
         },
         {
           "id": "deny-remove-item-root",
@@ -58,7 +57,8 @@
             "-recurse",
             "c:\\"
           ],
-          "reason": "Potential recursive deletion on drive root"
+          "reason": "Potential recursive deletion on drive root",
+          "reasonKey": "drive_root_recursive_deletion"
         },
         {
           "id": "deny-sudo",
@@ -67,7 +67,8 @@
             "sudo"
           ],
           "contains": [],
-          "reason": "Privilege escalation command is blocked"
+          "reason": "Privilege escalation command is blocked",
+          "reasonKey": "privilege_escalation"
         },
         {
           "id": "deny-su",
@@ -76,7 +77,8 @@
             "su"
           ],
           "contains": [],
-          "reason": "User switching command is blocked"
+          "reason": "User switching command is blocked",
+          "reasonKey": "user_switching"
         },
         {
           "id": "deny-doas",
@@ -85,7 +87,8 @@
             "doas"
           ],
           "contains": [],
-          "reason": "Privilege escalation command is blocked"
+          "reason": "Privilege escalation command is blocked",
+          "reasonKey": "privilege_escalation"
         },
         {
           "id": "deny-chmod",
@@ -94,7 +97,8 @@
             "chmod"
           ],
           "contains": [],
-          "reason": "Permission modification command is blocked"
+          "reason": "Permission modification command is blocked",
+          "reasonKey": "permission_modification"
         },
         {
           "id": "deny-chown",
@@ -103,7 +107,8 @@
             "chown"
           ],
           "contains": [],
-          "reason": "Ownership modification command is blocked"
+          "reason": "Ownership modification command is blocked",
+          "reasonKey": "ownership_modification"
         },
         {
           "id": "deny-chgrp",
@@ -112,7 +117,8 @@
             "chgrp"
           ],
           "contains": [],
-          "reason": "Group ownership modification command is blocked"
+          "reason": "Group ownership modification command is blocked",
+          "reasonKey": "group_ownership_modification"
         },
         {
           "id": "deny-takeown",
@@ -121,7 +127,8 @@
             "takeown"
           ],
           "contains": [],
-          "reason": "Windows ownership takeover command is blocked"
+          "reason": "Windows ownership takeover command is blocked",
+          "reasonKey": "windows_ownership_takeover"
         },
         {
           "id": "deny-icacls",
@@ -130,7 +137,8 @@
             "icacls"
           ],
           "contains": [],
-          "reason": "Windows ACL modification command is blocked"
+          "reason": "Windows ACL modification command is blocked",
+          "reasonKey": "windows_acl_modification"
         },
         {
           "id": "deny-reg",
@@ -139,7 +147,8 @@
             "reg"
           ],
           "contains": [],
-          "reason": "Registry modification command is blocked"
+          "reason": "Registry modification command is blocked",
+          "reasonKey": "registry_modification"
         },
         {
           "id": "deny-bcdedit",
@@ -148,16 +157,18 @@
             "bcdedit"
           ],
           "contains": [],
-          "reason": "Boot configuration command is blocked"
+          "reason": "Boot configuration command is blocked",
+          "reasonKey": "boot_configuration"
         },
         {
-          "id": "deny-netsh",
-          "action": "deny",
+          "id": "confirm-netsh",
+          "action": "confirm",
           "commandTree": [
             "netsh"
           ],
           "contains": [],
-          "reason": "Network configuration command is blocked"
+          "reason": "Network configuration command requires confirmation",
+          "reasonKey": "network_configuration"
         },
         {
           "id": "deny-runas",
@@ -166,16 +177,18 @@
             "runas"
           ],
           "contains": [],
-          "reason": "Privilege escalation command is blocked"
+          "reason": "Privilege escalation command is blocked",
+          "reasonKey": "privilege_escalation"
         },
         {
-          "id": "deny-taskkill",
-          "action": "deny",
+          "id": "confirm-taskkill",
+          "action": "confirm",
           "commandTree": [
             "taskkill"
           ],
           "contains": [],
-          "reason": "Process termination command is blocked"
+          "reason": "Process termination command requires confirmation",
+          "reasonKey": "process_termination"
         },
         {
           "id": "deny-diskpart",
@@ -184,7 +197,8 @@
             "diskpart"
           ],
           "contains": [],
-          "reason": "Disk partition command is blocked"
+          "reason": "Disk partition command is blocked",
+          "reasonKey": "disk_partition"
         },
         {
           "id": "deny-format",
@@ -193,7 +207,8 @@
             "format"
           ],
           "contains": [],
-          "reason": "Disk formatting command is blocked"
+          "reason": "Disk formatting command is blocked",
+          "reasonKey": "disk_formatting"
         },
         {
           "id": "deny-certutil",
@@ -202,7 +217,8 @@
             "certutil"
           ],
           "contains": [],
-          "reason": "Download or certificate manipulation command is blocked"
+          "reason": "Download or certificate manipulation command is blocked",
+          "reasonKey": "download_or_certificate"
         },
         {
           "id": "deny-bitsadmin",
@@ -211,16 +227,18 @@
             "bitsadmin"
           ],
           "contains": [],
-          "reason": "Background transfer command is blocked"
+          "reason": "Background transfer command is blocked",
+          "reasonKey": "background_transfer"
         },
         {
-          "id": "deny-msiexec",
-          "action": "deny",
+          "id": "confirm-msiexec",
+          "action": "confirm",
           "commandTree": [
             "msiexec"
           ],
           "contains": [],
-          "reason": "Installer execution command is blocked"
+          "reason": "Installer execution command requires confirmation",
+          "reasonKey": "installer_execution"
         },
         {
           "id": "deny-regsvr32",
@@ -229,7 +247,8 @@
             "regsvr32"
           ],
           "contains": [],
-          "reason": "Binary registration command is blocked"
+          "reason": "Binary registration command is blocked",
+          "reasonKey": "binary_registration"
         },
         {
           "id": "deny-rundll32",
@@ -238,7 +257,8 @@
             "rundll32"
           ],
           "contains": [],
-          "reason": "Dynamic library execution command is blocked"
+          "reason": "Dynamic library execution command is blocked",
+          "reasonKey": "dynamic_library_execution"
         },
         {
           "id": "deny-schtasks",
@@ -247,34 +267,38 @@
             "schtasks"
           ],
           "contains": [],
-          "reason": "Task scheduler command is blocked"
+          "reason": "Task scheduler command is blocked",
+          "reasonKey": "task_scheduler"
         },
         {
-          "id": "deny-sc",
-          "action": "deny",
+          "id": "confirm-sc",
+          "action": "confirm",
           "commandTree": [
             "sc"
           ],
           "contains": [],
-          "reason": "Service controller command is blocked"
+          "reason": "Service controller command requires confirmation",
+          "reasonKey": "service_controller"
         },
         {
-          "id": "deny-systemctl",
-          "action": "deny",
+          "id": "confirm-systemctl",
+          "action": "confirm",
           "commandTree": [
             "systemctl"
           ],
           "contains": [],
-          "reason": "Service controller command is blocked"
+          "reason": "Service controller command requires confirmation",
+          "reasonKey": "service_controller"
         },
         {
-          "id": "deny-service",
-          "action": "deny",
+          "id": "confirm-service",
+          "action": "confirm",
           "commandTree": [
             "service"
           ],
           "contains": [],
-          "reason": "Service controller command is blocked"
+          "reason": "Service controller command requires confirmation",
+          "reasonKey": "service_controller"
         },
         {
           "id": "deny-pkexec",
@@ -283,124 +307,138 @@
             "pkexec"
           ],
           "contains": [],
-          "reason": "Privilege escalation command is blocked"
+          "reason": "Privilege escalation command is blocked",
+          "reasonKey": "privilege_escalation"
         },
         {
-          "id": "deny-kill",
-          "action": "deny",
+          "id": "confirm-kill",
+          "action": "confirm",
           "commandTree": [
             "kill"
           ],
           "contains": [],
-          "reason": "Process termination command is blocked"
+          "reason": "Process termination command requires confirmation",
+          "reasonKey": "process_termination"
         },
         {
-          "id": "deny-pkill",
-          "action": "deny",
+          "id": "confirm-pkill",
+          "action": "confirm",
           "commandTree": [
             "pkill"
           ],
           "contains": [],
-          "reason": "Process termination command is blocked"
+          "reason": "Process termination command requires confirmation",
+          "reasonKey": "process_termination"
         },
         {
-          "id": "deny-killall",
-          "action": "deny",
+          "id": "confirm-killall",
+          "action": "confirm",
           "commandTree": [
             "killall"
           ],
           "contains": [],
-          "reason": "Process termination command is blocked"
+          "reason": "Process termination command requires confirmation",
+          "reasonKey": "process_termination"
         },
         {
-          "id": "deny-apt",
-          "action": "deny",
+          "id": "confirm-apt",
+          "action": "confirm",
           "commandTree": [
             "apt"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-apt-get",
-          "action": "deny",
+          "id": "confirm-apt-get",
+          "action": "confirm",
           "commandTree": [
             "apt-get"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-yum",
-          "action": "deny",
+          "id": "confirm-yum",
+          "action": "confirm",
           "commandTree": [
             "yum"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-dnf",
-          "action": "deny",
+          "id": "confirm-dnf",
+          "action": "confirm",
           "commandTree": [
             "dnf"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-pacman",
-          "action": "deny",
+          "id": "confirm-pacman",
+          "action": "confirm",
           "commandTree": [
             "pacman"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-zypper",
-          "action": "deny",
+          "id": "confirm-zypper",
+          "action": "confirm",
           "commandTree": [
             "zypper"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-apk",
-          "action": "deny",
+          "id": "confirm-apk",
+          "action": "confirm",
           "commandTree": [
             "apk"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-brew",
-          "action": "deny",
+          "id": "confirm-brew",
+          "action": "confirm",
           "commandTree": [
             "brew"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-winget",
-          "action": "deny",
+          "id": "confirm-winget",
+          "action": "confirm",
           "commandTree": [
             "winget"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
-          "id": "deny-choco",
-          "action": "deny",
+          "id": "confirm-choco",
+          "action": "confirm",
           "commandTree": [
             "choco"
           ],
           "contains": [],
-          "reason": "Package manager command is blocked"
+          "reason": "Package manager command requires confirmation",
+          "reasonKey": "package_manager"
         },
         {
           "id": "deny-iptables",
@@ -409,7 +447,8 @@
             "iptables"
           ],
           "contains": [],
-          "reason": "Firewall command is blocked"
+          "reason": "Firewall command is blocked",
+          "reasonKey": "firewall"
         },
         {
           "id": "deny-nft",
@@ -418,7 +457,8 @@
             "nft"
           ],
           "contains": [],
-          "reason": "Firewall command is blocked"
+          "reason": "Firewall command is blocked",
+          "reasonKey": "firewall"
         },
         {
           "id": "deny-ufw",
@@ -427,34 +467,38 @@
             "ufw"
           ],
           "contains": [],
-          "reason": "Firewall command is blocked"
+          "reason": "Firewall command is blocked",
+          "reasonKey": "firewall"
         },
         {
-          "id": "deny-ip",
-          "action": "deny",
+          "id": "confirm-ip",
+          "action": "confirm",
           "commandTree": [
             "ip"
           ],
           "contains": [],
-          "reason": "Network configuration command is blocked"
+          "reason": "Network configuration command requires confirmation",
+          "reasonKey": "network_configuration"
         },
         {
-          "id": "deny-ifconfig",
-          "action": "deny",
+          "id": "confirm-ifconfig",
+          "action": "confirm",
           "commandTree": [
             "ifconfig"
           ],
           "contains": [],
-          "reason": "Network configuration command is blocked"
+          "reason": "Network configuration command requires confirmation",
+          "reasonKey": "network_configuration"
         },
         {
-          "id": "deny-route",
-          "action": "deny",
+          "id": "confirm-route",
+          "action": "confirm",
           "commandTree": [
             "route"
           ],
           "contains": [],
-          "reason": "Routing configuration command is blocked"
+          "reason": "Routing configuration command requires confirmation",
+          "reasonKey": "routing_configuration"
         },
         {
           "id": "deny-dd",
@@ -463,7 +507,8 @@
             "dd"
           ],
           "contains": [],
-          "reason": "Raw disk write command is blocked"
+          "reason": "Raw disk write command is blocked",
+          "reasonKey": "raw_disk_write"
         },
         {
           "id": "deny-mkfs",
@@ -472,7 +517,8 @@
             "mkfs"
           ],
           "contains": [],
-          "reason": "Filesystem creation command is blocked"
+          "reason": "Filesystem creation command is blocked",
+          "reasonKey": "filesystem_creation"
         },
         {
           "id": "deny-fdisk",
@@ -481,7 +527,8 @@
             "fdisk"
           ],
           "contains": [],
-          "reason": "Disk partition command is blocked"
+          "reason": "Disk partition command is blocked",
+          "reasonKey": "disk_partition"
         },
         {
           "id": "deny-parted",
@@ -490,25 +537,28 @@
             "parted"
           ],
           "contains": [],
-          "reason": "Disk partition command is blocked"
+          "reason": "Disk partition command is blocked",
+          "reasonKey": "disk_partition"
         },
         {
-          "id": "deny-mount",
-          "action": "deny",
+          "id": "confirm-mount",
+          "action": "confirm",
           "commandTree": [
             "mount"
           ],
           "contains": [],
-          "reason": "Mount command is blocked"
+          "reason": "Mount command requires confirmation",
+          "reasonKey": "mount"
         },
         {
-          "id": "deny-umount",
-          "action": "deny",
+          "id": "confirm-umount",
+          "action": "confirm",
           "commandTree": [
             "umount"
           ],
           "contains": [],
-          "reason": "Unmount command is blocked"
+          "reason": "Unmount command requires confirmation",
+          "reasonKey": "unmount"
         },
         {
           "id": "deny-chattr",
@@ -517,7 +567,8 @@
             "chattr"
           ],
           "contains": [],
-          "reason": "File attribute modification command is blocked"
+          "reason": "File attribute modification command is blocked",
+          "reasonKey": "file_attribute_modification"
         },
         {
           "id": "deny-setfacl",
@@ -526,7 +577,8 @@
             "setfacl"
           ],
           "contains": [],
-          "reason": "ACL modification command is blocked"
+          "reason": "ACL modification command is blocked",
+          "reasonKey": "acl_modification"
         },
         {
           "id": "deny-useradd",
@@ -535,7 +587,8 @@
             "useradd"
           ],
           "contains": [],
-          "reason": "User management command is blocked"
+          "reason": "User management command is blocked",
+          "reasonKey": "user_management"
         },
         {
           "id": "deny-usermod",
@@ -544,7 +597,8 @@
             "usermod"
           ],
           "contains": [],
-          "reason": "User management command is blocked"
+          "reason": "User management command is blocked",
+          "reasonKey": "user_management"
         },
         {
           "id": "deny-userdel",
@@ -553,7 +607,8 @@
             "userdel"
           ],
           "contains": [],
-          "reason": "User management command is blocked"
+          "reason": "User management command is blocked",
+          "reasonKey": "user_management"
         },
         {
           "id": "deny-groupadd",
@@ -562,7 +617,8 @@
             "groupadd"
           ],
           "contains": [],
-          "reason": "Group management command is blocked"
+          "reason": "Group management command is blocked",
+          "reasonKey": "group_management"
         },
         {
           "id": "deny-groupdel",
@@ -571,25 +627,28 @@
             "groupdel"
           ],
           "contains": [],
-          "reason": "Group management command is blocked"
+          "reason": "Group management command is blocked",
+          "reasonKey": "group_management"
         },
         {
-          "id": "deny-launchctl",
-          "action": "deny",
+          "id": "confirm-launchctl",
+          "action": "confirm",
           "commandTree": [
             "launchctl"
           ],
           "contains": [],
-          "reason": "macOS service controller command is blocked"
+          "reason": "macOS service controller command requires confirmation",
+          "reasonKey": "macos_service_controller"
         },
         {
-          "id": "deny-defaults",
-          "action": "deny",
+          "id": "confirm-defaults",
+          "action": "confirm",
           "commandTree": [
             "defaults"
           ],
           "contains": [],
-          "reason": "macOS preferences write command is blocked"
+          "reason": "macOS preferences write command requires confirmation",
+          "reasonKey": "macos_preferences"
         },
         {
           "id": "deny-spctl",
@@ -598,7 +657,8 @@
             "spctl"
           ],
           "contains": [],
-          "reason": "macOS security policy command is blocked"
+          "reason": "macOS security policy command is blocked",
+          "reasonKey": "macos_security_policy"
         },
         {
           "id": "deny-csrutil",
@@ -607,7 +667,8 @@
             "csrutil"
           ],
           "contains": [],
-          "reason": "macOS SIP command is blocked"
+          "reason": "macOS SIP command is blocked",
+          "reasonKey": "macos_sip"
         },
         {
           "id": "deny-security",
@@ -616,16 +677,18 @@
             "security"
           ],
           "contains": [],
-          "reason": "macOS keychain command is blocked"
+          "reason": "macOS keychain command is blocked",
+          "reasonKey": "macos_keychain"
         },
         {
-          "id": "deny-osascript",
-          "action": "deny",
+          "id": "confirm-osascript",
+          "action": "confirm",
           "commandTree": [
             "osascript"
           ],
           "contains": [],
-          "reason": "AppleScript execution command is blocked"
+          "reason": "AppleScript execution command requires confirmation",
+          "reasonKey": "applescript_execution"
         },
         {
           "id": "deny-diskutil",
@@ -634,7 +697,8 @@
             "diskutil"
           ],
           "contains": [],
-          "reason": "Disk utility command is blocked"
+          "reason": "Disk utility command is blocked",
+          "reasonKey": "disk_utility"
         },
         {
           "id": "deny-powershell",
@@ -643,7 +707,8 @@
             "powershell"
           ],
           "contains": [],
-          "reason": "Nested shell launch is blocked"
+          "reason": "Nested shell launch is blocked",
+          "reasonKey": "nested_shell"
         },
         {
           "id": "deny-pwsh",
@@ -652,7 +717,8 @@
             "pwsh"
           ],
           "contains": [],
-          "reason": "Nested shell launch is blocked"
+          "reason": "Nested shell launch is blocked",
+          "reasonKey": "nested_shell"
         },
         {
           "id": "deny-cmd",
@@ -661,7 +727,8 @@
             "cmd"
           ],
           "contains": [],
-          "reason": "Nested shell launch is blocked"
+          "reason": "Nested shell launch is blocked",
+          "reasonKey": "nested_shell"
         },
         {
           "id": "deny-bash-c",
@@ -672,7 +739,8 @@
           "contains": [
             "-c"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-bash-lc",
@@ -683,7 +751,8 @@
           "contains": [
             "-lc"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-sh-c",
@@ -694,7 +763,8 @@
           "contains": [
             "-c"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-sh-lc",
@@ -705,7 +775,8 @@
           "contains": [
             "-lc"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-zsh-c",
@@ -716,7 +787,8 @@
           "contains": [
             "-c"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-zsh-lc",
@@ -727,7 +799,8 @@
           "contains": [
             "-lc"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-dash-c",
@@ -738,7 +811,8 @@
           "contains": [
             "-c"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-dash-lc",
@@ -749,7 +823,8 @@
           "contains": [
             "-lc"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-ksh-c",
@@ -760,7 +835,8 @@
           "contains": [
             "-c"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-ksh-lc",
@@ -771,7 +847,8 @@
           "contains": [
             "-lc"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-fish-c",
@@ -782,7 +859,8 @@
           "contains": [
             "-c"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-tcsh-c",
@@ -793,7 +871,8 @@
           "contains": [
             "-c"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-csh-c",
@@ -804,7 +883,8 @@
           "contains": [
             "-c"
           ],
-          "reason": "Shell wrapper command execution is blocked"
+          "reason": "Shell wrapper command execution is blocked",
+          "reasonKey": "shell_wrapper"
         },
         {
           "id": "deny-invoke-expression",
@@ -813,7 +893,8 @@
             "invoke-expression"
           ],
           "contains": [],
-          "reason": "Dynamic command execution is blocked"
+          "reason": "Dynamic command execution is blocked",
+          "reasonKey": "dynamic_command_execution"
         },
         {
           "id": "deny-iex",
@@ -822,7 +903,8 @@
             "iex"
           ],
           "contains": [],
-          "reason": "Dynamic command execution is blocked"
+          "reason": "Dynamic command execution is blocked",
+          "reasonKey": "dynamic_command_execution"
         },
         {
           "id": "deny-invoke-command",
@@ -831,43 +913,48 @@
             "invoke-command"
           ],
           "contains": [],
-          "reason": "Remote command execution is blocked"
+          "reason": "Remote command execution is blocked",
+          "reasonKey": "remote_command_execution"
         },
         {
-          "id": "deny-curl",
-          "action": "deny",
+          "id": "confirm-curl",
+          "action": "confirm",
           "commandTree": [
             "curl"
           ],
           "contains": [],
-          "reason": "Network download command is blocked"
+          "reason": "Network download command requires confirmation",
+          "reasonKey": "network_download"
         },
         {
-          "id": "deny-wget",
-          "action": "deny",
+          "id": "confirm-wget",
+          "action": "confirm",
           "commandTree": [
             "wget"
           ],
           "contains": [],
-          "reason": "Network download command is blocked"
+          "reason": "Network download command requires confirmation",
+          "reasonKey": "network_download"
         },
         {
-          "id": "deny-invoke-webrequest",
-          "action": "deny",
+          "id": "confirm-invoke-webrequest",
+          "action": "confirm",
           "commandTree": [
             "invoke-webrequest"
           ],
           "contains": [],
-          "reason": "Network download command is blocked"
+          "reason": "Network download command requires confirmation",
+          "reasonKey": "network_download"
         },
         {
-          "id": "deny-irm",
-          "action": "deny",
+          "id": "confirm-irm",
+          "action": "confirm",
           "commandTree": [
             "irm"
           ],
           "contains": [],
-          "reason": "Network download command is blocked"
+          "reason": "Network download command requires confirmation",
+          "reasonKey": "network_download"
         },
         {
           "id": "confirm-set-content",
@@ -876,7 +963,8 @@
             "set-content"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-add-content",
@@ -885,7 +973,8 @@
             "add-content"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-clear-content",
@@ -894,7 +983,8 @@
             "clear-content"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-out-file",
@@ -903,7 +993,8 @@
             "out-file"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-tee",
@@ -912,7 +1003,8 @@
             "tee"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-sed",
@@ -921,7 +1013,8 @@
             "sed"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-awk",
@@ -930,7 +1023,8 @@
             "awk"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-perl",
@@ -939,7 +1033,8 @@
             "perl"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-ed",
@@ -948,7 +1043,8 @@
             "ed"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-ex",
@@ -957,7 +1053,8 @@
             "ex"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-vi",
@@ -966,7 +1063,8 @@
             "vi"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-vim",
@@ -975,7 +1073,8 @@
             "vim"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-nvim",
@@ -984,7 +1083,8 @@
             "nvim"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-nano",
@@ -993,7 +1093,8 @@
             "nano"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-notepad",
@@ -1002,7 +1103,8 @@
             "notepad"
           ],
           "contains": [],
-          "reason": "Text editing command requires confirmation"
+          "reason": "Text editing command requires confirmation",
+          "reasonKey": "text_editing"
         },
         {
           "id": "confirm-rm",
@@ -1011,7 +1113,8 @@
             "rm"
           ],
           "contains": [],
-          "reason": "File deletion command requires confirmation"
+          "reason": "File deletion command requires confirmation",
+          "reasonKey": "file_deletion"
         },
         {
           "id": "confirm-del",
@@ -1020,7 +1123,8 @@
             "del"
           ],
           "contains": [],
-          "reason": "File deletion command requires confirmation"
+          "reason": "File deletion command requires confirmation",
+          "reasonKey": "file_deletion"
         },
         {
           "id": "confirm-rmdir",
@@ -1029,7 +1133,8 @@
             "rmdir"
           ],
           "contains": [],
-          "reason": "Directory deletion command requires confirmation"
+          "reason": "Directory deletion command requires confirmation",
+          "reasonKey": "directory_deletion"
         },
         {
           "id": "confirm-remove-item",
@@ -1038,7 +1143,8 @@
             "remove-item"
           ],
           "contains": [],
-          "reason": "PowerShell deletion command requires confirmation"
+          "reason": "PowerShell deletion command requires confirmation",
+          "reasonKey": "powershell_deletion"
         },
         {
           "id": "confirm-unlink",
@@ -1047,18 +1153,146 @@
             "unlink"
           ],
           "contains": [],
-          "reason": "File unlink command requires confirmation"
+          "reason": "File unlink command requires confirmation",
+          "reasonKey": "file_unlink"
+        },
+        {
+          "id": "confirm-mv",
+          "action": "confirm",
+          "commandTree": [
+            "mv"
+          ],
+          "contains": [],
+          "reason": "File move command requires confirmation",
+          "reasonKey": "file_move"
+        },
+        {
+          "id": "confirm-move",
+          "action": "confirm",
+          "commandTree": [
+            "move"
+          ],
+          "contains": [],
+          "reason": "File move command requires confirmation",
+          "reasonKey": "file_move"
+        },
+        {
+          "id": "confirm-move-item",
+          "action": "confirm",
+          "commandTree": [
+            "move-item"
+          ],
+          "contains": [],
+          "reason": "File move command requires confirmation",
+          "reasonKey": "file_move"
+        },
+        {
+          "id": "confirm-cp",
+          "action": "confirm",
+          "commandTree": [
+            "cp"
+          ],
+          "contains": [],
+          "reason": "File copy command requires confirmation",
+          "reasonKey": "file_copy"
+        },
+        {
+          "id": "confirm-copy",
+          "action": "confirm",
+          "commandTree": [
+            "copy"
+          ],
+          "contains": [],
+          "reason": "File copy command requires confirmation",
+          "reasonKey": "file_copy"
+        },
+        {
+          "id": "confirm-copy-item",
+          "action": "confirm",
+          "commandTree": [
+            "copy-item"
+          ],
+          "contains": [],
+          "reason": "File copy command requires confirmation",
+          "reasonKey": "file_copy"
+        },
+        {
+          "id": "confirm-rename",
+          "action": "confirm",
+          "commandTree": [
+            "rename"
+          ],
+          "contains": [],
+          "reason": "File rename command requires confirmation",
+          "reasonKey": "file_rename"
+        },
+        {
+          "id": "confirm-ren",
+          "action": "confirm",
+          "commandTree": [
+            "ren"
+          ],
+          "contains": [],
+          "reason": "File rename command requires confirmation",
+          "reasonKey": "file_rename"
+        },
+        {
+          "id": "confirm-rename-item",
+          "action": "confirm",
+          "commandTree": [
+            "rename-item"
+          ],
+          "contains": [],
+          "reason": "File rename command requires confirmation",
+          "reasonKey": "file_rename"
+        },
+        {
+          "id": "confirm-new-item",
+          "action": "confirm",
+          "commandTree": [
+            "new-item"
+          ],
+          "contains": [],
+          "reason": "File/directory creation command requires confirmation",
+          "reasonKey": "file_or_directory_creation"
+        },
+        {
+          "id": "confirm-mkdir",
+          "action": "confirm",
+          "commandTree": [
+            "mkdir"
+          ],
+          "contains": [],
+          "reason": "Directory creation command requires confirmation",
+          "reasonKey": "directory_creation"
+        },
+        {
+          "id": "confirm-touch",
+          "action": "confirm",
+          "commandTree": [
+            "touch"
+          ],
+          "contains": [],
+          "reason": "File creation/timestamp update command requires confirmation",
+          "reasonKey": "file_touch"
         }
       ],
       "pathGuard": {
         "enabled": false,
         "whitelistDirs": [],
-        "onViolation": "confirm"
+        "onViolation": "allow"
       }
     },
     "execution": {
       "timeoutMs": 60000,
       "maxOutputBytes": 131072
+    },
+    "builtinTools": {
+      "readFile": true,
+      "shellCommand": true,
+      "multiEditFile": true,
+      "chromeCdp": true,
+      "chatPlusAdapterDebugger": true
     }
   },
   "servers": [

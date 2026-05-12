@@ -53,6 +53,7 @@ export interface SkillCommandRule {
   commandTree: string[];
   contains: string[];
   reason: string;
+  reasonKey?: string;
 }
 
 export interface SkillRootEntry {
@@ -60,13 +61,21 @@ export interface SkillRootEntry {
   enabled: boolean;
 }
 
+export interface BuiltinToolsConfig {
+  readFile: boolean;
+  shellCommand: boolean;
+  multiEditFile: boolean;
+  taskPlanning: boolean;
+  chromeCdp: boolean;
+  chatPlusAdapterDebugger: boolean;
+}
+
 export interface SkillsConfig {
-  enabled: boolean;
-  serverName: string;
   roots: string[];
   rootEntries?: SkillRootEntry[];
   policy: SkillsPolicyConfig;
   execution: SkillsExecutionConfig;
+  builtinTools: BuiltinToolsConfig;
 }
 
 export interface ServerConfig {
@@ -165,11 +174,16 @@ export interface SkillConfirmation {
   status: ConfirmationStatus;
   createdAt: string;
   updatedAt: string;
+  kind?: string;
   skill: string;
   displayName: string;
   args: string[];
   rawCommand: string;
+  cwd?: string;
+  affectedPaths?: string[];
+  preview?: string;
   reason: string;
+  reasonKey?: string;
 }
 
 export interface SkillSummary {
@@ -184,6 +198,10 @@ export interface SkillDirectoryValidation {
   exists: boolean;
   isDir: boolean;
   hasSkillMd: boolean;
+}
+
+export interface SkillDirectoryScanResult {
+  path: string;
 }
 
 export interface SkillUploadResult extends SkillDirectoryValidation {
@@ -207,6 +225,11 @@ export interface TerminalEncodingStatus {
 }
 
 export interface LocalRuntimeSummary {
+  system: {
+    os: string;
+    arch: string;
+    family: string;
+  };
   python: LocalRuntimeAvailability;
   node: LocalRuntimeAvailability;
   uv: LocalRuntimeAvailability;

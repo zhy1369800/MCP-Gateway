@@ -7,3 +7,6 @@ node_modules
 mcp-gateway-ui/src-tauri/gen
 dist
 **/dist
+
+# CI/downloaded optional tool payloads
+mcp-gateway/.bundle-tools

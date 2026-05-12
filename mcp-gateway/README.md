@@ -66,14 +66,16 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
-## Built-in Skills MCP Usage
+## Skills MCP Usage
 
-When `skills.enabled=true`, gateway exposes an internal MCP server at:
+The gateway exposes two fixed Skill MCP servers. External skills discovered from configured roots use `__skills__`; bundled tools use `__builtin_skills__`.
 
-- `POST /api/v2/mcp/{skills.serverName}`
-- `GET|POST /api/v2/sse/{skills.serverName}`
+- `POST /api/v2/mcp/__skills__`
+- `GET|POST /api/v2/sse/__skills__`
+- `POST /api/v2/mcp/__builtin_skills__`
+- `GET|POST /api/v2/sse/__builtin_skills__`
 
-Default server name is `__skills__`.
+These server names are reserved and are not user-configurable.
 
 ### Browser JSON-RPC Example
 
@@ -82,6 +84,7 @@ const gatewayBase = "http://127.0.0.1:8765";
 const mcpToken = "YOUR_MCP_TOKEN";
 const adminToken = "YOUR_ADMIN_TOKEN";
 const skillsServer = "__skills__";
+const builtinSkillsServer = "__builtin_skills__";
 
 async function callSkillsMcp(payload: unknown) {
   const resp = await fetch(`${gatewayBase}/api/v2/mcp/${skillsServer}`, {
@@ -104,7 +107,23 @@ const tools = await callSkillsMcp({
 });
 console.log(tools.result.tools);
 
-// 2) run a skill script
+// 2) list built-in tools
+const builtinTools = await fetch(`${gatewayBase}/api/v2/mcp/${builtinSkillsServer}`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${mcpToken}`,
+  },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    id: "builtin-1",
+    method: "tools/list",
+    params: {},
+  }),
+}).then((resp) => resp.json());
+console.log(builtinTools.result.tools);
+
+// 3) run an external skill script
 let runResponse = await callSkillsMcp({
   jsonrpc: "2.0",
   id: "2",
@@ -119,7 +138,7 @@ let runResponse = await callSkillsMcp({
   },
 });
 
-// 3) confirmation_required => admin approves
+// 4) confirmation_required => admin approves
 const content = runResponse.result?.structuredContent ?? {};
 if (content.status === "confirmation_required") {
   const confirmationId = content.confirmationId as string;
@@ -135,7 +154,7 @@ if (content.status === "confirmation_required") {
     },
   );
 
-  // 4) retry with confirmationId
+  // 5) retry with confirmationId
   runResponse = await callSkillsMcp({
     jsonrpc: "2.0",
     id: "3",

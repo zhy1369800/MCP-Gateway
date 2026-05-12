@@ -63,6 +63,36 @@ fn open_external_browser(url: &str) -> Result<(), String> {
         .map_err(|error| format!("打开浏览器失败：{error}"))
 }
 
+#[cfg(target_os = "windows")]
+fn open_path_with_default_app(path: &Path) -> Result<(), String> {
+    let path = path.to_string_lossy().to_string();
+    let mut command = Command::new("cmd");
+    command.args(["/C", "start", "", &path]);
+    configure_ui_command(&mut command);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("打开文件失败：{error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_path_with_default_app(path: &Path) -> Result<(), String> {
+    Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("打开文件失败：{error}"))
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn open_path_with_default_app(path: &Path) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("打开文件失败：{error}"))
+}
+
 fn build_ui_process_manager() -> ProcessManager {
     ProcessManager::with_browser_opener(Arc::new(|url| open_external_browser(&url)))
 }
@@ -129,6 +159,12 @@ struct SkillDirectoryValidation {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SkillDirectoryScanResult {
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct LocalRuntimeAvailability {
     installed: bool,
     version: Option<String>,
@@ -137,10 +173,19 @@ struct LocalRuntimeAvailability {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalRuntimeSummary {
+    system: LocalSystemInfo,
     python: LocalRuntimeAvailability,
     node: LocalRuntimeAvailability,
     uv: LocalRuntimeAvailability,
     terminal: TerminalEncodingStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSystemInfo {
+    os: String,
+    arch: String,
+    family: String,
 }
 
 struct VersionProbeCommand {
@@ -525,9 +570,18 @@ fn detect_uv_runtime() -> LocalRuntimeAvailability {
     )
 }
 
+fn detect_system_info() -> LocalSystemInfo {
+    LocalSystemInfo {
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        family: std::env::consts::FAMILY.to_string(),
+    }
+}
+
 #[tauri::command]
 fn detect_local_runtimes() -> LocalRuntimeSummary {
     LocalRuntimeSummary {
+        system: detect_system_info(),
         python: detect_python_runtime(),
         node: detect_node_runtime(),
         uv: detect_uv_runtime(),
@@ -552,7 +606,8 @@ fn load_local_config() -> Result<Value, String> {
     let content = fs::read_to_string(&path).map_err(io_error)?;
     let mut parsed: Value =
         serde_json::from_str(&content).map_err(|error| format!("解析配置文件失败：{error}"))?;
-    if upgrade_legacy_skill_rules_in_place(&mut parsed) {
+    let removed_fixed_skill_names = remove_fixed_skill_server_names_in_place(&mut parsed);
+    if upgrade_legacy_skill_rules_in_place(&mut parsed) || removed_fixed_skill_names {
         let normalized = serde_json::to_string_pretty(&parsed)
             .map_err(|error| format!("序列化配置失败：{error}"))?;
         fs::write(&path, normalized).map_err(io_error)?;
@@ -561,11 +616,12 @@ fn load_local_config() -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn save_local_config(config: Value) -> Result<(), String> {
+fn save_local_config(mut config: Value) -> Result<(), String> {
     let path = resolve_default_config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
+    remove_fixed_skill_server_names_in_place(&mut config);
     let content = serde_json::to_string_pretty(&config)
         .map_err(|error| format!("序列化配置失败：{error}"))?;
     fs::write(&path, content).map_err(io_error)?;
@@ -576,6 +632,26 @@ fn save_local_config(config: Value) -> Result<(), String> {
 fn get_config_path() -> Result<String, String> {
     let path = resolve_default_config_path()?;
     Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn reset_default_config() -> Result<String, String> {
+    let path = resolve_default_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(io_error)?;
+    }
+    let default_config = default_local_config();
+    let content = serde_json::to_string_pretty(&default_config)
+        .map_err(|error| format!("序列化默认配置失败：{error}"))?;
+    fs::write(&path, content).map_err(io_error)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn open_config_file() -> Result<(), String> {
+    let path = resolve_default_config_path()?;
+    ensure_default_config_exists(&path)?;
+    open_path_with_default_app(&path)
 }
 
 #[tauri::command]
@@ -674,6 +750,32 @@ fn validate_skill_directory(path: String) -> Result<SkillDirectoryValidation, St
     })
 }
 
+#[tauri::command]
+fn scan_skill_directories(path: String) -> Result<Vec<SkillDirectoryScanResult>, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let parent = PathBuf::from(trimmed);
+    if !parent.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(&parent).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let path = entry.path();
+        if path.is_dir() && has_skill_md_in_directory(&path)? {
+            matches.push(SkillDirectoryScanResult {
+                path: path.to_string_lossy().to_string(),
+            });
+        }
+    }
+    matches.sort_by_key(|item| item.path.to_ascii_lowercase());
+    Ok(matches)
+}
+
 fn default_local_config() -> Value {
     let mut cfg = GatewayConfig::default();
     cfg.security.mcp.enabled = false;
@@ -691,6 +793,16 @@ fn io_error(error: io::Error) -> String {
 #[tauri::command]
 fn get_default_skill_rules() -> Vec<SkillCommandRule> {
     GatewayConfig::default().skills.policy.rules
+}
+
+fn remove_fixed_skill_server_names_in_place(config: &mut Value) -> bool {
+    let Some(skills) = config.get_mut("skills").and_then(Value::as_object_mut) else {
+        return false;
+    };
+
+    let removed_server_name = skills.remove("serverName").is_some();
+    let removed_builtin_server_name = skills.remove("builtinServerName").is_some();
+    removed_server_name || removed_builtin_server_name
 }
 
 #[tauri::command]
@@ -945,7 +1057,10 @@ pub fn run() {
             set_main_window_title,
             pick_folder_dialog,
             validate_skill_directory,
-            detect_local_runtimes
+            scan_skill_directories,
+            detect_local_runtimes,
+            open_config_file,
+            reset_default_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

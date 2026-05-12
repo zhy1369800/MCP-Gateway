@@ -72,24 +72,17 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
         }
     }
 
-    if cfg.skills.server_name.trim().is_empty() {
-        return Err(AppError::Validation(
-            "skills.serverName cannot be empty".to_string(),
-        ));
-    }
-    if cfg.skills.server_name.contains('/') || cfg.skills.server_name.contains('\\') {
-        return Err(AppError::Validation(
-            "skills.serverName cannot contain path separators".to_string(),
-        ));
-    }
-    if cfg
-        .servers
-        .iter()
-        .any(|server| server.name == cfg.skills.server_name)
-    {
+    if cfg.servers.iter().any(|server| {
+        server.name == cfg.skills.server_name || server.name == cfg.skills.builtin_server_name
+    }) {
+        let conflicting = if cfg.servers.iter().any(|s| s.name == cfg.skills.server_name) {
+            &cfg.skills.server_name
+        } else {
+            &cfg.skills.builtin_server_name
+        };
         return Err(AppError::Validation(format!(
-            "skills.serverName conflicts with existing server: {}",
-            cfg.skills.server_name
+            "skills server name conflicts with existing server: {}",
+            conflicting
         )));
     }
     if cfg.skills.execution.timeout_ms < 1000 {
@@ -102,17 +95,17 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
             "skills.execution.maxOutputBytes must be >= 1024".to_string(),
         ));
     }
-    if cfg.skills.policy.path_guard.enabled
-        && cfg.skills.policy.path_guard.whitelist_dirs.is_empty()
-    {
-        return Err(AppError::Validation(
-            "skills.policy.pathGuard.enabled=true requires non-empty whitelistDirs".to_string(),
-        ));
-    }
+
     for dir in &cfg.skills.policy.path_guard.whitelist_dirs {
-        if !Path::new(dir).is_absolute() {
+        let path = Path::new(dir);
+        if !path.is_absolute() {
             return Err(AppError::Validation(format!(
                 "skills.policy.pathGuard.whitelistDirs must be absolute paths: {dir}"
+            )));
+        }
+        if !path.exists() || !path.is_dir() {
+            return Err(AppError::Validation(format!(
+                "skills.policy.pathGuard.whitelistDirs must be existing directories: {dir}"
             )));
         }
     }

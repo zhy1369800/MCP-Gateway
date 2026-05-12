@@ -7,6 +7,7 @@ import type {
   ServerConnectivityTestResult,
   SkillCommandRule,
   SkillDirectoryValidation,
+  SkillDirectoryScanResult,
 } from "./types";
 
 export async function loadLocalConfig(): Promise<GatewayConfig> {
@@ -21,6 +22,14 @@ export async function getConfigPath(): Promise<string> {
   return invoke<string>("get_config_path");
 }
 
+export async function openConfigFileLocal(): Promise<void> {
+  await invoke("open_config_file");
+}
+
+export async function resetDefaultConfigLocal(): Promise<string> {
+  return invoke<string>("reset_default_config");
+}
+
 export async function getDefaultSkillRules(): Promise<SkillCommandRule[]> {
   return invoke<SkillCommandRule[]>("get_default_skill_rules");
 }
@@ -31,6 +40,10 @@ export async function pickFolderDialog(startDir?: string): Promise<string | null
 
 export async function validateSkillDirectory(path: string): Promise<SkillDirectoryValidation> {
   return invoke<SkillDirectoryValidation>("validate_skill_directory", { path });
+}
+
+export async function scanSkillDirectories(path: string): Promise<SkillDirectoryScanResult[]> {
+  return invoke<SkillDirectoryScanResult[]>("scan_skill_directories", { path });
 }
 
 export async function focusMainWindowForSkillConfirmation(): Promise<void> {

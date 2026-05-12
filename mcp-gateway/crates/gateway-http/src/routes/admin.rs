@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::response::{self, ApiResult};
+
 use crate::state::AppState;
 use crate::{SkillConfirmation, SkillSummary};
 
@@ -54,6 +55,10 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
             post(kill_terminal_task),
         )
         .route(&format!("{}/admin/skills", prefix), get(get_skills))
+        .route(
+            &format!("{}/admin/skills/events", prefix),
+            get(get_skill_events),
+        )
         .route(
             &format!("{}/admin/skills/validate-root", prefix),
             post(validate_skill_root),
@@ -413,7 +418,7 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
         mcp_servers.insert(server.name.clone(), Value::Object(entry));
     }
 
-    if cfg.skills.enabled {
+    {
         let url = format!(
             "{}{}{}",
             base_url,
@@ -427,7 +432,7 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
         let mut entry = serde_json::Map::new();
         entry.insert(
             "name".to_string(),
-            Value::String("Built-in Skills MCP".to_string()),
+            Value::String("External Skills MCP".to_string()),
         );
         entry.insert(
             "type".to_string(),
@@ -443,6 +448,40 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
         }
 
         mcp_servers.insert(cfg.skills.server_name.clone(), Value::Object(entry));
+
+        // Built-in skills MCP entry
+        let builtin_url = format!(
+            "{}{}{}",
+            base_url,
+            cfg.transport
+                .streamable_http
+                .base_path
+                .trim_end_matches('/'),
+            format_args!("/{}", cfg.skills.builtin_server_name)
+        );
+
+        let mut builtin_entry = serde_json::Map::new();
+        builtin_entry.insert(
+            "name".to_string(),
+            Value::String("Built-in Skills MCP".to_string()),
+        );
+        builtin_entry.insert(
+            "type".to_string(),
+            Value::String("streamable-http".to_string()),
+        );
+        builtin_entry.insert("url".to_string(), Value::String(builtin_url));
+
+        if cfg.security.mcp.enabled {
+            builtin_entry.insert(
+                "headers".to_string(),
+                json!({"Authorization": format!("Bearer {}", cfg.security.mcp.token)}),
+            );
+        }
+
+        mcp_servers.insert(
+            cfg.skills.builtin_server_name.clone(),
+            Value::Object(builtin_entry),
+        );
     }
 
     Ok(response::ok(
@@ -457,10 +496,6 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
 )]
 pub async fn get_skills(State(state): State<AppState>) -> ApiResult<Vec<SkillSummary>> {
     let cfg = state.config_service.get_config().await;
-    if !cfg.skills.enabled {
-        return Ok(response::ok(Vec::new()));
-    }
-
     let skills = state
         .skills
         .list_skills_for_admin(&cfg)
@@ -470,6 +505,11 @@ pub async fn get_skills(State(state): State<AppState>) -> ApiResult<Vec<SkillSum
 }
 
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct SkillEventsQuery {
+    after: Option<u64>,
+}
+
+
 #[serde(rename_all = "camelCase")]
 pub struct SkillDirectoryValidation {
     exists: bool,
@@ -667,6 +707,27 @@ fn sanitize_upload_relative_path(input: &str) -> Result<PathBuf, AppError> {
     }
 
     Ok(normalized)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/admin/skills/events",
+    params(("after" = Option<u64>, Query, description = "Return events with seq greater than this value")),
+    responses((status = 200, description = "Recent skill tool events"))
+)]
+pub async fn get_skill_events(
+    State(state): State<AppState>,
+    Query(query): Query<SkillEventsQuery>,
+) -> ApiResult<Value> {
+    let events = state.skills.list_tool_events(query.after).await;
+    let next_after = events
+        .last()
+        .map(|event| event.seq)
+        .unwrap_or(query.after.unwrap_or(0));
+    Ok(response::ok(json!({
+        "events": events,
+        "nextAfter": next_after
+    })))
 }
 
 #[utoipa::path(

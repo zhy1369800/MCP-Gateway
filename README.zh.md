@@ -1,141 +1,84 @@
-# 本地 MCP Gateway（最新）
+# 本地 MCP Gateway
 
 [English](./README.md) | [中文](./README.zh.md)
 
-MCP Gateway 是一个 MCP（Model Context Protocol）服务器网关。  
-它把多个 MCP Server 统一接入一个入口，提供代理转发、认证、管理 API，以及新增的 `SKILLS` 能力。
+本地 MCP Gateway 是一个给 MCP 客户端使用的本地网关。
 
-最常见的用途：把本地 `stdio` MCP 服务转换成远程可访问的 `SSE / Streamable HTTP` MCP 服务，供桌面端或浏览器端 AI 客户端接入，使得网页端的ai聊天窗口可以使用工具和skills。
+它把本机能力暴露成标准 MCP `SSE` 和 `Streamable HTTP` 接口，让其他 MCP 客户端通过一个入口调用。上游可以接普通 stdio MCP 服务、自定义 Skill、内置工具，也可以接桌面和浏览器自动化能力。
 
-## 功能总览
+简单说，它会把你的电脑变成一个可控的 MCP 工具中心：客户端可以通过它读文件、改文件、执行命令、操作浏览器，或者调用你自己写的 Skill 工作流；同时配置、鉴权、目录边界、命令审批都集中在一个界面里管理。
 
-- 统一管理多个 MCP 服务（可视化 + JSON 双编辑模式）
-- 网关统一转发 `SSE`：默认`GET|POST /api/v2/sse/<serverName>`
-- 网关统一转发 `HTTP`：默认`POST /api/v2/mcp/<serverName>`
-- 内置安全认证（Admin Token / MCP Token）
-- `SKILLS` 标签页支持内置 Skill MCP 服务管理
-- Skill 根目录校验（检测 `SKILL.md`）
-- 路径守卫（白名单目录 + 越界策略）
-- 执行限制（超时、最大输出）
-- 策略规则（`allow / confirm / deny`）
-- 待确认命令审批（Approve / Reject）
+![本地 MCP Gateway 界面](./image.png)
 
-## 界面预览
+## 它能做什么
 
-### Image one（MCP 主配置）
+- 把 MCP 服务暴露为 `SSE` 和 `Streamable HTTP`
+- 把本地 stdio MCP 服务转换成其他客户端可访问的接口
+- 在一个界面里统一管理多个 MCP 服务
+- 固定暴露外部 Skill 和内置 Skill 两组 MCP 服务
+- 自带文件读取、命令执行、多文件修改、浏览器控制、适配调试等工具
+- 支持允许访问目录、命令策略、执行限制和人工确认
+- Skill 形态比较省 token：核心说明放在小型 `SKILL.md` 文档里，客户端需要用时再读取完整说明
 
-![本地 MCP 网关主界面](./image.png)
+## 接口形式
 
-### Image two（SKILLS 基础配置）
+假设你配置了一个名为 `<serverName>` 的 MCP 服务：
 
-![Image two](./image2.png)
+```text
+SSE:  http://<监听地址>/api/v2/sse/<serverName>
+HTTP: http://<监听地址>/api/v2/mcp/<serverName>
+```
 
-### Image three（策略规则与待确认命令）
+Skill 端点是固定的：
 
-![Image three](./image3.png)
+```text
+外部 Skills: /api/v2/sse/__skills__
+外部 Skills: /api/v2/mcp/__skills__
+内置 Skills: /api/v2/sse/__builtin_skills__
+内置 Skills: /api/v2/mcp/__builtin_skills__
+```
 
-## 1. MCP 标签页怎么填
+如果配置了 `MCP Token`，客户端请求需要带上：
 
-### 网关设置
+```text
+Authorization: Bearer <你的_mcp_token>
+```
 
-- `监听地址`：网关监听地址与端口，例如 `127.0.0.1:8765`
-- `SSE 路径`：默认 `"/api/v2/sse"`
-- `HTTP 流路径`：默认 `"/api/v2/mcp"`
+## 基本用法
 
-最终访问地址规则：
+1. 打开应用，设置监听地址，例如 `127.0.0.1:8765`。
+2. 添加本地 MCP 服务，比如 filesystem、Playwright 这类 stdio MCP。
+3. 按需启用内置工具，或添加外部 Skill 目录。
+4. 配置允许访问目录、命令确认规则和执行限制。
+5. 启动网关。
+6. 把生成的 `SSE` 或 `HTTP` 地址复制到你的 MCP 客户端。
 
-- `SSE`: `http://<监听地址><SSE路径>/<服务名>`
-- `HTTP`: `http://<监听地址><HTTP路径>/<服务名>`
+示例：
 
-示例（监听 `127.0.0.1:8765`）：
+```text
+http://127.0.0.1:8765/api/v2/sse/playwright
+```
 
-- `http://127.0.0.1:8765/api/v2/sse/filesystem`
-- `http://127.0.0.1:8765/api/v2/mcp/filesystem`
+## Skills 与内置工具
 
-### 安全配置（密码 / Token）
+网关会暴露两类 Skill MCP 服务：
 
-- `ADMIN TOKEN`：管理接口令牌，保护 `/api/v2/admin/*`
-- `MCP TOKEN`：MCP 调用令牌，保护 `/api/v2/mcp/*` 和 `/api/v2/sse/*`
+- `__skills__`：来自你添加的外部目录，每个 Skill 由一个 `SKILL.md` 描述。
+- `__builtin_skills__`：网关自带的一组实用工具。
 
-说明：
+当前内置工具包括：
 
-- 在当前 UI 中，Token 留空即该类认证关闭
-- 对外开放时建议开启并使用随机长 Token（可视为网关密码）
-- 客户端调用时加请求头：`Authorization: Bearer <你的token>`
+- `read_file`
+- `shell_command`
+- `multi_edit_file`
+- `task-planning`
+- `chrome-cdp`
+- `chat-plus-adapter-debugger`
 
-### MCP 服务列表
+这些能力可以让普通 MCP 客户端具备更接近智能体的工作流：查看项目、读取文档、修改代码、执行命令、验证结果、操作浏览器，并且所有调用仍然走标准 MCP 接口。
 
-每一行代表一个 MCP 服务：
+## 安全提示
 
-- 开关：启用/禁用该服务
-- `名称`：服务名（会出现在 URL 末尾）
-- `命令`：启动命令（如 `npx`）
-- `参数`：命令参数
-- `+`：添加环境变量
-- `x`：删除服务
+部分 Skill 和内置工具可以执行命令、修改文件或控制本地应用。如果你要把网关暴露给本机以外的客户端，建议开启 `Admin Token` 和 `MCP Token`，并提前配置允许访问目录、确认规则和执行限制。
 
-示例（Playwright MCP）：
-
-1. 名称：`playwright`
-2. 命令：`npx`
-3. 参数：`-y @playwright/mcp@latest`
-
-## 2. 新增 SKILLS 功能说明
-
-`SKILLS` 标签页用于启用并管理内置 Skill MCP 服务：
-
-1. 打开 `启用内置 SKILL MCP`。
-2. 设置 `Skill 服务名`（默认 `__skills__`）。
-3. 添加 `Skill 根目录`，并确保目录下存在 `SKILL.md`。
-4. 可选开启 `路径守卫`，填写绝对路径白名单，并选择越界动作：`allow / confirm / deny`。
-5. 设置执行限制：`执行超时（毫秒）`（最小 `1000`）和 `最大输出（字节）`（最小 `1024`）。
-6. 在 `策略规则` 中维护 JSON 规则（`id/action/commandTree/contains/reason`）。
-7. 运行后可在 `待确认命令` 中审批高风险命令。
-
-当网关运行且 SKILLS 已启用时，界面会展示：
-
-- `Skill SSE`：`http://<监听地址><SSE路径>/<skillsServerName>`
-- `Skill HTTP`：`http://<监听地址><HTTP路径>/<skillsServerName>`
-
-## 3. 推荐使用流程
-
-1. 在 `MCP` 标签页配置监听地址和路径。
-2. 按需设置 `ADMIN TOKEN`、`MCP TOKEN`（建议生产环境开启）。
-3. 添加 MCP 服务并保存配置。
-4. 切到 `SKILLS` 标签页完成 Skill 能力配置（可选）。
-5. 点击右上角 `启动`，状态变为“运行中”。
-6. 复制生成的 `SSE / HTTP` 地址到你的 MCP 客户端。
-
-## 4. 可视化 / JSON 两种编辑方式
-
-- `可视化`：表单维护，适合常规配置
-- `JSON`：直接编辑 `mcpServers` 对象
-
-两种方式可来回切换。若 JSON 格式错误，界面会提示并阻止启动。
-
-## 5. 配置文件位置
-
-界面底部会显示当前配置文件路径。默认通常为：
-
-- Windows: `%APPDATA%\mcp-gateway\config.v2.json`
-- macOS: `~/Library/Application Support/mcp-gateway/config.v2.json`
-- Linux: `~/.config/mcp-gateway/config.v2.json`
-
-## 6. 常见问题
-
-1. 启动失败  
-检查每个服务是否至少填写了 `名称` + `命令`。
-2. 端口被占用  
-改监听端口（例如 `127.0.0.1:9876`）后重试。
-3. 客户端连不上  
-检查服务是否启用、URL 是否与界面一致（路径和服务名）。
-4. SKILLS 根目录无法启用  
-确认该目录下直接存在 `SKILL.md`（当前为非递归检查）。
-
-## 7. 免责声明
-
-- 本软件提供 `SKILLS` 能力，可能在你的授权下调用系统命令或脚本。
-- 虽然本软件已内置命令规则、路径守卫、确认机制等安全控制，但无法保证覆盖所有场景并完全避免风险。
-- 因使用 `SKILLS` 或命令执行导致的任何后果（包括但不限于数据丢失、系统异常、文件损坏、业务中断、硬件或软件损失等），均由使用者自行承担。
-- 本软件作者与维护者不对上述损失承担任何直接、间接、附带或连带责任。
-- 建议在受控环境中先验证高风险命令，并自行做好数据备份与权限隔离。
+你需要自行确认并承担已授权命令和工具调用带来的结果。

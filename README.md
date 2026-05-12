@@ -1,141 +1,84 @@
-# Local MCP Gateway (Latest)
+# Local MCP Gateway
 
 [English](./README.md) | [中文](./README.zh.md)
 
-MCP Gateway is an MCP (Model Context Protocol) server gateway.  
-It unifies multiple MCP servers behind one entry point, and provides proxy forwarding, authentication, admin APIs, plus the new `SKILLS` capability.
+Local MCP Gateway is a local gateway for MCP clients.
 
-Common use case: convert local `stdio` MCP services into remotely accessible `SSE / Streamable HTTP` MCP services, so desktop or browser AI clients can use tools and skills in web chat interfaces.
+It exposes local capabilities as standard MCP `SSE` and `Streamable HTTP` endpoints, so other MCP clients can call them through one gateway. Upstream, the gateway can connect to normal stdio MCP servers, custom Skills, bundled tools, and desktop/browser automation tools.
 
-## Overview
+In practice, it turns a local machine into a controllable MCP tool hub: clients can call tools to read files, edit files, run commands, operate a browser, or use your own Skill workflows while keeping configuration, auth, path guards, and approvals in one UI.
 
-- Manage multiple MCP services in one place (Visual + JSON editing modes)
-- Unified `SSE` forwarding: default `GET|POST /api/v2/sse/<serverName>`
-- Unified `HTTP` forwarding: default `POST /api/v2/mcp/<serverName>`
-- Built-in authentication (`Admin Token` / `MCP Token`)
-- Built-in Skill MCP management in the `SKILLS` tab
-- Skill root directory validation (checks for `SKILL.md`)
-- Path guard (whitelist directories + out-of-scope policy)
-- Execution limits (timeout, max output)
-- Policy rules (`allow / confirm / deny`)
-- Pending command approval (`Approve / Reject`)
+![Local MCP Gateway UI](./image.png)
 
-## UI Preview
+## What It Does
 
-### Image one (Main MCP configuration)
+- Exposes MCP services over `SSE` and `Streamable HTTP`
+- Converts local stdio MCP servers into endpoints other clients can use
+- Manages multiple MCP services from one UI
+- Provides fixed MCP endpoints for external Skills and bundled Skills
+- Includes built-in tools such as file reading, command execution, multi-file editing, browser control, and adapter debugging
+- Supports path allowlists, command policies, execution limits, and manual approvals
+- Keeps Skill usage token-light: Skills are described by small `SKILL.md` documents and only expanded when a client chooses to use them
 
-![Local MCP Gateway Main UI](./image.png)
+## Endpoint Shape
 
-### Image two (SKILLS basic settings)
+For a configured MCP server named `<serverName>`:
 
-![Image two](./image2.png)
+```text
+SSE:  http://<listenAddress>/api/v2/sse/<serverName>
+HTTP: http://<listenAddress>/api/v2/mcp/<serverName>
+```
 
-### Image three (Policy rules and pending commands)
+Skill endpoints are fixed:
 
-![Image three](./image3.png)
+```text
+External Skills: /api/v2/sse/__skills__
+External Skills: /api/v2/mcp/__skills__
+Bundled Skills:  /api/v2/sse/__builtin_skills__
+Bundled Skills:  /api/v2/mcp/__builtin_skills__
+```
 
-## 1. MCP Tab Configuration
+If `MCP Token` is configured, clients should send:
 
-### Gateway Settings
+```text
+Authorization: Bearer <your_mcp_token>
+```
 
-- `Listen Address`: gateway listen address and port, e.g. `127.0.0.1:8765`
-- `SSE Path`: default `"/api/v2/sse"`
-- `HTTP Stream Path`: default `"/api/v2/mcp"`
+## Typical Use
 
-Final endpoint rule:
+1. Open the app and set the listen address, for example `127.0.0.1:8765`.
+2. Add local MCP servers, such as a filesystem or Playwright stdio server.
+3. Enable the bundled tools or add external Skill directories.
+4. Configure allowed directories and command confirmation rules.
+5. Start the gateway.
+6. Copy the generated `SSE` or `HTTP` endpoint into your MCP client.
 
-- `SSE`: `http://<listenAddress><ssePath>/<serverName>`
-- `HTTP`: `http://<listenAddress><httpPath>/<serverName>`
+Example endpoint:
 
-Example (listen on `127.0.0.1:8765`):
+```text
+http://127.0.0.1:8765/api/v2/sse/playwright
+```
 
-- `http://127.0.0.1:8765/api/v2/sse/filesystem`
-- `http://127.0.0.1:8765/api/v2/mcp/filesystem`
+## Skills And Built-In Tools
 
-### Security (Password / Token)
+The gateway can expose two kinds of Skill MCP servers:
 
-- `ADMIN TOKEN`: protects `/api/v2/admin/*`
-- `MCP TOKEN`: protects `/api/v2/mcp/*` and `/api/v2/sse/*`
+- `__skills__`: Skills discovered from directories you add. Each Skill is backed by a `SKILL.md`.
+- `__builtin_skills__`: bundled practical tools shipped with the gateway.
 
-Notes:
+Bundled tools currently include:
 
-- In the current UI, leaving token empty disables that auth scope
-- For public exposure, enable auth and use long random tokens (as gateway passwords)
-- Client requests should include header: `Authorization: Bearer <your_token>`
+- `read_file`
+- `shell_command`
+- `multi_edit_file`
+- `task-planning`
+- `chrome-cdp`
+- `chat-plus-adapter-debugger`
 
-### MCP Service List
+This makes it possible to build agent-like workflows on top of normal MCP clients: inspect a project, read documentation, edit code, run commands, test behavior, and control a browser, while still routing everything through MCP.
 
-Each row is one MCP service:
+## Safety
 
-- Toggle: enable/disable the service
-- `Name`: service name (used in URL suffix)
-- `Command`: startup command (e.g. `npx`)
-- `Args`: command arguments
-- `+`: add environment variables
-- `x`: remove service
+Some Skills and built-in tools can execute commands, edit files, or control local applications. Use `Admin Token` and `MCP Token` when exposing the gateway beyond your own machine, and configure allowed directories, confirmation rules, and execution limits before enabling high-risk tools.
 
-Example (Playwright MCP):
-
-1. Name: `playwright`
-2. Command: `npx`
-3. Args: `-y @playwright/mcp@latest`
-
-## 2. New SKILLS Feature
-
-The `SKILLS` tab is used to enable and manage the built-in Skill MCP service:
-
-1. Turn on `Enable Built-in SKILL MCP`.
-2. Set `Skill Server Name` (default `__skills__`).
-3. Add `Skill Roots`, and ensure `SKILL.md` exists directly in those directories.
-4. Optionally enable `Path Guard`, add absolute whitelist directories, and choose violation action: `allow / confirm / deny`.
-5. Configure execution limits: `Execution Timeout (ms)` (minimum `1000`) and `Max Output (bytes)` (minimum `1024`).
-6. Maintain JSON policy rules in `Policy Rules` (`id/action/commandTree/contains/reason`).
-7. After running, approve or reject high-risk commands in `Pending Confirmations`.
-
-When gateway is running and SKILLS is enabled, the UI shows:
-
-- `Skill SSE`: `http://<listenAddress><ssePath>/<skillsServerName>`
-- `Skill HTTP`: `http://<listenAddress><httpPath>/<skillsServerName>`
-
-## 3. Recommended Workflow
-
-1. Configure listen address and paths in the `MCP` tab.
-2. Set `ADMIN TOKEN` and `MCP TOKEN` as needed (recommended for production).
-3. Add MCP services and save config.
-4. Open the `SKILLS` tab and configure Skill capabilities (optional).
-5. Click `Start` at top-right, and wait for running status.
-6. Copy generated `SSE / HTTP` endpoints to your MCP client.
-
-## 4. Visual / JSON Editing
-
-- `Visual`: form-based editing for daily use
-- `JSON`: direct edit of `mcpServers` object
-
-You can switch between them. If JSON is invalid, UI will show an error and block startup.
-
-## 5. Config File Location
-
-The current config file path is shown at the bottom of the UI. Default paths are usually:
-
-- Windows: `%APPDATA%\\mcp-gateway\\config.v2.json`
-- macOS: `~/Library/Application Support/mcp-gateway/config.v2.json`
-- Linux: `~/.config/mcp-gateway/config.v2.json`
-
-## 6. FAQ
-
-1. Startup failed  
-Check each service has at least `Name` + `Command`.
-2. Port already in use  
-Change listen port (e.g. `127.0.0.1:9876`) and retry.
-3. Client cannot connect  
-Check service enabled status and verify URL path/service name.
-4. SKILLS root cannot be enabled  
-Ensure `SKILL.md` exists directly under the selected directory (current check is non-recursive).
-
-## 7. Disclaimer
-
-- This software provides `SKILLS` capabilities that may execute system commands or scripts with your authorization.
-- Although command rules, path guards, and confirmation workflows are built in, they cannot guarantee complete coverage of all scenarios or absolute safety.
-- Any consequences caused by using `SKILLS` or command execution (including but not limited to data loss, system issues, file corruption, service interruption, or hardware/software damage) are the sole responsibility of the user.
-- The author and maintainers of this software are not liable for any direct, indirect, incidental, or consequential damages arising from such use.
-- You should validate high-risk commands in a controlled environment and maintain proper backups and permission isolation.
+You are responsible for the consequences of commands and tools you approve.

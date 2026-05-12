@@ -6,7 +6,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use cli::{Cli, Commands, TokenCommand};
 use gateway_core::{
-    apply_runtime_overrides, apply_token_env_overrides, default_config_path, init_default_config,
+
+    apply_runtime_overrides, apply_token_env_overrides, enable_gateway_process_job, default_config_path, init_default_config,
     load_config_from_path, migrate_v1_to_v2_file, rotate_token, save_config_atomic,
     validate_config, ConfigService, ProcessManager, RunMode,
 };
@@ -14,6 +15,10 @@ use gateway_http::{build_router, spawn_idle_reaper, AppState, SkillsService, Sse
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Err(error) = enable_gateway_process_job() {
+        eprintln!("warning: Windows process job cleanup is partially unavailable: {error}");
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -118,12 +123,13 @@ async fn main() -> Result<()> {
                 .await
                 .with_context(|| format!("failed to bind {}", cfg.listen))?;
 
-            axum::serve(listener, app)
+            let server_result = axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown_signal())
                 .await
-                .context("server error")?;
+                .context("server error");
 
             process_manager.reset_pool().await;
+            server_result?;
             Ok(())
         }
     }

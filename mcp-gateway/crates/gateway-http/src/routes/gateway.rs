@@ -142,7 +142,10 @@ pub async fn handle_mcp_http(
         .or(generated_session_id.as_deref());
 
     if state.skills.is_skills_server(&cfg, &server_name) {
-        let result = state.skills.handle_mcp_request(&cfg, request).await;
+        let result = state
+            .skills
+            .handle_mcp_request(&cfg, request, effective_session_id, &server_name)
+            .await;
         if is_notification {
             return empty_response(StatusCode::ACCEPTED, effective_session_id);
         }
@@ -213,7 +216,10 @@ pub async fn handle_sse_post(
     let session_id = session_header_value(&headers);
 
     if state.skills.is_skills_server(&cfg, &server_name) {
-        let result = state.skills.handle_mcp_request(&cfg, request).await;
+        let result = state
+            .skills
+            .handle_mcp_request(&cfg, request, session_id.as_deref(), &server_name)
+            .await;
         if is_notification {
             return empty_response(StatusCode::ACCEPTED, session_id.as_deref());
         }

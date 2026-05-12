@@ -5,15 +5,26 @@ import {
   Copy,
   Check,
   Code2,
+  BookOpenText,
+  AlignLeft,
+  FileText,
+  Terminal,
+  FilePenLine,
+  ListChecks,
+  Chrome,
+  Bug,
   List,
   Languages,
   Save,
-  FolderOpen,
-  Eye,
-  EyeOff,
-  Globe,
+  Newspaper,
   Github,
   Send,
+  Info,
+  Settings as SettingsIcon,
+  Wrench,
+  Plug,
+  Pencil,
+  RotateCcw,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
@@ -23,10 +34,13 @@ import {
   setMainWindowTitle,
   getServerAuthStateLocal,
   loadLocalConfig,
+  openConfigFileLocal,
+  resetDefaultConfigLocal,
   saveLocalConfig,
   getConfigPath,
   getDefaultSkillRules,
   reauthorizeServerLocal,
+  scanSkillDirectories,
   testMcpServerLocal,
   pickFolderDialog,
   validateSkillDirectory,
@@ -40,282 +54,69 @@ import type {
   ServerConfig,
   ServerAuthState,
   SkillCommandRule,
+  SkillPolicyAction,
   SkillConfirmation,
   ServerConnectivityTestResult,
-  SkillDirectoryValidation,
-  SkillRootEntry,
-  SkillPolicyAction,
   SkillsConfig,
-  TerminalEncodingStatus,
   TerminalTaskSnapshot,
 } from "./types";
 import { useT, type Lang } from "./i18n";
 import JsonEditor from "./components/JsonEditor";
 import { useUpdateCheck } from "./hooks/useUpdateCheck";
 import { UpdateBanner } from "./components/UpdateBanner";
-
-// ── 工具：args 字符串 ↔ 数组 ──────────────────────────────────────
-function argsToStr(args: string[]): string {
-  return args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
-}
-function strToArgs(raw: string): string[] {
-  return raw.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((a) => a.replace(/^"|"$/g, "")) ?? [];
-}
-
-function sameArgs(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-// ── servers → claude_desktop_config 格式的 JSON 对象 ─────────────
-function serversToJson(servers: ServerConfig[]): Record<string, unknown> {
-  const obj: Record<string, unknown> = {};
-  for (const s of servers) {
-    obj[s.name || `server_${Math.random().toString(36).slice(2, 6)}`] = {
-      command: s.command,
-      args: s.args,
-      enabled: s.enabled,
-      ...(s.env && Object.keys(s.env).length > 0 ? { env: s.env } : {}),
-    };
-  }
-  return obj;
-}
-
-// ── claude_desktop_config 格式 → servers ─────────────────────────
-function jsonToServers(obj: Record<string, unknown>): ServerConfig[] {
-  // 兼容 Cursor mcp.json 格式：顶层包了一层 mcpServers
-  const keys = Object.keys(obj);
-  if (keys.length === 1 && keys[0] === "mcpServers" && obj["mcpServers"] && typeof obj["mcpServers"] === "object" && !Array.isArray(obj["mcpServers"])) {
-    obj = obj["mcpServers"] as Record<string, unknown>;
-  }
-  return Object.entries(obj).map(([name, val]) => {
-    const v = val as { command?: string; args?: string[]; env?: Record<string, string>; enabled?: boolean };
-    return {
-      name,
-      command: v.command ?? "",
-      args: v.args ?? [],
-      env: v.env ?? {},
-      description: "",
-      cwd: "",
-      lifecycle: null,
-      stdioProtocol: "auto" as const,
-      enabled: v.enabled !== false,
-    };
-  });
-}
-
-function parseRulesJson(input: string): SkillCommandRule[] {
-  const parsed = JSON.parse(input) as unknown;
-  if (!Array.isArray(parsed)) {
-    throw new Error("rules must be an array");
-  }
-  return parsed.map((entry, index) => {
-    if (!entry || typeof entry !== "object") {
-      throw new Error(`rule ${index + 1} must be object`);
-    }
-    const row = entry as Record<string, unknown>;
-    const action = typeof row.action === "string" ? row.action : "allow";
-    if (action !== "allow" && action !== "confirm" && action !== "deny") {
-      throw new Error(`rule ${index + 1} action must be allow/confirm/deny`);
-    }
-
-    return {
-      id: typeof row.id === "string" ? row.id : `rule-${index + 1}`,
-      action: action as SkillPolicyAction,
-      commandTree: Array.isArray(row.commandTree) ? row.commandTree.map((item) => String(item)) : [],
-      contains: Array.isArray(row.contains) ? row.contains.map((item) => String(item)) : [],
-      reason: typeof row.reason === "string" ? row.reason : "",
-    };
-  });
-}
-
-function isConfirmationAlreadyResolvedError(error: unknown): boolean {
-  const message = String(error ?? "").toLowerCase();
-  return message.includes("confirmation not found")
-    || message.includes("already rejected")
-    || message.includes("already approved");
-}
-
-function ensureSkillsConfig(
-  raw: Partial<SkillsConfig> | undefined,
-  fallbackRules: SkillCommandRule[] = [],
-): SkillsConfig {
-  const legacyPolicy = (raw?.policy as unknown as {
-    confirmKeywords?: string[];
-    denyKeywords?: string[];
-  } | undefined);
-  const normalizedRoots = Array.isArray(raw?.roots)
-    ? raw.roots.map((item) => item.trim()).filter((item) => item.length > 0)
-    : [];
-  const parsedRootEntries = Array.isArray(raw?.rootEntries)
-    ? raw.rootEntries
-        .map((entry) => ({
-          path: (entry?.path ?? "").trim(),
-          enabled: entry?.enabled === true,
-        }))
-        .filter((entry) => entry.path.length > 0)
-    : [];
-  const rootEntries: SkillRootEntry[] = parsedRootEntries.length > 0
-    ? [...parsedRootEntries]
-    : normalizedRoots.map((path) => ({ path, enabled: true }));
-
-  const knownPaths = new Set(rootEntries.map((entry) => entry.path.toLowerCase()));
-  normalizedRoots.forEach((path) => {
-    if (!knownPaths.has(path.toLowerCase())) {
-      rootEntries.push({ path, enabled: true });
-      knownPaths.add(path.toLowerCase());
-    }
-  });
-
-  const hasLegacy = Array.isArray(legacyPolicy?.confirmKeywords) || Array.isArray(legacyPolicy?.denyKeywords);
-  let rules = Array.isArray(raw?.policy?.rules) && raw.policy.rules.length > 0
-    ? raw.policy.rules
-    : fallbackRules;
-
-  if ((!raw?.policy?.rules || raw.policy.rules.length === 0) && hasLegacy) {
-    const legacyConfirm = legacyPolicy?.confirmKeywords ?? [];
-    const legacyDeny = legacyPolicy?.denyKeywords ?? [];
-    const legacyRules: SkillCommandRule[] = [];
-    legacyDeny.forEach((item, index) => {
-      if (item.trim().length > 0) {
-        legacyRules.push({
-          id: `legacy-deny-${index + 1}`,
-          action: "deny",
-          commandTree: [],
-          contains: [item],
-          reason: `Legacy deny keyword: ${item}`,
-        });
-      }
-    });
-    legacyConfirm.forEach((item, index) => {
-      if (item.trim().length > 0) {
-        legacyRules.push({
-          id: `legacy-confirm-${index + 1}`,
-          action: "confirm",
-          commandTree: [],
-          contains: [item],
-          reason: `Legacy confirm keyword: ${item}`,
-        });
-      }
-    });
-    if (legacyRules.length > 0) {
-      rules = legacyRules;
-    }
-  }
-
-  return {
-    enabled: raw?.enabled ?? false,
-    serverName: raw?.serverName?.trim() || "__skills__",
-    roots: rootEntries.filter((entry) => entry.enabled).map((entry) => entry.path),
-    rootEntries,
-    policy: {
-      defaultAction: raw?.policy?.defaultAction ?? "allow",
-      rules: rules.map((rule) => ({
-        id: (rule.id ?? "").trim(),
-        action: rule.action ?? "allow",
-        commandTree: Array.isArray(rule.commandTree)
-          ? rule.commandTree.map((item) => item.trim()).filter((item) => item.length > 0)
-          : [],
-        contains: Array.isArray(rule.contains)
-          ? rule.contains.map((item) => item.trim()).filter((item) => item.length > 0)
-          : [],
-        reason: (rule.reason ?? "").trim(),
-      })),
-      pathGuard: {
-        enabled: raw?.policy?.pathGuard?.enabled ?? false,
-        whitelistDirs: Array.isArray(raw?.policy?.pathGuard?.whitelistDirs)
-          ? raw.policy.pathGuard.whitelistDirs.map((item) => item.trim()).filter((item) => item.length > 0)
-          : [],
-        onViolation: raw?.policy?.pathGuard?.onViolation ?? "confirm",
-      },
-    },
-    execution: {
-      timeoutMs: raw?.execution?.timeoutMs ?? 60000,
-      maxOutputBytes: raw?.execution?.maxOutputBytes ?? 131072,
-    },
-  };
-}
-
-function formatTime(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
-}
-
-function runtimeDisplayValue(
-  runtime: { installed: boolean; version: string | null } | undefined,
-  loading: boolean,
-  failed: boolean,
-  t: ReturnType<typeof useT>,
-): string {
-  if (loading) {
-    return t("runtimeChecking");
-  }
-  if (failed || !runtime) {
-    return t("runtimeDetectFailed");
-  }
-  if (!runtime.installed) {
-    return t("runtimeNotInstalled");
-  }
-  return runtime.version?.trim() || t("runtimeDetectFailed");
-}
-
-function terminalEncodingDisplayValue(
-  terminal: TerminalEncodingStatus | undefined,
-  loading: boolean,
-  failed: boolean,
-  t: ReturnType<typeof useT>,
-): string {
-  if (loading) {
-    return t("runtimeChecking");
-  }
-  if (failed || !terminal || !terminal.detected) {
-    return t("runtimeDetectFailed");
-  }
-  if (terminal.isUtf8) {
-    if (terminal.codePage) {
-      return t("runtimeUtf8CodePageValue").replace("{codePage}", String(terminal.codePage));
-    }
-    return t("runtimeUtf8Value");
-  }
-  if (terminal.autoFixOnLaunch) {
-    if (terminal.codePage) {
-      return t("runtimeNonUtf8AutoFixCodePageValue").replace(
-        "{codePage}",
-        String(terminal.codePage),
-      );
-    }
-    return t("runtimeNonUtf8AutoFixValue");
-  }
-  if (terminal.codePage) {
-    return t("runtimeCodePageValue").replace("{codePage}", String(terminal.codePage));
-  }
-  return t("runtimeNonUtf8Value");
-}
-
-interface EditableConfigSnapshot {
-  servers: ServerConfig[];
-  listen: string;
-  apiPrefix: string;
-  transport: GatewayConfig["transport"];
-  security: GatewayConfig["security"];
-  skills: SkillsConfig;
-}
-
-type EndpointTransportType = "sse" | "streamable-http";
-type ServerDropPosition = "before" | "after";
-
-interface ServerDragTarget {
-  index: number;
-  position: ServerDropPosition;
-}
+import { ConfirmDialog } from "./components/ConfirmDialog";
+import { SkillConfirmations, SkillConfirmationPopup } from "./components/SkillConfirmations";
+import { SkillDirectoryListEditor } from "./components/SkillDirectoryListEditor";
+import { SkillPolicyRulesEditor } from "./components/SkillPolicyRulesEditor";
+import { ServerRow } from "./components/ServerRow";
+import { jsonToServers } from "./utils/serverConfig";
+import {
+  buildServersJson,
+  createEditableConfigFingerprint,
+  createEditableConfigSnapshot,
+  createMcpClientEntryJson,
+  moveArrayItem,
+  stripIndexKeyedEntries,
+  type EndpointTransportType,
+  type ServerDragTarget,
+} from "./utils/configSnapshot";
+import { runtimeDisplayValue, terminalEncodingDisplayValue } from "./utils/display";
+import {
+  createEmptySkillRuleForm,
+  createSkillRuleId,
+  BUILTIN_SKILL_SERVER_NAME,
+  ensureSkillsConfig,
+  EXTERNAL_SKILL_SERVER_NAME,
+  formToRule,
+  isSkillRuleFormValid,
+  normalizeSkillsForSubmit,
+  parseRulesJson,
+  ruleToForm,
+  type SkillRuleFormState,
+} from "./features/skills/skillRules";
+import { isConfirmationAlreadyResolvedError } from "./features/skills/confirmations";
+import {
+  createSkillDirectoryItem,
+  skillDirectoryStatusFromResult,
+  type SkillDirKind,
+  type SkillDirStatus,
+  type SkillDirectoryItem,
+} from "./features/skills/directories";
+import {
+  asErrorMessage,
+  authStateTone,
+  createEmptyAuthState,
+  serverTestKey,
+  type ServerTestState,
+  type ServerTestStatus,
+} from "./features/servers/serverStatus";
 
 const SERVER_LIST_GAP_PX = 16;
 
 // 版本号由 Vite 在编译时注入（CI 时来自 git tag，本地开发时来自 package.json）
 const CURRENT_VERSION = import.meta.env.VITE_APP_VERSION as string;
 const BLOG_URL = "https://blog.aiguicai.com";
+const BILIBILI_URL = "https://space.bilibili.com/228928896?spm_id_from=333.1007.0.0";
 const GITHUB_URL = "https://github.com/510myRday/MCP-Gateway";
 const TG_GROUP_URL = "https://t.me/+vq8WByYtPoQ1MjA1";
 const QQ_GROUP_NUMBER = "1090461840";
@@ -560,18 +361,24 @@ function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: {
 }) {
   if (!open) return null;
   return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">{title}</div>
-        <div className="modal-body">
-          {message}
-        </div>
-        <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onCancel}>{t("cancel")}</button>
-          <button className="btn btn-danger" onClick={onConfirm}>{t("confirmDelete")}</button>
-        </div>
-      </div>
-    </div>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 5 5.5 2.5" />
+      <path d="m16 5 2.5-2.5" />
+      <rect x="3.5" y="5" width="17" height="15" rx="3.5" />
+      <path d="M8.7 11.3h.01" />
+      <path d="M15.3 11.3h.01" />
+      <path d="M9 15.1c1.45.9 4.55.9 6 0" />
+    </svg>
   );
 }
 
@@ -1051,8 +858,9 @@ function App() {
     localStorage.setItem("mcp-lang", next);
   };
 
-  // ── Tab 状态 ──
-  const [activeTab, setActiveTab] = useState<"mcp" | "skills" | "terminal">("mcp");
+  // ── 导航状态 ──
+  const [activeSection, setActiveSection] = useState<"info" | "settings" | "builtin" | "externalMcp" | "externalSkill">("info");
+
 
   const [servers, setServers] = useState<ServerConfig[]>([]);
   const [listen, setListen] = useState("127.0.0.1:8765");
@@ -1067,6 +875,10 @@ function App() {
   const [skillWhitelistItems, setSkillWhitelistItems] = useState<SkillDirectoryItem[]>([]);
   const [skillsRulesDraft, setSkillsRulesDraft] = useState("[]");
   const [skillsRulesError, setSkillsRulesError] = useState<string | null>(null);
+  const [skillsRulesAdvancedOpen, setSkillsRulesAdvancedOpen] = useState(false);
+  const [skillRuleFormOpen, setSkillRuleFormOpen] = useState(false);
+  const [editingSkillRuleId, setEditingSkillRuleId] = useState<string | null>(null);
+  const [skillRuleForm, setSkillRuleForm] = useState<SkillRuleFormState>(() => createEmptySkillRuleForm());
   const [skillPending, setSkillPending] = useState<SkillConfirmation[]>([]);
   const [activeSkillPopupId, setActiveSkillPopupId] = useState<string | null>(null);
   const [skillActionBusy, setSkillActionBusy] = useState<Set<string>>(new Set());
@@ -1102,6 +914,8 @@ function App() {
   const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; index: number; name: string }>({
     open: false, index: -1, name: ""
   });
+  const [resetConfigConfirmOpen, setResetConfigConfirmOpen] = useState(false);
+  const [resetSkillRulesConfirmOpen, setResetSkillRulesConfirmOpen] = useState(false);
   const [skillDirDeleteConfirm, setSkillDirDeleteConfirm] = useState<{
     open: boolean;
     kind: SkillDirKind;
@@ -1109,6 +923,7 @@ function App() {
   }>({
     open: false, kind: "roots", id: ""
   });
+
   const knownPendingIdsRef = useRef<Set<string>>(new Set());
   const dismissedPopupIdsRef = useRef<Set<string>>(new Set());
   const pendingFetchSeqRef = useRef(0);
@@ -1138,6 +953,15 @@ function App() {
     (count: number) => Array.from({ length: count }, () => createServerUiId()),
     [createServerUiId],
   );
+  const addServer = useCallback(() => {
+    setServers((prev) => [{
+      name: "", command: "npx", args: ["-y", ""],
+      description: "", cwd: "", env: {}, lifecycle: null, stdioProtocol: "auto", enabled: true,
+    }, ...prev]);
+    setServerUiIds((prev) => [createServerUiId(), ...prev]);
+    setServerTestStates({});
+    setServerAuthStates({});
+  }, [createServerUiId]);
   const draggedServerUiId = draggedServerIndex === null ? null : (serverUiIds[draggedServerIndex] ?? null);
   const previewServerUiIds = useMemo(() => {
     if (draggedServerIndex === null || !serverDropTarget) {
@@ -1247,9 +1071,79 @@ function App() {
     void runItemValidation(kind, id, normalized);
   }, [runItemValidation, updateItemStatus]);
 
+  const reloadLocalConfig = useCallback(async () => {
+    const [cfg, builtinRules] = await Promise.all([loadLocalConfig(), getDefaultSkillRules().catch(() => [])]);
+    setDefaultSkillRules(builtinRules);
+    const nextServers = cfg.servers ?? [];
+    const nextListen = cfg.listen || "127.0.0.1:8765";
+    const nextApiPrefix = cfg.apiPrefix || "/api/v2";
+    const nextSsePath = cfg.transport?.sse?.basePath || "/api/v2/sse";
+    const nextHttpPath = cfg.transport?.streamableHttp?.basePath || "/api/v2/mcp";
+    const nextAdminToken = cfg.security?.admin?.token ?? "";
+    const nextMcpToken = cfg.security?.mcp?.token ?? "";
+
+    setServers(nextServers);
+    setServerUiIds(createServerUiIds(nextServers.length));
+    setServerTestStates({});
+    setServerAuthStates({});
+    setAutoTestingServers(false);
+    setListen(nextListen);
+    setApiPrefix(nextApiPrefix);
+    setSsePath(nextSsePath);
+    setHttpPath(nextHttpPath);
+    setAdminToken(nextAdminToken);
+    setMcpToken(nextMcpToken);
+    const nextSkills = ensureSkillsConfig(cfg.skills, builtinRules);
+    setSkills(nextSkills);
+    const rootEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
+      ? nextSkills.rootEntries
+      : nextSkills.roots.map((path) => ({ path, enabled: true }));
+    const nextRootItems = (rootEntries.length > 0 ? rootEntries : [{ path: "", enabled: false }]).map((entry) => ({
+      ...createSkillDirectoryItem(entry.path, entry.enabled),
+      status: entry.path.trim().length > 0 ? "checking" as const : "idle" as const,
+    }));
+    const nextWhitelistItems = (nextSkills.policy.pathGuard.whitelistDirs.length > 0
+      ? nextSkills.policy.pathGuard.whitelistDirs
+      : [""]
+    ).map((path) => ({
+      ...createSkillDirectoryItem(path, true),
+      status: "idle" as const,
+    }));
+    setSkillRootItems(nextRootItems);
+    setSkillWhitelistItems(nextWhitelistItems);
+    nextRootItems.forEach((item) => {
+      if (item.path.trim().length > 0) {
+        void runItemValidation("roots", item.id, item.path);
+      }
+    });
+    setSkillsRulesDraft(JSON.stringify(nextSkills.policy.rules, null, 2));
+    setSkillsRulesError(null);
+    setSkillsRulesAdvancedOpen(false);
+    setSkillRuleFormOpen(false);
+    setEditingSkillRuleId(null);
+    setSkillRuleForm(createEmptySkillRuleForm());
+    setJsonText(buildServersJson(nextServers));
+    setJsonError(null);
+    setServersMode("visual");
+    setSavedConfigFingerprint(createEditableConfigFingerprint(createEditableConfigSnapshot({
+      servers: nextServers,
+      listen: nextListen,
+      apiPrefix: nextApiPrefix,
+      ssePath: nextSsePath,
+      httpPath: nextHttpPath,
+      adminToken: nextAdminToken,
+      mcpToken: nextMcpToken,
+      skills: nextSkills,
+    })));
+    setConfigLoaded(true);
+  }, [createServerUiIds, runItemValidation]);
+
   // ── 初始加载配置 ──
   useEffect(() => {
+    reloadLocalConfig().catch((e) => setError(String(e)));
     const applyConfig = (cfg: GatewayConfig, builtinRules: SkillCommandRule[]) => {
+    getConfigPath().then(setConfigPath).catch(() => {});
+  }, [reloadLocalConfig]);
       setDefaultSkillRules(builtinRules);
       const nextServers = cfg.servers ?? [];
       const nextListen = cfg.listen || "127.0.0.1:8765";
@@ -1380,11 +1274,19 @@ function App() {
   }, [jsonText, serversMode]);
 
   const switchToJson = () => {
+    if (serversMode === "json") {
+      setJsonError(null);
+      return;
+    }
     setJsonText(buildServersJson(servers));
     setJsonError(null);
     setServersMode("json");
   };
   const switchToVisual = () => {
+    if (serversMode === "visual") {
+      setJsonError(null);
+      return;
+    }
     if (!parsedJsonServers) {
       setJsonError(t("jsonParseError"));
       return;
@@ -1397,6 +1299,14 @@ function App() {
     setServerDropTarget(null);
     setJsonError(null);
     setServersMode("visual");
+  };
+  const formatServersJson = () => {
+    try {
+      setJsonText(JSON.stringify(JSON.parse(jsonText), null, 2));
+      setJsonError(null);
+    } catch {
+      setJsonError(t("formatError"));
+    }
   };
 
   // ── 进程状态轮询 ──
@@ -1617,7 +1527,7 @@ function App() {
     const fetchSeq = pendingFetchSeqRef.current + 1;
     pendingFetchSeqRef.current = fetchSeq;
 
-    if (!running || !skills.enabled) {
+    if (!running) {
       if (fetchSeq !== pendingFetchSeqRef.current) return "idle";
       setSkillPending([]);
       setActiveSkillPopupId(null);
@@ -1637,7 +1547,7 @@ function App() {
       );
 
       if (newItems.length > 0) {
-        setActiveTab("skills");
+        setActiveSection("settings");
         void focusMainWindowForSkillConfirmation().catch(() => {});
         const popupCandidate = newItems.find((item) => !dismissedPopupIdsRef.current.has(item.id)) ?? newItems[0];
         setActiveSkillPopupId(popupCandidate.id);
@@ -1656,10 +1566,10 @@ function App() {
       setError(String(error));
       return "error";
     }
-  }, [apiClient, running, skills.enabled]);
+  }, [apiClient, running]);
 
   usePolling(fetchSkillPending, {
-    enabled: running && skills.enabled,
+    enabled: running,
     activeMs: 3000,
     idleMs: 10000,
     errorMs: 5000,
@@ -1793,8 +1703,115 @@ function App() {
     }
   };
 
+  const syncSkillRules = (rules: SkillCommandRule[]) => {
+    setSkills((prev) => ({
+      ...prev,
+      policy: {
+        ...prev.policy,
+        rules,
+      },
+    }));
+    setSkillsRulesDraft(JSON.stringify(rules, null, 2));
+    setSkillsRulesError(null);
+  };
+
+  const startAddSkillRule = () => {
+    setEditingSkillRuleId(null);
+    setSkillRuleForm(createEmptySkillRuleForm());
+    setSkillRuleFormOpen(true);
+  };
+
+  const editSkillRule = (rule: SkillCommandRule) => {
+    setEditingSkillRuleId(rule.id);
+    setSkillRuleForm(ruleToForm(rule));
+    setSkillRuleFormOpen(true);
+  };
+
+  const cancelSkillRuleForm = () => {
+    setEditingSkillRuleId(null);
+    setSkillRuleForm(createEmptySkillRuleForm());
+    setSkillRuleFormOpen(false);
+  };
+
+  const submitSkillRuleForm = () => {
+    if (!isSkillRuleFormValid(skillRuleForm)) return;
+    const nextRules = editingSkillRuleId
+      ? skills.policy.rules.map((rule) =>
+          rule.id === editingSkillRuleId ? formToRule(skillRuleForm, rule.id) : rule
+        )
+      : [...skills.policy.rules, formToRule(skillRuleForm, createSkillRuleId(skills.policy.rules))];
+    syncSkillRules(nextRules);
+    cancelSkillRuleForm();
+  };
+
+  const copySkillRule = (rule: SkillCommandRule) => {
+    const nextRule = {
+      ...rule,
+      id: createSkillRuleId(skills.policy.rules),
+    };
+    const index = skills.policy.rules.findIndex((item) => item.id === rule.id);
+    const nextRules = [...skills.policy.rules];
+    nextRules.splice(index >= 0 ? index + 1 : nextRules.length, 0, nextRule);
+    syncSkillRules(nextRules);
+  };
+
+  const deleteSkillRule = (id: string) => {
+    syncSkillRules(skills.policy.rules.filter((rule) => rule.id !== id));
+    if (editingSkillRuleId === id) {
+      cancelSkillRuleForm();
+    }
+  };
+
+  const requestResetSkillRules = () => {
+    setResetSkillRulesConfirmOpen(true);
+  };
+
+  const cancelResetSkillRules = () => {
+    setResetSkillRulesConfirmOpen(false);
+  };
+
+  const confirmResetSkillRules = useCallback(async () => {
+    setResetSkillRulesConfirmOpen(false);
+    try {
+      const rules = defaultSkillRules.length > 0
+        ? defaultSkillRules
+        : await getDefaultSkillRules();
+      syncSkillRules(rules);
+      setDefaultSkillRules(rules);
+      cancelSkillRuleForm();
+    } catch (error) {
+      setError(asErrorMessage(error));
+    }
+  }, [defaultSkillRules]);
+
   const addRootItem = () => {
-    setRootItemsAndSync([...skillRootItems, createSkillDirectoryItem("", false)]);
+    setRootItemsAndSync([createSkillDirectoryItem("", false), ...skillRootItems]);
+  };
+
+  const importRootItems = async () => {
+    try {
+      const selected = await pickFolderDialog();
+      if (!selected) return;
+      const discovered = await scanSkillDirectories(selected);
+      if (discovered.length === 0) {
+        setError(t("noSkillRootsFound"));
+        return;
+      }
+
+      const importedPaths = new Set(discovered.map((item) => item.path.trim().toLowerCase()));
+      const importedItems = discovered.map((item) => ({
+        ...createSkillDirectoryItem(item.path, true),
+        status: "valid" as const,
+      }));
+      const existingItems = skillRootItems.filter((item) => {
+        const normalized = item.path.trim().toLowerCase();
+        return normalized.length > 0 && !importedPaths.has(normalized);
+      });
+      setRootItemsAndSync([...importedItems, ...existingItems]);
+      setError(null);
+    } catch (error) {
+      setError(asErrorMessage(error));
+    }
   };
 
   const addWhitelistItem = () => {
@@ -1977,7 +1994,7 @@ function App() {
       httpPath,
       adminToken,
       mcpToken,
-      skills: ensureSkillsConfig(skills, defaultSkillRules),
+      skills: normalizeSkillsForSubmit(skills, defaultSkillRules),
     }));
   }, [servers, serversMode, parsedJsonServers, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills, defaultSkillRules]);
 
@@ -1994,7 +2011,7 @@ function App() {
       httpPath,
       adminToken,
       mcpToken,
-      skills: ensureSkillsConfig(skills, defaultSkillRules),
+      skills: normalizeSkillsForSubmit(skills, defaultSkillRules),
     });
 
     if (isRemoteMode) {
@@ -2020,11 +2037,14 @@ function App() {
     return createEditableConfigFingerprint(snapshot);
   };
 
+  const ensureSkillsAccessReady = () => true;
+
   const handleStart = async () => {
     if (skillsRulesError) {
       setError(skillsRulesError);
       return;
     }
+    if (!ensureSkillsAccessReady()) return;
     const nextServers = resolveServers();
     if (nextServers === null) return;
     setError(null); setBusy(true);
@@ -2061,6 +2081,7 @@ function App() {
       setError(skillsRulesError);
       return;
     }
+    if (!ensureSkillsAccessReady()) return;
     const nextServers = resolveServers();
     if (nextServers === null) return;
     setError(null); setSaving(true); setSaveSuccess(false);
@@ -2255,10 +2276,24 @@ function App() {
     };
   }, [draggedServerIndex, findServerDropTarget, resetServerDragState, serverUiIds, servers, updateDraggedServerPreview]);
 
-  const skillHttpUrl = `${displayBaseUrl}${httpPath}/${skills.serverName}`;
-  const skillSseUrl = `${displayBaseUrl}${ssePath}/${skills.serverName}`;
+  const baseUrl = listen.startsWith("http") ? listen : `http://${listen}`;
+  const skillHttpUrl = `${baseUrl}${httpPath}/${EXTERNAL_SKILL_SERVER_NAME}`;
+  const skillSseUrl = `${baseUrl}${ssePath}/${EXTERNAL_SKILL_SERVER_NAME}`;
+  const builtinSkillHttpUrl = `${baseUrl}${httpPath}/${BUILTIN_SKILL_SERVER_NAME}`;
+  const builtinSkillSseUrl = `${baseUrl}${ssePath}/${BUILTIN_SKILL_SERVER_NAME}`;
+
   const runtimeLoading = !localRuntimeSummary && !localRuntimeDetectFailed;
+  const systemDisplayValue = localRuntimeSummary?.system
+    ? `${localRuntimeSummary.system.os} / ${localRuntimeSummary.system.arch}`
+    : runtimeLoading
+      ? t("runtimeChecking")
+      : t("runtimeUnavailable");
   const runtimeCards = useMemo(() => ([
+    {
+      key: "system",
+      label: t("runtimeSystem"),
+      value: systemDisplayValue,
+    },
     {
       key: "python",
       label: t("runtimePython"),
@@ -2284,7 +2319,13 @@ function App() {
         t,
       ),
     },
-  ]), [localRuntimeDetectFailed, localRuntimeSummary, runtimeLoading, t]);
+  ]), [
+    localRuntimeDetectFailed,
+    localRuntimeSummary,
+    runtimeLoading,
+    systemDisplayValue,
+    t,
+  ]);
 
   const handleCopy = async (name: string, type: EndpointTransportType, url: string, key: string) => {
     const snippet = createMcpClientEntryJson(name, type, url, mcpToken);
@@ -2307,6 +2348,40 @@ function App() {
     }
     await handleOpenExternalLink(updateInfo.releaseUrl);
   }, [handleOpenExternalLink, updateInfo?.releaseUrl]);
+
+  const handleOpenConfigFile = useCallback(async () => {
+    try {
+      await openConfigFileLocal();
+    } catch (error) {
+      setError(String(error));
+    }
+  }, []);
+
+  const requestResetDefaultConfig = useCallback(() => {
+    setResetConfigConfirmOpen(true);
+  }, []);
+
+  const cancelResetDefaultConfig = useCallback(() => {
+    setResetConfigConfirmOpen(false);
+  }, []);
+
+  const confirmResetDefaultConfig = useCallback(async () => {
+    setResetConfigConfirmOpen(false);
+    setError(null);
+    setSaving(true);
+    setSaveSuccess(false);
+    try {
+      const nextPath = await resetDefaultConfigLocal();
+      setConfigPath(nextPath);
+      await reloadLocalConfig();
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }, [reloadLocalConfig]);
 
   const handleOpenQqGroup = useCallback(async () => {
     const inviteUrl = QQ_GROUP_INVITE_URL.trim();
@@ -2350,73 +2425,118 @@ function App() {
         />
       )}
 
-      {/* ── 顶栏 ── */}
-      <div className="topbar">
-        <div className="topbar-left">
-          <span className={`status-dot ${running ? "running" : "stopped"}`} />
-          <span className="topbar-title">{t("appTitle")}</span>
-          <span className="topbar-subtitle">{running ? t("running") : t("stopped")}</span>
-        </div>
-        <div className="topbar-right">
-          {showRestartRequiredHint && (
-            <span
-              className="topbar-restart-hint"
-              role="status"
-              aria-live="polite"
-              title={t("restartRequiredHint")}
-            >
-              {t("restartRequiredHint")}
-            </span>
-          )}
-          <button
-            className={`btn btn-secondary btn-sm ${isConfigDirty ? "btn-save-dirty" : ""}`}
-            onClick={handleSave}
-            disabled={saving || !configLoaded}
-            title={isConfigDirty ? t("saveConfigUnsaved") : t("saveConfig")}
-          >
-            <Save size={13} />
-            <span>{saving ? t("saving") : saveSuccess ? t("saveSuccess") : t("saveConfig")}</span>
-            {isConfigDirty && !saving && (
-              <span
-                className="save-dirty-indicator"
-                aria-label={t("saveConfigUnsaved")}
-                title={t("saveConfigUnsaved")}
-              >
-                !
-              </span>
-            )}
-          </button>
-          <button className="btn-lang" onClick={toggleLang} title="Switch language">
-            <Languages size={13} />
-            <span>{t("langToggle")}</span>
-          </button>
-          {!running ? (
-            <button className="btn btn-start" onClick={handleStart} disabled={busy || !configLoaded}>
-              <Play size={14} />{busy ? t("starting") : t("start")}
-            </button>
-          ) : (
-            <button className="btn btn-stop" onClick={handleStop} disabled={busy}>
-              <Square size={14} />{busy ? t("stopping") : t("stop")}
-            </button>
-          )}
-        </div>
-      </div>
+      <div className="app-shell">
+        <aside className="sidebar" aria-label="Primary">
+          <div className="sidebar-brand">
+            <div className="brand-mark" aria-hidden>M</div>
+            <div className="brand-copy">
+              <div className="brand-title">{t("appTitle")}</div>
+            </div>
+          </div>
 
-      {/* ── Tab 导航 ── */}
-      <div className="tab-nav">
-        <button
-          className={`tab-button ${activeTab === "mcp" ? "active" : ""}`}
-          onClick={() => setActiveTab("mcp")}
-        >
-          {t("tabMcp")}
-        </button>
-        <button
-          className={`tab-button ${activeTab === "skills" ? "active" : ""}`}
-          onClick={() => setActiveTab("skills")}
-        >
-          {t("tabSkills")}
-          {skillPending.length > 0 && (
-            <span className="tab-badge">{skillPending.length}</span>
+          <nav className="sidebar-nav">
+            <button
+              type="button"
+              className={`sidebar-nav-item ${activeSection === "info" ? "active" : ""}`}
+              onClick={() => setActiveSection("info")}
+            >
+              <Info size={16} />
+              <span>{t("navBasicInfo")}</span>
+            </button>
+            <button
+              type="button"
+              className={`sidebar-nav-item ${activeSection === "settings" ? "active" : ""}`}
+              onClick={() => setActiveSection("settings")}
+            >
+              <SettingsIcon size={16} />
+              <span>{t("navSettings")}</span>
+              {skillPending.length > 0 && <span className="sidebar-badge">{skillPending.length}</span>}
+            </button>
+            <button
+              type="button"
+              className={`sidebar-nav-item ${activeSection === "builtin" ? "active" : ""}`}
+              onClick={() => setActiveSection("builtin")}
+            >
+              <Wrench size={16} />
+              <span>{t("navBuiltinTools")}</span>
+            </button>
+            <button
+              type="button"
+              className={`sidebar-nav-item ${activeSection === "externalMcp" ? "active" : ""}`}
+              onClick={() => setActiveSection("externalMcp")}
+            >
+              <Plug size={16} />
+              <span>{t("navExternalMcp")}</span>
+            </button>
+            <button
+              type="button"
+              className={`sidebar-nav-item ${activeSection === "externalSkill" ? "active" : ""}`}
+              onClick={() => setActiveSection("externalSkill")}
+            >
+              <BookOpenText size={16} />
+              <span>{t("navExternalSkill")}</span>
+            </button>
+          </nav>
+
+          <div className="sidebar-status">
+            <span className={`status-dot ${running ? "running" : "stopped"}`} />
+            <span>{running ? t("running") : t("stopped")}</span>
+          </div>
+        </aside>
+
+        <div className="workspace">
+          {/* ── 顶栏 ── */}
+          <div className="topbar">
+            <div className="topbar-right">
+              {showRestartRequiredHint && (
+                <span
+                  className="topbar-restart-hint"
+                  role="status"
+                  aria-live="polite"
+                  title={t("restartRequiredHint")}
+                >
+                  {t("restartRequiredHint")}
+                </span>
+              )}
+              <button
+                className={`topbar-icon-btn ${isConfigDirty ? "btn-save-dirty" : ""}`}
+                onClick={handleSave}
+                disabled={saving || !configLoaded}
+                title={saving ? t("saving") : saveSuccess ? t("saveSuccess") : isConfigDirty ? t("saveConfigUnsaved") : t("saveConfig")}
+                aria-label={saving ? t("saving") : saveSuccess ? t("saveSuccess") : isConfigDirty ? t("saveConfigUnsaved") : t("saveConfig")}
+              >
+                <Save size={15} />
+                {isConfigDirty && !saving && (
+                  <span
+                    className="save-dirty-indicator"
+                    aria-label={t("saveConfigUnsaved")}
+                    title={t("saveConfigUnsaved")}
+                  >
+                    !
+                  </span>
+                )}
+              </button>
+              <button className="topbar-icon-btn" onClick={toggleLang} title={t("langToggle")} aria-label={t("langToggle")}>
+                <Languages size={15} />
+              </button>
+              {!running ? (
+                <button className="topbar-icon-btn topbar-run-btn" onClick={handleStart} disabled={busy || !configLoaded} title={busy ? t("starting") : t("start")} aria-label={busy ? t("starting") : t("start")}>
+                  <Play size={15} />
+                </button>
+              ) : (
+                <button className="topbar-icon-btn topbar-stop-btn" onClick={handleStop} disabled={busy} title={busy ? t("stopping") : t("stop")} aria-label={busy ? t("stopping") : t("stop")}>
+                  <Square size={15} />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* ── 错误提示 ── */}
+          {error && (
+            <div className="alert alert-error app-alert">
+              {error}
+              <button className="alert-close" onClick={() => setError(null)}>x</button>
+            </div>
           )}
         </button>
         <button
@@ -2427,6 +2547,7 @@ function App() {
         </button>
       </div>
 
+          <div className="main-scroll">
       <input
         ref={skillUploadInputRef}
         type="file"
@@ -2444,10 +2565,64 @@ function App() {
         </div>
       )}
 
-      <div className="main-scroll">
+        {activeSection === "info" && (
+          <>
+            <section className="config-section info-section">
+              <div className="section-heading">{t("softwareIntroTitle")}</div>
+              <p className="software-intro-text">{t("softwareIntroBody")}</p>
+            </section>
 
-        {/* ════════════════ MCP Tab ════════════════ */}
-        {activeTab === "mcp" && (
+            <section className="config-section info-section">
+              <div className="section-heading">{t("runtimeEnvironment")}</div>
+              <div className="runtime-line-list" role="status" aria-live="polite">
+                {runtimeCards.map((item) => (
+                  <div className="runtime-line-item" key={item.key}>
+                    <span className="runtime-line-label">{item.label}</span>
+                    <span className="runtime-line-value">{item.value}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="config-section info-section">
+              <div className="section-heading">{t("filePaths")}</div>
+              <div className="runtime-line-list">
+                <div className="runtime-line-item runtime-line-item-with-action">
+                  <span className="runtime-line-label">{t("configPath")}</span>
+                  <code className="runtime-line-value runtime-path-value">
+                    {configPath || t("runtimeChecking")}
+                  </code>
+                  <button
+                    type="button"
+                    className="runtime-line-action"
+                    onClick={() => { void handleOpenConfigFile(); }}
+                    disabled={!configPath}
+                    title={t("openConfigFile")}
+                    aria-label={t("openConfigFile")}
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="runtime-line-action runtime-line-danger-action"
+                    onClick={requestResetDefaultConfig}
+                    disabled={!configLoaded || saving}
+                    title={t("resetDefaultConfig")}
+                    aria-label={t("resetDefaultConfig")}
+                  >
+                    <RotateCcw size={14} />
+                  </button>
+                </div>
+                <div className="runtime-line-item">
+                  <span className="runtime-line-label">{t("logPath")}</span>
+                  <span className="runtime-line-value runtime-muted-value">{t("logPathPlaceholder")}</span>
+                </div>
+              </div>
+            </section>
+          </>
+        )}
+
+        {activeSection === "settings" && (
           <>
             {/* ── 网关设置 ── */}
             <section className="config-section">
@@ -2500,18 +2675,16 @@ function App() {
                 </div>
               </div>
             </section>
+          </>
+        )}
 
-            {/* ── MCP Servers ── */}
-            <section className="config-section">
-              <div className="section-heading-row section-heading-row-balanced">
-                <span className="section-heading" style={{ marginBottom: 0 }}>{t("mcpServers")}</span>
-                <div className="runtime-inline-summary" role="status" aria-live="polite">
-                  {runtimeCards.map((item) => (
-                    <span className="runtime-inline-item" key={item.key}>
-                      <span className="runtime-inline-label">{item.label}</span>
-                      <span className="runtime-inline-value">{item.value}</span>
-                    </span>
-                  ))}
+        {activeSection === "externalMcp" && (
+          <>
+            <section className={`config-section ${serversMode === "json" ? "mcp-json-section" : ""}`}>
+              <div className="section-heading-row mcp-servers-heading-row">
+                <div className="section-heading-block">
+                  <div className="section-heading">{t("mcpServers")}</div>
+                  <div className="section-description">{t("mcpServersHint")}</div>
                 </div>
                 <div className="section-heading-actions">
                   <div className="mode-toggle">
@@ -2524,6 +2697,16 @@ function App() {
                       <Code2 size={13} /> {t("json")}
                     </button>
                   </div>
+                  {serversMode === "visual" && (
+                    <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={addServer}>
+                      {t("addServer")}
+                    </button>
+                  )}
+                  {serversMode === "json" && (
+                    <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={formatServersJson}>
+                      <AlignLeft size={13} /> {t("formatJson")}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -2600,18 +2783,6 @@ function App() {
                       ))}
                     </div>
                   )}
-                  <button className="btn btn-secondary btn-sm" style={{ marginTop: 10 }}
-                    onClick={() => {
-                      setServers((prev) => [...prev, {
-                        name: "", command: "npx", args: ["-y", ""],
-                        description: "", cwd: "", env: {}, lifecycle: null, stdioProtocol: "auto", enabled: true,
-                      }]);
-                      setServerUiIds((prev) => [...prev, createServerUiId()]);
-                      setServerTestStates({});
-                      setServerAuthStates({});
-                    }}>
-                    {t("addServer")}
-                  </button>
                 </>
               ) : (
                 <div className="json-editor-wrap">
@@ -2620,8 +2791,6 @@ function App() {
                     value={jsonText}
                     onChange={(v) => { setJsonText(v); setJsonError(null); }}
                     placeholder={t("jsonHint")}
-                    onFormatError={(msg) => setJsonError(msg)}
-                    formatBtnText={t("formatJson")}
                   />
                 </div>
               )}
@@ -2629,42 +2798,170 @@ function App() {
           </>
         )}
 
-        {/* ════════════════ SKILLS Tab ════════════════ */}
-        {activeTab === "skills" && (
+        {activeSection === "builtin" && (
           <>
-            {/* ── Skills 基础配置 ── */}
             <section className="config-section skills-redesign-section">
-              <div className="section-heading">{t("skillsConfig")}</div>
+              <div className="section-heading-row built-in-tools-heading-row">
+                <div className="section-heading-block">
+                  <div className="section-heading">{t("builtInToolsTitle")}</div>
+                  <div className="section-description">{t("builtInToolsHint")}</div>
+                </div>
+              </div>
 
-              <div className="skills-redesign">
-                <div className="skills-top-row">
-                  <div className="skills-switch-card">
-                    <label className="field-label" htmlFor="skills-enabled-toggle">{t("skillsEnable")}</label>
-                    <div className="skills-switch-track">
-                      <button
-                        id="skills-enabled-toggle"
-                        className={`toggle-btn ${skills.enabled ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, enabled: !prev.enabled }))}
-                        aria-label={t("skillsEnable")}
-                        title={t("skillsEnable")}
-                      />
-                    </div>
+              {running && (
+                <div className="skills-endpoints">
+                  <div className="endpoint-item">
+                    <span className="endpoint-label">{t("builtinSkillSseEndpoint")}</span>
+                    <code className="endpoint-url">{builtinSkillSseUrl}</code>
+                    <button className="btn-icon" title={t("copyBuiltinSkillSse")} onClick={() => handleCopy(BUILTIN_SKILL_SERVER_NAME, "sse", builtinSkillSseUrl, "builtin-skills-sse")}>
+                      {copied === "builtin-skills-sse" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                    </button>
                   </div>
-                  <div className="skills-input-card">
-                    <label className="field-label" htmlFor="skills-server-name">{t("skillsServerName")}</label>
-                    <input
-                      id="skills-server-name"
-                      className="form-input"
-                      value={skills.serverName}
-                      onChange={(e) => setSkills((prev) => ({ ...prev, serverName: e.target.value }))}
-                      placeholder="__skills__"
-                    />
+                  <div className="endpoint-item">
+                    <span className="endpoint-label">{t("builtinSkillHttpEndpoint")}</span>
+                    <code className="endpoint-url">{builtinSkillHttpUrl}</code>
+                    <button className="btn-icon" title={t("copyBuiltinSkillHttp")} onClick={() => handleCopy(BUILTIN_SKILL_SERVER_NAME, "streamable-http", builtinSkillHttpUrl, "builtin-skills-http")}>
+                      {copied === "builtin-skills-http" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                    </button>
                   </div>
                 </div>
+              )}
 
+              <div className="skills-redesign">
+                <div className="built-in-tools-panel">
+                  <div className="built-in-tools-grid">
+                    <div className="built-in-tool">
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.readFile ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, readFile: !prev.builtinTools.readFile } }))}
+                        title={skills.builtinTools.readFile ? t("enabledClick") : t("disabledClick")}
+                        aria-label={`${skills.builtinTools.readFile ? t("enabledClick") : t("disabledClick")} read_file`}
+                        aria-pressed={skills.builtinTools.readFile}
+                      />
+                      <div className="built-in-tool-icon"><FileText size={15} /></div>
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">read_file</div>
+                        <div className="built-in-tool-desc">{t("builtInReadFileDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.shellCommand ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellCommand: !prev.builtinTools.shellCommand } }))}
+                        title={skills.builtinTools.shellCommand ? t("enabledClick") : t("disabledClick")}
+                        aria-label={`${skills.builtinTools.shellCommand ? t("enabledClick") : t("disabledClick")} shell_command`}
+                        aria-pressed={skills.builtinTools.shellCommand}
+                      />
+                      <div className="built-in-tool-icon"><Terminal size={15} /></div>
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">shell_command</div>
+                        <div className="built-in-tool-desc">{t("builtInShellDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.multiEditFile ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, multiEditFile: !prev.builtinTools.multiEditFile } }))}
+                        title={skills.builtinTools.multiEditFile ? t("enabledClick") : t("disabledClick")}
+                        aria-label={`${skills.builtinTools.multiEditFile ? t("enabledClick") : t("disabledClick")} multi_edit_file`}
+                        aria-pressed={skills.builtinTools.multiEditFile}
+                      />
+                      <div className="built-in-tool-icon"><FilePenLine size={15} /></div>
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">multi_edit_file</div>
+                        <div className="built-in-tool-desc">{t("builtInMultiEditDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.taskPlanning ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, taskPlanning: !prev.builtinTools.taskPlanning } }))}
+                        title={skills.builtinTools.taskPlanning ? t("enabledClick") : t("disabledClick")}
+                        aria-label={`${skills.builtinTools.taskPlanning ? t("enabledClick") : t("disabledClick")} task-planning`}
+                        aria-pressed={skills.builtinTools.taskPlanning}
+                      />
+                      <div className="built-in-tool-icon"><ListChecks size={15} /></div>
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">task-planning</div>
+                        <div className="built-in-tool-desc">{t("builtInTaskPlanningDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.chromeCdp ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, chromeCdp: !prev.builtinTools.chromeCdp } }))}
+                        title={skills.builtinTools.chromeCdp ? t("enabledClick") : t("disabledClick")}
+                        aria-label={`${skills.builtinTools.chromeCdp ? t("enabledClick") : t("disabledClick")} chrome-cdp`}
+                        aria-pressed={skills.builtinTools.chromeCdp}
+                      />
+                      <div className="built-in-tool-icon"><Chrome size={15} /></div>
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">chrome-cdp</div>
+                        <div className="built-in-tool-desc">{t("builtInChromeCdpDesc")}</div>
+                      </div>
+                    </div>
+                    <div className="built-in-tool">
+                      <button
+                        className={`toggle-btn ${skills.builtinTools.chatPlusAdapterDebugger ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, chatPlusAdapterDebugger: !prev.builtinTools.chatPlusAdapterDebugger } }))}
+                        title={skills.builtinTools.chatPlusAdapterDebugger ? t("enabledClick") : t("disabledClick")}
+                        aria-label={`${skills.builtinTools.chatPlusAdapterDebugger ? t("enabledClick") : t("disabledClick")} chat-plus-adapter-debugger`}
+                        aria-pressed={skills.builtinTools.chatPlusAdapterDebugger}
+                      />
+                      <div className="built-in-tool-icon"><Bug size={15} /></div>
+                      <div className="built-in-tool-body">
+                        <div className="built-in-tool-name">chat-plus-adapter-debugger</div>
+                        <div className="built-in-tool-desc">{t("builtInChatPlusAdapterDesc")}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </>
+        )}
+
+        {activeSection === "externalSkill" && (
+          <>
+            <section className="config-section skills-redesign-section">
+              <div className="section-heading-row skill-roots-heading-row">
+                <div className="section-heading-block">
+                  <div className="section-heading">{t("skillsConfig")}</div>
+                  <div className="section-description">{t("skillsRootsHint")}</div>
+                </div>
+                <div className="section-heading-actions">
+                  <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={addRootItem}>
+                    {t("addSkillRootPath")}
+                  </button>
+                  <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={() => { void importRootItems(); }}>
+                    {t("importSkillRoots")}
+                  </button>
+                </div>
+              </div>
+
+              {running && (
+                <div className="skills-endpoints">
+                  <div className="endpoint-item">
+                    <span className="endpoint-label">{t("skillSseEndpoint")}</span>
+                    <code className="endpoint-url">{skillSseUrl}</code>
+                    <button className="btn-icon" title={t("copySkillSse")} onClick={() => handleCopy(EXTERNAL_SKILL_SERVER_NAME, "sse", skillSseUrl, "skills-sse")}>
+                      {copied === "skills-sse" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                    </button>
+                  </div>
+                  <div className="endpoint-item">
+                    <span className="endpoint-label">{t("skillHttpEndpoint")}</span>
+                    <code className="endpoint-url">{skillHttpUrl}</code>
+                    <button className="btn-icon" title={t("copySkillHttp")} onClick={() => handleCopy(EXTERNAL_SKILL_SERVER_NAME, "streamable-http", skillHttpUrl, "skills-http")}>
+                      {copied === "skills-http" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="skills-redesign">
                 <SkillDirectoryListEditor
-                  title={t("skillsRoots")}
-                  hint={t("skillsRootsHint")}
+                  title=""
+                  hint=""
                   items={skillRootItems}
                   onAdd={addRootItem}
                   onRemove={requestRemoveRootItem}
@@ -2674,29 +2971,16 @@ function App() {
                   browseLabel={isRemoteMode ? t("uploadFolder") : t("browseFolder")}
                   onToggleEnabled={toggleRootItemEnabled}
                   enableToggle
+                  showAddButton={false}
                   t={t}
                 />
-                {running && skills.enabled && skills.serverName.trim() && (
-                  <div className="server-row-endpoints skills-endpoints">
-                    <div className="endpoint-item">
-                      <span className="endpoint-label">{t("skillSseEndpoint")}</span>
-                      <code className="endpoint-url">{skillSseUrl}</code>
-                      <button className="btn-icon" title={t("copySkillSse")} onClick={() => handleCopy(skills.serverName, "sse", skillSseUrl, "skills-sse")}>
-                        {copied === "skills-sse" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
-                      </button>
-                    </div>
-                    <div className="endpoint-item">
-                      <span className="endpoint-label">{t("skillHttpEndpoint")}</span>
-                      <code className="endpoint-url">{skillHttpUrl}</code>
-                      <button className="btn-icon" title={t("copySkillHttp")} onClick={() => handleCopy(skills.serverName, "streamable-http", skillHttpUrl, "skills-http")}>
-                        {copied === "skills-http" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             </section>
+          </>
+        )}
 
+        {activeSection === "settings" && (
+          <>
             {/* ── 路径守卫配置 ── */}
             <section className="config-section skills-redesign-section">
               <div className="section-heading">{t("skillsPathGuard")}</div>
@@ -2809,19 +3093,70 @@ function App() {
               </div>
             </section>
 
+            <section className="config-section skills-redesign-section">
+              <div className="section-heading">{t("skillsPathGuard")}</div>
+
+              <div className="skills-redesign skills-path-guard-panel">
+                <div className="skills-violation-panel">
+                  <label className="field-label" htmlFor="skills-violation-action">{t("skillsViolationAction")}</label>
+                  <select
+                    id="skills-violation-action"
+                    className="form-input skills-action-select"
+                    value={skills.policy.pathGuard.onViolation}
+                    onChange={(e) =>
+                      setSkills((prev) => ({
+                        ...prev,
+                        policy: {
+                          ...prev.policy,
+                          pathGuard: { ...prev.policy.pathGuard, onViolation: e.target.value as SkillPolicyAction },
+                        },
+                      }))
+                    }
+                  >
+                    <option value="allow">{t("policyAllow")}</option>
+                    <option value="confirm">{t("policyConfirm")}</option>
+                    <option value="deny">{t("policyDeny")}</option>
+                  </select>
+                </div>
+
+                <SkillDirectoryListEditor
+                  title={t("skillsWhitelistDirs")}
+                  hint={t("skillsWhitelistHint")}
+                  items={skillWhitelistItems}
+                  onAdd={addWhitelistItem}
+                  onRemove={requestRemoveWhitelistItem}
+                  onPathChange={updateWhitelistItemPath}
+                  onBrowse={browseWhitelistItem}
+                  showValidation={false}
+                  t={t}
+                />
+              </div>
+            </section>
+
             {/* ── 策略规则 ── */}
             <section className="config-section">
               <div className="section-heading">{t("skillsRules")}</div>
-              <div className="gw-field">
-                <textarea
-                  className="form-textarea skills-rules-textarea"
-                  value={skillsRulesDraft}
-                  onChange={(e) => onRulesDraftChange(e.target.value)}
-                  placeholder={t("skillsRulesHint")}
-                />
-                <span className="json-hint">{t("skillsRulesHint")}</span>
-                {skillsRulesError && <span className="skills-rules-error">{skillsRulesError}</span>}
-              </div>
+              <SkillPolicyRulesEditor
+                rules={skills.policy.rules}
+                form={skillRuleForm}
+                formOpen={skillRuleFormOpen}
+                editingRuleId={editingSkillRuleId}
+                advancedOpen={skillsRulesAdvancedOpen}
+                jsonDraft={skillsRulesDraft}
+                jsonError={skillsRulesError}
+                onStartAdd={startAddSkillRule}
+                onResetToDefault={requestResetSkillRules}
+                onEdit={editSkillRule}
+                onCopy={copySkillRule}
+                onDelete={deleteSkillRule}
+                onCancelForm={cancelSkillRuleForm}
+                onSubmitForm={submitSkillRuleForm}
+                onFormChange={(patch) => setSkillRuleForm((prev) => ({ ...prev, ...patch }))}
+                onToggleAdvanced={() => setSkillsRulesAdvancedOpen((open) => !open)}
+                onJsonChange={onRulesDraftChange}
+                lang={lang}
+                t={t}
+              />
             </section>
 
             {/* ── 待确认命令 ── */}
@@ -2832,6 +3167,7 @@ function App() {
                 busyIds={skillActionBusy}
                 onApprove={(id) => { handleSkillConfirmationAction(id, "approve"); }}
                 onReject={(id) => { handleSkillConfirmationAction(id, "reject"); }}
+                lang={lang}
                 t={t}
               />
             </section>
@@ -2880,8 +3216,9 @@ function App() {
 
       </div>
 
-      {/* ── 底部通知条：配置文件位置 + 快捷入口 ── */}
+      {/* ── 底部通知条：快捷入口 ── */}
       <div className="bottom-bar">
+        <div className="bottom-bar-main" />
         <div className="bottom-bar-main">
           {configPath && (
             <>
@@ -2920,7 +3257,16 @@ function App() {
             title={t("openBlog")}
             onClick={() => { void handleOpenExternalLink(BLOG_URL); }}
           >
-            <Globe size={15} />
+            <Newspaper size={15} />
+          </button>
+          <button
+            type="button"
+            className="bottom-link-btn"
+            aria-label={t("openBilibiliHome")}
+            title={t("openBilibiliHome")}
+            onClick={() => { void handleOpenExternalLink(BILIBILI_URL); }}
+          >
+            <BilibiliLogoIcon size={15} />
           </button>
           <button
             type="button"
@@ -2967,6 +3313,8 @@ function App() {
           )}
         </div>
       </div>
+        </div>
+      </div>
 
       <SkillConfirmationPopup
         open={!!activeSkillPopupItem}
@@ -2975,6 +3323,7 @@ function App() {
         onApprove={(id) => handleSkillConfirmationAction(id, "approve")}
         onReject={(id) => handleSkillConfirmationAction(id, "reject")}
         onLater={deferSkillConfirmationPopup}
+        lang={lang}
         t={t}
       />
 
@@ -2997,6 +3346,25 @@ function App() {
         onConfirm={confirmSkillDirDelete}
         t={t}
       />
+      <ConfirmDialog
+        open={resetConfigConfirmOpen}
+        title={t("resetDefaultConfigTitle")}
+        message={t("resetDefaultConfigMessage")}
+        onCancel={cancelResetDefaultConfig}
+        onConfirm={() => { void confirmResetDefaultConfig(); }}
+        confirmText={t("confirmResetDefaultConfig")}
+        t={t}
+      />
+      <ConfirmDialog
+        open={resetSkillRulesConfirmOpen}
+        title={t("resetSkillRulesTitle")}
+        message={t("resetSkillRulesMessage")}
+        onCancel={cancelResetSkillRules}
+        onConfirm={() => { void confirmResetSkillRules(); }}
+        confirmText={t("confirmResetSkillRules")}
+        t={t}
+      />
+
     </div>
   );
 }
