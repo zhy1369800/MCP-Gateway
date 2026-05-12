@@ -69,6 +69,7 @@ import type {
   SkillConfirmation,
   ServerConnectivityTestResult,
   SkillsConfig,
+  SkillGroupEntry,
   BuiltinToolsConfig,
 } from "./types";
 import { useT, type Lang, type TKey } from "./i18n";
@@ -78,6 +79,7 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SkillConfirmations, SkillConfirmationPopup } from "./components/SkillConfirmations";
 import { SkillDirectoryListEditor } from "./components/SkillDirectoryListEditor";
+import { SkillGroupsEditor } from "./components/SkillGroupsEditor";
 import { SkillPolicyRulesEditor } from "./components/SkillPolicyRulesEditor";
 import { ServerRow } from "./components/ServerRow";
 import { jsonToServers } from "./utils/serverConfig";
@@ -97,7 +99,6 @@ import {
   createSkillRuleId,
   BUILTIN_SKILL_SERVER_NAME,
   ensureSkillsConfig,
-  EXTERNAL_SKILL_SERVER_NAME,
   formToRule,
   isSkillRuleFormValid,
   normalizeSkillsForSubmit,
@@ -108,10 +109,11 @@ import {
 import { isConfirmationAlreadyResolvedError } from "./features/skills/confirmations";
 import {
   createSkillDirectoryItem,
+  createSkillGroup,
   skillDirectoryStatusFromResult,
   type SkillDirKind,
-  type SkillDirStatus,
   type SkillDirectoryItem,
+  type SkillGroup,
 } from "./features/skills/directories";
 import {
   asErrorMessage,
@@ -243,7 +245,7 @@ function App() {
   const [mcpToken, setMcpToken] = useState("");
   const [defaultSkillRules, setDefaultSkillRules] = useState<SkillCommandRule[]>([]);
   const [skills, setSkills] = useState<SkillsConfig>(() => ensureSkillsConfig(undefined, []));
-  const [skillRootItems, setSkillRootItems] = useState<SkillDirectoryItem[]>([]);
+  const [skillGroups, setSkillGroups] = useState<SkillGroup[]>([]);
   const [skillWhitelistItems, setSkillWhitelistItems] = useState<SkillDirectoryItem[]>([]);
   const [skillsRulesDraft, setSkillsRulesDraft] = useState("[]");
   const [skillsRulesError, setSkillsRulesError] = useState<string | null>(null);
@@ -289,6 +291,11 @@ function App() {
   }>({
     open: false, kind: "roots", id: ""
   });
+  const [skillGroupDeleteConfirm, setSkillGroupDeleteConfirm] = useState<{
+    open: boolean;
+    groupId: string;
+    groupName: string;
+  }>({ open: false, groupId: "", groupName: "" });
 
   const [officeCliState, setOfficeCliState] = useState<{
     installed: boolean;
@@ -373,32 +380,6 @@ function App() {
     { key: "chatPlusAdapterDebugger", name: "chat-plus-adapter-debugger", icon: <Bug size={15} />, descKey: "builtInChatPlusAdapterDesc", requiresWhitelist: false },
   ];
 
-  const syncSkillRootsToConfig = useCallback((nextItems: SkillDirectoryItem[]) => {
-    const normalizedEntries = nextItems
-      .map((item) => ({
-        path: item.path.trim(),
-        enabled: item.enabled,
-        status: item.status,
-      }))
-      .filter((item) => item.path.length > 0);
-
-    setSkills((prev) => ({
-      ...prev,
-      roots: normalizedEntries
-        .filter((item) => item.enabled && item.status === "valid")
-        .map((item) => item.path),
-      rootEntries: normalizedEntries.map((item) => ({
-        path: item.path,
-        enabled: item.enabled,
-      })),
-    }));
-  }, []);
-
-  const setRootItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {
-    setSkillRootItems(nextItems);
-    syncSkillRootsToConfig(nextItems);
-  }, [syncSkillRootsToConfig]);
-
   const setWhitelistItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {
     setSkillWhitelistItems(nextItems);
     const nextDirs = nextItems.map((item) => item.path.trim()).filter((item) => item.length > 0);
@@ -419,56 +400,6 @@ function App() {
       },
     }));
   }, []);
-
-  const updateItemStatus = useCallback((kind: "roots" | "whitelist", id: string, pathSnapshot: string, status: SkillDirStatus) => {
-    if (kind === "roots") {
-      setSkillRootItems((prev) => {
-        const next = prev.map((item) => {
-          if (item.id !== id) return item;
-          if (item.path.trim() !== pathSnapshot) return item;
-          return {
-            ...item,
-            status,
-            enabled: status === "valid" || status === "checking" ? item.enabled : false,
-          };
-        });
-        syncSkillRootsToConfig(next);
-        return next;
-      });
-      return;
-    }
-
-    setSkillWhitelistItems((prev) => prev.map((item) => {
-      if (item.id !== id) return item;
-      if (item.path.trim() !== pathSnapshot) return item;
-      return { ...item, status };
-    }));
-  }, [syncSkillRootsToConfig]);
-
-  const runItemValidation = useCallback(async (kind: "roots" | "whitelist", id: string, path: string) => {
-    const normalized = path.trim();
-    if (normalized.length === 0) {
-      updateItemStatus(kind, id, normalized, "idle");
-      return;
-    }
-
-    try {
-      const result = await validateSkillDirectory(normalized);
-      updateItemStatus(kind, id, normalized, skillDirectoryStatusFromResult(result));
-    } catch {
-      updateItemStatus(kind, id, normalized, "error");
-    }
-  }, [updateItemStatus]);
-
-  const triggerItemValidation = useCallback((kind: "roots" | "whitelist", id: string, path: string) => {
-    const normalized = path.trim();
-    if (normalized.length === 0) {
-      updateItemStatus(kind, id, normalized, "idle");
-      return;
-    }
-    updateItemStatus(kind, id, normalized, "checking");
-    void runItemValidation(kind, id, normalized);
-  }, [runItemValidation, updateItemStatus]);
 
   const reloadLocalConfig = useCallback(async () => {
     const [cfg, builtinRules] = await Promise.all([loadLocalConfig(), getDefaultSkillRules().catch(() => [])]);
@@ -495,13 +426,6 @@ function App() {
     const nextSkills = ensureSkillsConfig(cfg.skills, builtinRules);
     setSkills(nextSkills);
     if (nextSkills.builtinTools.officeCliPath) { setOfficeCliCustomPath(nextSkills.builtinTools.officeCliPath); } else { getOfficeCliDefaultPath().then((p) => { setOfficeCliCustomPath(p); setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCliPath: p } })); }).catch(() => {}); }
-    const rootEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
-      ? nextSkills.rootEntries
-      : nextSkills.roots.map((path) => ({ path, enabled: true }));
-    const nextRootItems = (rootEntries.length > 0 ? rootEntries : [{ path: "", enabled: false }]).map((entry) => ({
-      ...createSkillDirectoryItem(entry.path, entry.enabled),
-      status: entry.path.trim().length > 0 ? "checking" as const : "idle" as const,
-    }));
     const nextWhitelistItems = (nextSkills.policy.pathGuard.whitelistDirs.length > 0
       ? nextSkills.policy.pathGuard.whitelistDirs
       : [""]
@@ -509,13 +433,57 @@ function App() {
       ...createSkillDirectoryItem(path, true),
       status: "idle" as const,
     }));
-    setSkillRootItems(nextRootItems);
     setSkillWhitelistItems(nextWhitelistItems);
-    nextRootItems.forEach((item) => {
-      if (item.path.trim().length > 0) {
-        void runItemValidation("roots", item.id, item.path);
+    // Load skill groups from config, migrating legacy rootEntries into a default group
+    let loadedGroups: SkillGroup[];
+    if (Array.isArray(nextSkills.rootGroups) && nextSkills.rootGroups.length > 0) {
+      loadedGroups = nextSkills.rootGroups.map((g) => {
+        const entries = Array.isArray(g.rootEntries) && g.rootEntries.length > 0
+          ? g.rootEntries
+          : (g.roots ?? []).map((p) => ({ path: p, enabled: true }));
+        return createSkillGroup(g.name, entries.map((e) => ({
+          ...createSkillDirectoryItem(e.path, e.enabled),
+          status: e.path.trim().length > 0 ? "checking" as const : "idle" as const,
+        })));
+      });
+    } else {
+      // Migrate: old config has rootEntries/roots but no rootGroups -> create default group
+      const legacyEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
+        ? nextSkills.rootEntries
+        : nextSkills.roots.map((p) => ({ path: p, enabled: true }));
+      const hasLegacyItems = legacyEntries.some((e) => e.path.trim().length > 0);
+      if (hasLegacyItems) {
+        loadedGroups = [createSkillGroup("skills", legacyEntries.map((e) => ({
+          ...createSkillDirectoryItem(e.path, e.enabled),
+          status: e.path.trim().length > 0 ? "checking" as const : "idle" as const,
+        })))];
+      } else {
+        loadedGroups = [];
       }
+    }
+    setSkillGroups(loadedGroups);
+    // Validate group items
+    loadedGroups.forEach((group) => {
+      group.items.forEach((item) => {
+        if (item.path.trim().length > 0) {
+          validateSkillDirectory(item.path.trim()).then((result) => {
+            const status = skillDirectoryStatusFromResult(result);
+            setSkillGroups((prev) => prev.map((g) =>
+              g.id === group.id
+                ? { ...g, items: g.items.map((i) => i.id === item.id ? { ...i, status, enabled: status === "valid" ? i.enabled : false } : i) }
+                : g
+            ));
+          }).catch(() => {
+            setSkillGroups((prev) => prev.map((g) =>
+              g.id === group.id
+                ? { ...g, items: g.items.map((i) => i.id === item.id ? { ...i, status: "error" as const, enabled: false } : i) }
+                : g
+            ));
+          });
+        }
+      });
     });
+
     setSkillsRulesDraft(JSON.stringify(nextSkills.policy.rules, null, 2));
     setSkillsRulesError(null);
     setSkillsRulesAdvancedOpen(false);
@@ -537,7 +505,7 @@ function App() {
       skills: { ...nextSkills, builtinTools: savedBuiltinTools as typeof nextSkills.builtinTools },
     })));
     setConfigLoaded(true);
-  }, [createServerUiIds, runItemValidation]);
+  }, [createServerUiIds]);
 
   // ── 初始加载配置 ──
   useEffect(() => {
@@ -1015,52 +983,13 @@ function App() {
     }
   }, [defaultSkillRules]);
 
-  const addRootItem = () => {
-    setRootItemsAndSync([createSkillDirectoryItem("", false), ...skillRootItems]);
-  };
-
-  const importRootItems = async () => {
-    try {
-      const selected = await pickFolderDialog();
-      if (!selected) return;
-      const discovered = await scanSkillDirectories(selected);
-      if (discovered.length === 0) {
-        setError(t("noSkillRootsFound"));
-        return;
-      }
-
-      const importedPaths = new Set(discovered.map((item) => item.path.trim().toLowerCase()));
-      const importedItems = discovered.map((item) => ({
-        ...createSkillDirectoryItem(item.path, true),
-        status: "valid" as const,
-      }));
-      const existingItems = skillRootItems.filter((item) => {
-        const normalized = item.path.trim().toLowerCase();
-        return normalized.length > 0 && !importedPaths.has(normalized);
-      });
-      setRootItemsAndSync([...importedItems, ...existingItems]);
-      setError(null);
-    } catch (error) {
-      setError(asErrorMessage(error));
-    }
-  };
-
   const addWhitelistItem = () => {
     setWhitelistItemsAndSync([...skillWhitelistItems, createSkillDirectoryItem("", true)]);
-  };
-
-  const removeRootItem = (id: string) => {
-    const next = skillRootItems.filter((item) => item.id !== id);
-    setRootItemsAndSync(next.length > 0 ? next : [createSkillDirectoryItem("", false)]);
   };
 
   const removeWhitelistItem = (id: string) => {
     const next = skillWhitelistItems.filter((item) => item.id !== id);
     setWhitelistItemsAndSync(next.length > 0 ? next : [createSkillDirectoryItem("", true)]);
-  };
-
-  const requestRemoveRootItem = (id: string) => {
-    setSkillDirDeleteConfirm({ open: true, kind: "roots", id });
   };
 
   const requestRemoveWhitelistItem = (id: string) => {
@@ -1074,9 +1003,7 @@ function App() {
       return;
     }
 
-    if (kind === "roots") {
-      removeRootItem(id);
-    } else {
+    if (kind === "whitelist") {
       removeWhitelistItem(id);
     }
     setSkillDirDeleteConfirm({ open: false, kind: "roots", id: "" });
@@ -1086,45 +1013,184 @@ function App() {
     setSkillDirDeleteConfirm({ open: false, kind: "roots", id: "" });
   };
 
-  const updateRootItemPath = (id: string, path: string) => {
-    setRootItemsAndSync(skillRootItems.map((item) =>
-      item.id === id ? { ...item, path, status: "idle", enabled: false } : item
-    ));
-  };
-
   const updateWhitelistItemPath = (id: string, path: string) => {
     setWhitelistItemsAndSync(skillWhitelistItems.map((item) =>
       item.id === id ? { ...item, path, status: "idle" } : item
     ));
   };
 
-  const validateRootItem = (id: string) => {
-    const target = skillRootItems.find((item) => item.id === id);
-    if (!target) return;
-    triggerItemValidation("roots", target.id, target.path);
+
+  // ── Skill Group handlers ──
+  const syncSkillGroupsToConfig = useCallback((groups: SkillGroup[]) => {
+    const rootGroups: SkillGroupEntry[] = groups.map((group) => {
+      const entries = group.items
+        .map((item) => ({ path: item.path.trim(), enabled: item.enabled }))
+        .filter((e) => e.path.length > 0);
+      return {
+        name: group.name,
+        roots: entries.filter((e) => e.enabled).map((e) => e.path),
+        rootEntries: entries,
+      };
+    });
+    // Also flatten all group roots into the top-level roots/rootEntries for backend compatibility
+    const allEntries = rootGroups.flatMap((g) => g.rootEntries ?? []);
+    const allRoots = rootGroups.flatMap((g) => g.roots);
+    setSkills((prev) => ({ ...prev, roots: allRoots, rootEntries: allEntries, rootGroups }));
+  }, []);
+
+  const setGroupsAndSync = useCallback((nextGroups: SkillGroup[]) => {
+    setSkillGroups(nextGroups);
+    syncSkillGroupsToConfig(nextGroups);
+  }, [syncSkillGroupsToConfig]);
+
+  const addSkillGroup = () => {
+    const index = skillGroups.length + 1;
+    const name = `skills${index > 1 ? index : ""}`;
+    setGroupsAndSync([...skillGroups, createSkillGroup(name, [])]);
   };
 
-  const browseRootItem = async (id: string) => {
-    const target = skillRootItems.find((item) => item.id === id);
-    if (!target) return;
+  const removeSkillGroup = (groupId: string) => {
+    const group = skillGroups.find((g) => g.id === groupId);
+    if (!group) return;
+    setSkillGroupDeleteConfirm({ open: true, groupId, groupName: group.name });
+  };
+
+  const confirmSkillGroupDelete = () => {
+    const { groupId } = skillGroupDeleteConfirm;
+    setGroupsAndSync(skillGroups.filter((g) => g.id !== groupId));
+    setSkillGroupDeleteConfirm({ open: false, groupId: "", groupName: "" });
+  };
+
+  const cancelSkillGroupDelete = () => {
+    setSkillGroupDeleteConfirm({ open: false, groupId: "", groupName: "" });
+  };
+
+  const renameSkillGroup = (groupId: string, name: string) => {
+    // Don't allow empty group names - keep the old name if empty
+    if (!name.trim()) return;
+    setGroupsAndSync(skillGroups.map((g) => g.id === groupId ? { ...g, name: name.trim() } : g));
+  };
+
+  const addGroupItem = (groupId: string) => {
+    setGroupsAndSync(skillGroups.map((g) =>
+      g.id === groupId ? { ...g, items: [createSkillDirectoryItem("", false), ...g.items] } : g
+    ));
+  };
+
+  const removeGroupItem = (groupId: string, itemId: string) => {
+    setGroupsAndSync(skillGroups.map((g) =>
+      g.id === groupId ? { ...g, items: g.items.filter((i) => i.id !== itemId) } : g
+    ));
+  };
+
+  const updateGroupItemPath = (groupId: string, itemId: string, path: string) => {
+    setGroupsAndSync(skillGroups.map((g) =>
+      g.id === groupId
+        ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, path, status: "idle" as const, enabled: false } : i) }
+        : g
+    ));
+  };
+
+  // Helper: validate a group item path and update its status
+  const runGroupItemValidation = (groupId: string, itemId: string, path: string) => {
+    const normalized = path.trim();
+    if (!normalized) return;
+    setSkillGroups((prev) => prev.map((g) =>
+      g.id === groupId
+        ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, status: "checking" as const } : i) }
+        : g
+    ));
+    validateSkillDirectory(normalized).then((result) => {
+      const status = skillDirectoryStatusFromResult(result);
+      setSkillGroups((prev) => {
+        const next = prev.map((g) =>
+          g.id === groupId
+            ? { ...g, items: g.items.map((i) => {
+                if (i.id !== itemId || i.path.trim() !== normalized) return i;
+                return { ...i, status, enabled: status === "valid" ? i.enabled : false };
+              }) }
+            : g
+        );
+        syncSkillGroupsToConfig(next);
+        return next;
+      });
+    }).catch(() => {
+      setSkillGroups((prev) => {
+        const next = prev.map((g) =>
+          g.id === groupId
+            ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, status: "error" as const, enabled: false } : i) }
+            : g
+        );
+        syncSkillGroupsToConfig(next);
+        return next;
+      });
+    });
+  };
+
+  const validateGroupItem = (groupId: string, itemId: string) => {
+    const group = skillGroups.find((g) => g.id === groupId);
+    const item = group?.items.find((i) => i.id === itemId);
+    if (!item) return;
+    runGroupItemValidation(groupId, itemId, item.path);
+  };
+
+  const browseGroupItem = async (groupId: string, itemId: string) => {
+    const group = skillGroups.find((g) => g.id === groupId);
+    const item = group?.items.find((i) => i.id === itemId);
+    if (!item) return;
     try {
-      const selected = await pickFolderDialog(target.path.trim() || undefined);
+      const selected = await pickFolderDialog(item.path.trim() || undefined);
       if (!selected) return;
-      setRootItemsAndSync(skillRootItems.map((item) =>
-        item.id === id ? { ...item, path: selected, status: "checking", enabled: false } : item
-      ));
-      void runItemValidation("roots", id, selected);
+      setSkillGroups((prev) => {
+        const next = prev.map((g) =>
+          g.id === groupId
+            ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, path: selected, status: "checking" as const, enabled: false } : i) }
+            : g
+        );
+        syncSkillGroupsToConfig(next);
+        return next;
+      });
+      runGroupItemValidation(groupId, itemId, selected);
     } catch (error) {
       setError(String(error));
     }
   };
 
-  const toggleRootItemEnabled = (id: string) => {
-    setRootItemsAndSync(skillRootItems.map((item) => {
-      if (item.id !== id) return item;
-      if (item.status !== "valid") return { ...item, enabled: false };
-      return { ...item, enabled: !item.enabled };
-    }));
+  const toggleGroupItemEnabled = (groupId: string, itemId: string) => {
+    setGroupsAndSync(skillGroups.map((g) =>
+      g.id === groupId
+        ? { ...g, items: g.items.map((i) => {
+            if (i.id !== itemId) return i;
+            if (i.status !== "valid") return { ...i, enabled: false };
+            return { ...i, enabled: !i.enabled };
+          }) }
+        : g
+    ));
+  };
+
+  const importToGroup = async (groupId: string) => {
+    try {
+      const selected = await pickFolderDialog();
+      if (!selected) return;
+      const discovered = await scanSkillDirectories(selected);
+      if (discovered.length === 0) {
+        setError(t("noSkillRootsFound"));
+        return;
+      }
+      const importedItems = discovered.map((item) => ({
+        ...createSkillDirectoryItem(item.path, true),
+        status: "valid" as const,
+      }));
+      setGroupsAndSync(skillGroups.map((g) => {
+        if (g.id !== groupId) return g;
+        const existingPaths = new Set(g.items.map((i) => i.path.trim().toLowerCase()));
+        const newItems = importedItems.filter((i) => !existingPaths.has(i.path.trim().toLowerCase()));
+        return { ...g, items: [...newItems, ...g.items] };
+      }));
+      setError(null);
+    } catch (error) {
+      setError(asErrorMessage(error));
+    }
   };
 
   const browseWhitelistItem = async (id: string) => {
@@ -1446,8 +1512,6 @@ function App() {
   }, [draggedServerIndex, findServerDropTarget, resetServerDragState, serverUiIds, servers, updateDraggedServerPreview]);
 
   const baseUrl = listen.startsWith("http") ? listen : `http://${listen}`;
-  const skillHttpUrl = `${baseUrl}${httpPath}/${EXTERNAL_SKILL_SERVER_NAME}`;
-  const skillSseUrl = `${baseUrl}${ssePath}/${EXTERNAL_SKILL_SERVER_NAME}`;
   const builtinSkillHttpUrl = `${baseUrl}${httpPath}/${BUILTIN_SKILL_SERVER_NAME}`;
   const builtinSkillSseUrl = `${baseUrl}${ssePath}/${BUILTIN_SKILL_SERVER_NAME}`;
   const hasValidWhitelistDir = skills.policy.pathGuard.whitelistDirs.some((d) => d.trim().length > 0);
@@ -2356,47 +2420,30 @@ function App() {
                   <div className="section-description">{t("skillsRootsHint")}</div>
                 </div>
                 <div className="section-heading-actions">
-                  <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={addRootItem}>
-                    {t("addSkillRootPath")}
-                  </button>
-                  <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={() => { void importRootItems(); }}>
-                    {t("importSkillRoots")}
+                  <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={addSkillGroup}>
+                    {t("skillGroupAdd")}
                   </button>
                 </div>
               </div>
 
-              {running && (
-                <div className="skills-endpoints">
-                  <div className="endpoint-item">
-                    <span className="endpoint-label">{t("skillSseEndpoint")}</span>
-                    <code className="endpoint-url">{skillSseUrl}</code>
-                    <button className="btn-icon" title={t("copySkillSse")} onClick={() => handleCopy(EXTERNAL_SKILL_SERVER_NAME, "sse", skillSseUrl, "skills-sse")}>
-                      {copied === "skills-sse" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
-                    </button>
-                  </div>
-                  <div className="endpoint-item">
-                    <span className="endpoint-label">{t("skillHttpEndpoint")}</span>
-                    <code className="endpoint-url">{skillHttpUrl}</code>
-                    <button className="btn-icon" title={t("copySkillHttp")} onClick={() => handleCopy(EXTERNAL_SKILL_SERVER_NAME, "streamable-http", skillHttpUrl, "skills-http")}>
-                      {copied === "skills-http" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
-                    </button>
-                  </div>
-                </div>
-              )}
-
               <div className="skills-redesign">
-                <SkillDirectoryListEditor
-                  title=""
-                  hint=""
-                  items={skillRootItems}
-                  onAdd={addRootItem}
-                  onRemove={requestRemoveRootItem}
-                  onPathChange={updateRootItemPath}
-                  onValidate={validateRootItem}
-                  onBrowse={browseRootItem}
-                  onToggleEnabled={toggleRootItemEnabled}
-                  enableToggle
-                  showAddButton={false}
+                <SkillGroupsEditor
+                  groups={skillGroups}
+                  onRemoveGroup={removeSkillGroup}
+                  onRenameGroup={renameSkillGroup}
+                  onAddItem={addGroupItem}
+                  onRemoveItem={removeGroupItem}
+                  onPathChange={updateGroupItemPath}
+                  onValidate={validateGroupItem}
+                  onBrowse={browseGroupItem}
+                  onToggleEnabled={toggleGroupItemEnabled}
+                  onImportToGroup={(gid) => { void importToGroup(gid); }}
+                  onCopy={handleCopy}
+                  copied={copied}
+                  running={running}
+                  baseUrl={baseUrl}
+                  ssePath={ssePath}
+                  httpPath={httpPath}
                   t={t}
                 />
               </div>
@@ -2656,6 +2703,14 @@ function App() {
         onCancel={cancelResetSkillRules}
         onConfirm={() => { void confirmResetSkillRules(); }}
         confirmText={t("confirmResetSkillRules")}
+        t={t}
+      />
+      <ConfirmDialog
+        open={skillGroupDeleteConfirm.open}
+        title={t("confirmDeleteTitle")}
+        message={t("skillGroupDeleteConfirmMsg").replace("{name}", skillGroupDeleteConfirm.groupName || t("skillGroupDefault"))}
+        onCancel={cancelSkillGroupDelete}
+        onConfirm={confirmSkillGroupDelete}
         t={t}
       />
 

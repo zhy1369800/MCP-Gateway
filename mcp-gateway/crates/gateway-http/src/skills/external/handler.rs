@@ -186,11 +186,38 @@ impl SkillsService {
         }
     }
 
+    /// Resolve the effective roots for a given server_name.
+    /// If it matches a group, use that group's roots; otherwise use the top-level roots.
+    fn resolve_roots_for_server(config: &GatewayConfig, server_name: &str) -> Vec<String> {
+        for group in &config.skills.root_groups {
+            if !group.name.is_empty() && format!("__{}__", group.name) == server_name {
+                return group.roots.clone();
+            }
+        }
+        config.skills.roots.clone()
+    }
+
+    async fn discover_skills_for_server(
+        &self,
+        config: &GatewayConfig,
+        server_name: &str,
+    ) -> Result<Vec<DiscoveredSkill>, AppError> {
+        let roots = Self::resolve_roots_for_server(config, server_name);
+        self.discover_skills_for_roots(roots).await
+    }
+
     async fn discover_skills(
         &self,
         skills_config: &SkillsConfig,
     ) -> Result<Vec<DiscoveredSkill>, AppError> {
         let roots = skills_config.roots.clone();
+        self.discover_skills_for_roots(roots).await
+    }
+
+    async fn discover_skills_for_roots(
+        &self,
+        roots: Vec<String>,
+    ) -> Result<Vec<DiscoveredSkill>, AppError> {
         let signature = roots_signature(&roots);
 
         {

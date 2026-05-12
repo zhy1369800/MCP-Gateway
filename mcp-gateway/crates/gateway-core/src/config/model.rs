@@ -101,6 +101,26 @@ impl Default for GatewayConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct SkillRootEntry {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillGroupEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_entries: Vec<SkillRootEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillsConfig {
     #[serde(default = "default_skills_server_name", skip_serializing)]
     pub server_name: String,
@@ -108,6 +128,10 @@ pub struct SkillsConfig {
     pub builtin_server_name: String,
     #[serde(default = "default_skills_roots")]
     pub roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_entries: Vec<SkillRootEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_groups: Vec<SkillGroupEntry>,
     #[serde(default)]
     pub policy: SkillsPolicyConfig,
     #[serde(default)]
@@ -122,6 +146,8 @@ impl Default for SkillsConfig {
             server_name: default_skills_server_name(),
             builtin_server_name: default_builtin_skills_server_name(),
             roots: default_skills_roots(),
+            root_entries: Vec::new(),
+            root_groups: Vec::new(),
             policy: SkillsPolicyConfig::default(),
             execution: SkillsExecutionConfig::default(),
             builtin_tools: BuiltinToolsConfig::default(),
