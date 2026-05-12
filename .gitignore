@@ -10,3 +10,5 @@ dist
 
 # CI/downloaded optional tool payloads
 mcp-gateway/.bundle-tools
+
+.claude/

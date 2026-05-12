@@ -73,7 +73,10 @@ Bundled tools currently include:
 - `multi_edit_file`
 - `task-planning`
 - `chrome-cdp`
-- `chat-plus-adapter-debugger`
+- `chat-plus-adapter-debugger` (business-specific)
+- `officecli`
+
+`chat-plus-adapter-debugger` targets the Chat Plus adapter workflow; keep it off for general-purpose agents.
 
 This makes it possible to build agent-like workflows on top of normal MCP clients: inspect a project, read documentation, edit code, run commands, test behavior, and control a browser, while still routing everything through MCP.
 

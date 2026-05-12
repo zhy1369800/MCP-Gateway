@@ -66,11 +66,19 @@ impl SkillsService {
                     (discovered, summaries)
                 };
                 let tools = if is_builtin {
-                    Value::Array(builtin_tool_definitions(
+                    let mut defs = builtin_tool_definitions(
                         std::env::consts::OS,
                         &Utc::now().to_rfc3339(),
                         &config.skills.builtin_tools,
-                    ))
+                    );
+                    // If officecli is enabled in config but binary is not callable, hide it
+                    if config.skills.builtin_tools.office_cli && !check_officecli_available(&config.skills.builtin_tools) {
+                        defs.retain(|def| {
+                            def.get("name").and_then(Value::as_str)
+                                != Some(BuiltinTool::OfficeCli.name())
+                        });
+                    }
+                    Value::Array(defs)
                 } else {
                     external_skill_tool_definitions(&discovered)
                 };
@@ -263,6 +271,40 @@ impl SkillsService {
             warnings: data.warnings,
         })
         .await;
+    }
+
+    /// Acquire an async lock for each path in `paths`, returning one owned
+    /// guard per unique path. Locks are acquired in a deterministic key order
+    /// (lowercase on Windows to avoid case-insensitive aliasing) so concurrent
+    /// callers can't deadlock against each other.
+    async fn acquire_file_locks(
+        &self,
+        paths: &[PathBuf],
+    ) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        let mut keys: Vec<String> = paths
+            .iter()
+            .map(|p| file_lock_key(p))
+            .collect();
+        keys.sort();
+        keys.dedup();
+
+        let mutexes: Vec<Arc<tokio::sync::Mutex<()>>> = {
+            let mut table = self.file_locks.lock().expect("file_locks mutex poisoned");
+            keys.iter()
+                .map(|key| {
+                    table
+                        .entry(key.clone())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone()
+                })
+                .collect()
+        };
+
+        let mut guards = Vec::with_capacity(mutexes.len());
+        for mutex in mutexes {
+            guards.push(mutex.lock_owned().await);
+        }
+        guards
     }
 
     async fn execute_tool_call(

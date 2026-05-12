@@ -174,7 +174,24 @@ impl SkillsService {
             PolicyDecision::Allow => {}
         }
 
-        match read_text_file_window(&target, args.offset, args.limit) {
+        // Read side of the same per-path lock used by multi_edit_file. This
+        // stops read_file from observing a half-written file while another
+        // tool call is mid-write. Concurrent reads of different files are
+        // still free to proceed in parallel.
+        let _file_locks = self.acquire_file_locks(std::slice::from_ref(&target)).await;
+
+        // Move the blocking fs::metadata / fs::read_to_string work off the
+        // async runtime so it does not stall other tasks sharing the thread.
+        let target_for_read = target.clone();
+        let read_result = tokio::task::spawn_blocking(move || {
+            read_text_file_window(&target_for_read, args.offset, args.limit)
+        })
+        .await
+        .map_err(|join_error| {
+            AppError::Internal(format!("read_file worker panicked: {join_error}"))
+        })?;
+
+        match read_result {
             Ok(output) => {
                 let text = if output.empty {
                     format!(
@@ -227,6 +244,7 @@ impl SkillsService {
                 ))
             }
             Err(error) => {
+                let error_message = error.to_string();
                 self.record_tool_event_data(
                     &call_id,
                     BuiltinTool::ReadFile.name(),
@@ -234,20 +252,31 @@ impl SkillsService {
                     SkillToolEventData {
                         status: Some("failed".to_string()),
                         affected_paths: vec![normalize_display_path(&target)],
-                        text: Some(error.to_string()),
+                        text: Some(error_message.clone()),
                         ..SkillToolEventData::default()
                     },
                 )
                 .await;
-                Ok(tool_error(
-                    error.to_string(),
+                let kind = ReadFailureKind::classify(&error_message);
+                let reminder = self
+                    .planning_read_failure_reminder(
+                        config,
+                        planning_scope,
+                        args.planning_id.as_deref(),
+                        kind,
+                    )
+                    .await;
+                Ok(tool_error_with_failure_reminder(
+                    error_message.clone(),
                     json!({
                         "status": "failed",
                         "tool": BuiltinTool::ReadFile.name(),
                         "path": normalize_display_path(&target),
                         "cwd": normalize_display_path(&cwd),
-                        "message": error.to_string()
+                        "message": error_message
                     }),
+                    "readFailureReminder",
+                    reminder,
                 ))
             }
         }

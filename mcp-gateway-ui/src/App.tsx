@@ -25,6 +25,10 @@ import {
   Plug,
   Pencil,
   RotateCcw,
+  Download,
+  FolderOpen,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
@@ -47,6 +51,13 @@ import {
   focusMainWindowForSkillConfirmation,
 } from "./localConfig";
 import { ApiClient } from "./api";
+import {
+  checkOfficeCli,
+  installOfficeCli,
+  listenOfficeCliProgress,
+  getOfficeCliDefaultPath,
+  type OfficeCliInstallResult,
+} from "./tauri/officecli";
 import { usePolling, type PollOutcome } from "./hooks/usePolling";
 import type {
   GatewayConfig,
@@ -58,9 +69,10 @@ import type {
   SkillConfirmation,
   ServerConnectivityTestResult,
   SkillsConfig,
+  BuiltinToolsConfig,
   TerminalTaskSnapshot,
 } from "./types";
-import { useT, type Lang } from "./i18n";
+import { useT, type Lang, type TKey } from "./i18n";
 import JsonEditor from "./components/JsonEditor";
 import { useUpdateCheck } from "./hooks/useUpdateCheck";
 import { UpdateBanner } from "./components/UpdateBanner";
@@ -379,6 +391,42 @@ function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: {
       <path d="M15.3 11.3h.01" />
       <path d="M9 15.1c1.45.9 4.55.9 6 0" />
     </svg>
+  );
+}
+
+function OfficeLogoIcon({ size = 15 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <path d="M8 8h2l2 4-2 4H8" />
+      <path d="M14 8v8" />
+      <path d="M14 8h2" />
+      <path d="M14 12h1.5" />
+      <path d="M14 16h2" />
+    </svg>
+  );
+}
+
+// ── 工具函数：将文本中的 URL 渲染为可点击链接 ──
+function renderTextWithLinks(text: string, onLinkClick: (url: string) => void) {
+  const urlRegex = /(https?:\/\/[^\s)]+)/g;
+  const parts = text.split(urlRegex);
+  return parts.map((part, i) =>
+    urlRegex.test(part) ? (
+      <a key={i} href="#" className="officecli-error-link" onClick={(e) => { e.preventDefault(); onLinkClick(part); }}>{part}</a>
+    ) : (
+      <span key={i}>{part}</span>
+    )
   );
 }
 
@@ -924,6 +972,26 @@ function App() {
     open: false, kind: "roots", id: ""
   });
 
+  const [officeCliState, setOfficeCliState] = useState<{
+    installed: boolean;
+    version?: string;
+    error?: string;
+    installing?: boolean;
+    checking?: boolean;
+    releaseUrl?: string;
+    /** 本次检测真实命中的绝对路径（不是 config 里可能过时的值） */
+    path?: string;
+  } | null>(null);
+  const [showOfficeCliPath, setShowOfficeCliPath] = useState(false);
+  const [officeCliCustomPath, setOfficeCliCustomPath] = useState("");
+  const [installProgress, setInstallProgress] = useState(0);
+  const [showReinstallConfirm, setShowReinstallConfirm] = useState(false);
+  const [showShellEnvPopover, setShowShellEnvPopover] = useState(false);
+  const [shellEnvDraftKey, setShellEnvDraftKey] = useState("");
+  const [shellEnvDraftValue, setShellEnvDraftValue] = useState("");
+  /** 安装成功后跳过 useEffect 重复 check 的标记 */
+  const skipNextOfficeCliCheckRef = useRef(false);
+
   const knownPendingIdsRef = useRef<Set<string>>(new Set());
   const dismissedPopupIdsRef = useRef<Set<string>>(new Set());
   const pendingFetchSeqRef = useRef(0);
@@ -979,6 +1047,24 @@ function App() {
     ? draggedServerHeight + SERVER_LIST_GAP_PX
     : 0;
 
+  // Built-in tool definitions. `requiresWhitelist` controls whether the toggle
+  // is gated behind having at least one valid whitelist directory configured.
+  // When adding a new tool, just append an entry here.
+  const builtinToolDefs: {
+    key: keyof BuiltinToolsConfig;
+    name: string;
+    icon: React.ReactNode;
+    descKey: TKey;
+    requiresWhitelist: boolean;
+  }[] = [
+    { key: "readFile", name: "read_file", icon: <FileText size={15} />, descKey: "builtInReadFileDesc", requiresWhitelist: true },
+    { key: "shellCommand", name: "shell_command", icon: <Terminal size={15} />, descKey: "builtInShellDesc", requiresWhitelist: true },
+    { key: "multiEditFile", name: "multi_edit_file", icon: <FilePenLine size={15} />, descKey: "builtInMultiEditDesc", requiresWhitelist: true },
+    { key: "taskPlanning", name: "task-planning", icon: <ListChecks size={15} />, descKey: "builtInTaskPlanningDesc", requiresWhitelist: false },
+    { key: "chromeCdp", name: "chrome-cdp", icon: <Chrome size={15} />, descKey: "builtInChromeCdpDesc", requiresWhitelist: false },
+    { key: "chatPlusAdapterDebugger", name: "chat-plus-adapter-debugger", icon: <Bug size={15} />, descKey: "builtInChatPlusAdapterDesc", requiresWhitelist: false },
+  ];
+
   const syncSkillRootsToConfig = useCallback((nextItems: SkillDirectoryItem[]) => {
     const normalizedEntries = nextItems
       .map((item) => ({
@@ -1007,13 +1093,20 @@ function App() {
 
   const setWhitelistItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {
     setSkillWhitelistItems(nextItems);
+    const nextDirs = nextItems.map((item) => item.path.trim()).filter((item) => item.length > 0);
+    const hasAny = nextDirs.length > 0;
     setSkills((prev) => ({
       ...prev,
+      builtinTools: hasAny ? prev.builtinTools : {
+        ...prev.builtinTools,
+        ...Object.fromEntries(builtinToolDefs.filter((td) => td.requiresWhitelist).map((td) => [td.key, false])),
+        officeCli: false,
+      },
       policy: {
         ...prev.policy,
         pathGuard: {
-        ...prev.policy.pathGuard,
-          whitelistDirs: nextItems.map((item) => item.path.trim()).filter((item) => item.length > 0),
+          ...prev.policy.pathGuard,
+          whitelistDirs: nextDirs,
         },
       },
     }));
@@ -1095,6 +1188,7 @@ function App() {
     setMcpToken(nextMcpToken);
     const nextSkills = ensureSkillsConfig(cfg.skills, builtinRules);
     setSkills(nextSkills);
+    if (nextSkills.builtinTools.officeCliPath) { setOfficeCliCustomPath(nextSkills.builtinTools.officeCliPath); } else { getOfficeCliDefaultPath().then((p) => { setOfficeCliCustomPath(p); setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCliPath: p } })); }).catch(() => {}); }
     const rootEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
       ? nextSkills.rootEntries
       : nextSkills.roots.map((path) => ({ path, enabled: true }));
@@ -1125,6 +1219,7 @@ function App() {
     setJsonText(buildServersJson(nextServers));
     setJsonError(null);
     setServersMode("visual");
+    const { officeCliPath: _ocpSaved, ...savedBuiltinTools } = nextSkills.builtinTools;
     setSavedConfigFingerprint(createEditableConfigFingerprint(createEditableConfigSnapshot({
       servers: nextServers,
       listen: nextListen,
@@ -1133,7 +1228,7 @@ function App() {
       httpPath: nextHttpPath,
       adminToken: nextAdminToken,
       mcpToken: nextMcpToken,
-      skills: nextSkills,
+      skills: { ...nextSkills, builtinTools: savedBuiltinTools as typeof nextSkills.builtinTools },
     })));
     setConfigLoaded(true);
   }, [createServerUiIds, runItemValidation]);
@@ -1737,7 +1832,7 @@ function App() {
     if (!isSkillRuleFormValid(skillRuleForm)) return;
     const nextRules = editingSkillRuleId
       ? skills.policy.rules.map((rule) =>
-          rule.id === editingSkillRuleId ? formToRule(skillRuleForm, rule.id) : rule
+          rule.id === editingSkillRuleId ? formToRule(skillRuleForm, rule.id, rule) : rule
         )
       : [...skills.policy.rules, formToRule(skillRuleForm, createSkillRuleId(skills.policy.rules))];
     syncSkillRules(nextRules);
@@ -1986,6 +2081,9 @@ function App() {
     }
     const compareServers = serversMode === "json" ? parsedJsonServers : servers;
 
+    const skillsForFingerprint = normalizeSkillsForSubmit(skills, defaultSkillRules);
+    // officeCliPath is auto-persisted on verify/install, exclude from dirty check
+    const { officeCliPath: _ocp, ...builtinToolsForFp } = skillsForFingerprint.builtinTools;
     return createEditableConfigFingerprint(createEditableConfigSnapshot({
       servers: compareServers ?? servers,
       listen,
@@ -1994,7 +2092,7 @@ function App() {
       httpPath,
       adminToken,
       mcpToken,
-      skills: normalizeSkillsForSubmit(skills, defaultSkillRules),
+      skills: { ...skillsForFingerprint, builtinTools: builtinToolsForFp as typeof skillsForFingerprint.builtinTools },
     }));
   }, [servers, serversMode, parsedJsonServers, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills, defaultSkillRules]);
 
@@ -2034,7 +2132,10 @@ function App() {
     cfg.security = snapshot.security;
     cfg.skills = snapshot.skills;
     await saveLocalConfig(cfg);
-    return createEditableConfigFingerprint(snapshot);
+    // Exclude officeCliPath from fingerprint (auto-persisted separately)
+    const { officeCliPath: _ocpPersist, ...persistBuiltinTools } = snapshot.skills.builtinTools;
+    const fpSnapshot = { ...snapshot, skills: { ...snapshot.skills, builtinTools: persistBuiltinTools as typeof snapshot.skills.builtinTools } };
+    return createEditableConfigFingerprint(fpSnapshot);
   };
 
   const ensureSkillsAccessReady = () => true;
@@ -2281,6 +2382,8 @@ function App() {
   const skillSseUrl = `${baseUrl}${ssePath}/${EXTERNAL_SKILL_SERVER_NAME}`;
   const builtinSkillHttpUrl = `${baseUrl}${httpPath}/${BUILTIN_SKILL_SERVER_NAME}`;
   const builtinSkillSseUrl = `${baseUrl}${ssePath}/${BUILTIN_SKILL_SERVER_NAME}`;
+  const hasValidWhitelistDir = skills.policy.pathGuard.whitelistDirs.some((d) => d.trim().length > 0);
+
 
   const runtimeLoading = !localRuntimeSummary && !localRuntimeDetectFailed;
   const systemDisplayValue = localRuntimeSummary?.system
@@ -2326,6 +2429,150 @@ function App() {
     systemDisplayValue,
     t,
   ]);
+
+  // OfficeCLI detection — check the configured path (= input box value)
+  useEffect(() => {
+    if (skipNextOfficeCliCheckRef.current) {
+      skipNextOfficeCliCheckRef.current = false;
+      return;
+    }
+    const pathToCheck = skills.builtinTools.officeCliPath?.trim() || undefined;
+    if (!pathToCheck) return;
+    let cancelled = false;
+    async function check() {
+      setOfficeCliState((prev) => prev === null ? { installed: false, checking: true } : prev);
+      try {
+        const result = await checkOfficeCli(pathToCheck);
+        if (cancelled) return;
+        if (result.installed) {
+          setOfficeCliState({
+            installed: true,
+            version: result.version ?? undefined,
+            path: result.path ?? undefined,
+          });
+        } else {
+          setOfficeCliState({ installed: false });
+        }
+      } catch {
+        if (!cancelled) setOfficeCliState({ installed: false });
+      }
+    }
+    check();
+    return () => { cancelled = true; };
+  }, [skills.builtinTools.officeCliPath]);
+
+  const handleReinstallOfficeCli = async () => {
+    setShowReinstallConfirm(false);
+    await handleInstallOfficeCli();
+  };
+
+  const handleInstallOfficeCli = async () => {
+    if (officeCliState?.installing) return; // 防并发
+    setOfficeCliState({ installed: false, installing: true, error: undefined });
+    setInstallProgress(0);
+
+    // 订阅真实下载进度
+    const unlisten = await listenOfficeCliProgress((p) => {
+      setInstallProgress(p.percent);
+    });
+
+    let res: OfficeCliInstallResult;
+    try {
+      res = await installOfficeCli();
+    } catch (e) {
+      unlisten();
+      setOfficeCliState({
+        installed: false,
+        installing: false,
+        error: String(e),
+        releaseUrl: "https://github.com/iOfficeAI/OfficeCLI/releases/latest",
+      });
+      return;
+    }
+    unlisten();
+
+    if (!res.ok) {
+      setOfficeCliState({
+        installed: false,
+        installing: false,
+        error: res.error || t("builtInOfficeCliFailed"),
+        releaseUrl: res.releaseUrl,
+      });
+      setShowOfficeCliPath(true); // 自动展开手动路径输入，方便用户手动装完后填
+      return;
+    }
+
+    setInstallProgress(100);
+    // 再跑一次 check 拿权威版本号；同时把真实路径回写 config
+    const verify = await checkOfficeCli(res.installedPath ?? undefined);
+    if (verify.installed) {
+      const resolved = verify.path ?? res.installedPath ?? skills.builtinTools.officeCliPath ?? "";
+      setOfficeCliState({
+        installed: true,
+        version: verify.version ?? res.version ?? undefined,
+        path: resolved,
+      });
+      skipNextOfficeCliCheckRef.current = true;
+      setOfficeCliCustomPath(resolved);
+      setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCliPath: resolved } }));
+      try {
+        const cfg = await loadLocalConfig();
+        if (cfg.skills?.builtinTools) { cfg.skills.builtinTools.officeCliPath = resolved; }
+        await saveLocalConfig(cfg);
+      } catch { /* best-effort */ }
+    } else {
+      setOfficeCliState({
+        installed: false,
+        installing: false,
+        error: t("builtInOfficeCliFailed"),
+        releaseUrl: res.releaseUrl,
+      });
+      setShowOfficeCliPath(true);
+    }
+  };
+
+  const handleVerifyOfficeCliPath = async () => {
+    const p = officeCliCustomPath.trim();
+    if (!p) return;
+    // 点勾即落盘，不管检测成功与否
+    skipNextOfficeCliCheckRef.current = true;
+    setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCliPath: p } }));
+    try {
+      const cfg = await loadLocalConfig();
+      if (cfg.skills?.builtinTools) { cfg.skills.builtinTools.officeCliPath = p; }
+      await saveLocalConfig(cfg);
+    } catch { /* best-effort */ }
+    // 然后执行检测
+    setOfficeCliState(prev => ({ ...(prev || { installed: false }), installing: true, error: undefined }));
+    try {
+      const result = await checkOfficeCli(p);
+      if (result.installed) {
+        const resolved = result.path ?? p;
+        if (resolved !== p) {
+          setOfficeCliCustomPath(resolved);
+          setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCliPath: resolved } }));
+          try {
+            const cfg2 = await loadLocalConfig();
+            if (cfg2.skills?.builtinTools) { cfg2.skills.builtinTools.officeCliPath = resolved; }
+            await saveLocalConfig(cfg2);
+          } catch { /* best-effort */ }
+        }
+        setOfficeCliState({
+          installed: true,
+          version: result.version ?? undefined,
+          error: undefined,
+          path: resolved,
+        });
+      } else {
+        setOfficeCliState({
+          installed: false,
+          error: result.error || t("builtInOfficeCliNotInstalled"),
+        });
+      }
+    } catch (e) {
+      setOfficeCliState({ installed: false, error: String(e) });
+    }
+  };
 
   const handleCopy = async (name: string, type: EndpointTransportType, url: string, key: string) => {
     const snippet = createMcpClientEntryJson(name, type, url, mcpToken);
@@ -2830,88 +3077,231 @@ function App() {
               <div className="skills-redesign">
                 <div className="built-in-tools-panel">
                   <div className="built-in-tools-grid">
-                    <div className="built-in-tool">
+                    {builtinToolDefs.map((tool) => {
+                      const isGated = tool.requiresWhitelist && !hasValidWhitelistDir;
+                      const isOn = !isGated && skills.builtinTools[tool.key] === true;
+                      const shellEnvCount = Object.keys(skills.builtinTools.shellEnv ?? {}).length;
+                      return (
+                        <div className="built-in-tool" key={tool.key}>
+                          <button
+                            className={`toggle-btn ${isOn ? "toggle-on" : "toggle-off"}`}
+                            onClick={() => { if (isGated) return; setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, [tool.key]: !prev.builtinTools[tool.key] } })); }}
+                            disabled={isGated}
+                            title={isGated ? t("skillsWhitelistHint") : isOn ? t("enabledClick") : t("disabledClick")}
+                            aria-label={`${isOn ? t("enabledClick") : t("disabledClick")} ${tool.name}`}
+                            aria-pressed={isOn}
+                          />
+                          <div className="built-in-tool-icon">{tool.icon}</div>
+                          <div className="built-in-tool-body">
+                            <div className="built-in-tool-name">
+                              {tool.name}
+                              {tool.key === "shellCommand" && (
+                                <span className="shell-env-wrap">
+                                  <button
+                                    className={`btn-icon shell-env-btn${showShellEnvPopover ? " active" : ""}`}
+                                    title={t("shellEnvBtn")}
+                                    onClick={() => setShowShellEnvPopover(!showShellEnvPopover)}
+                                  >
+                                    <Code2 size={13} />
+                                  </button>
+                                  {shellEnvCount > 0 && !showShellEnvPopover && (
+                                    <span className="shell-env-badge">{t("shellEnvCount").replace("{count}", String(shellEnvCount))}</span>
+                                  )}
+                                </span>
+                              )}
+                            </div>
+                            {tool.key === "shellCommand" && showShellEnvPopover && (
+                              <div className="shell-env-popover">
+                                <div className="shell-env-header">
+                                  <span className="shell-env-title">{t("shellEnvTitle")}</span>
+                                </div>
+                                <div className="shell-env-hint">{t("shellEnvHint")}</div>
+                                <div className="shell-env-list">
+                                  {Object.entries(skills.builtinTools.shellEnv ?? {}).map(([key, value]) => (
+                                    <div className="shell-env-row" key={key}>
+                                      <code className="shell-env-key">{key}</code>
+                                      <input
+                                        className="shell-env-value-input"
+                                        type="text"
+                                        value={value}
+                                        onChange={(e) => {
+                                          const next = { ...(skills.builtinTools.shellEnv ?? {}), [key]: e.target.value };
+                                          setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                        }}
+                                      />
+                                      <button
+                                        className="btn-icon shell-env-delete-btn"
+                                        title="Delete"
+                                        onClick={() => {
+                                          const next = { ...(skills.builtinTools.shellEnv ?? {}) };
+                                          delete next[key];
+                                          setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                        }}
+                                      >
+                                        <Trash2 size={12} />
+                                      </button>
+                                    </div>
+                                  ))}
+                                  {shellEnvCount === 0 && (
+                                    <div className="shell-env-empty">{t("shellEnvEmpty")}</div>
+                                  )}
+                                </div>
+                                <div className="shell-env-add-row">
+                                  <input
+                                    className="shell-env-add-input shell-env-add-key"
+                                    type="text"
+                                    placeholder={t("shellEnvKeyPlaceholder")}
+                                    value={shellEnvDraftKey}
+                                    onChange={(e) => setShellEnvDraftKey(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && shellEnvDraftKey.trim()) {
+                                        const next = { ...(skills.builtinTools.shellEnv ?? {}), [shellEnvDraftKey.trim()]: shellEnvDraftValue };
+                                        setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                        setShellEnvDraftKey(""); setShellEnvDraftValue("");
+                                      }
+                                    }}
+                                  />
+                                  <input
+                                    className="shell-env-add-input shell-env-add-value"
+                                    type="text"
+                                    placeholder={t("shellEnvValuePlaceholder")}
+                                    value={shellEnvDraftValue}
+                                    onChange={(e) => setShellEnvDraftValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter" && shellEnvDraftKey.trim()) {
+                                        const next = { ...(skills.builtinTools.shellEnv ?? {}), [shellEnvDraftKey.trim()]: shellEnvDraftValue };
+                                        setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                        setShellEnvDraftKey(""); setShellEnvDraftValue("");
+                                      }
+                                    }}
+                                  />
+                                  <button
+                                    className="btn-icon shell-env-add-btn"
+                                    title={t("shellEnvAdd")}
+                                    disabled={!shellEnvDraftKey.trim()}
+                                    onClick={() => {
+                                      if (!shellEnvDraftKey.trim()) return;
+                                      const next = { ...(skills.builtinTools.shellEnv ?? {}), [shellEnvDraftKey.trim()]: shellEnvDraftValue };
+                                      setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellEnv: next } }));
+                                      setShellEnvDraftKey(""); setShellEnvDraftValue("");
+                                    }}
+                                  >
+                                    <Plus size={13} />
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                            <div className="built-in-tool-desc">{t(tool.descKey)}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div className={`built-in-tool officecli-tool${!officeCliState ? " officecli-checking" : ""}${officeCliState?.installed ? " officecli-ready" : ""}`}>
                       <button
-                        className={`toggle-btn ${skills.builtinTools.readFile ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, readFile: !prev.builtinTools.readFile } }))}
-                        title={skills.builtinTools.readFile ? t("enabledClick") : t("disabledClick")}
-                        aria-label={`${skills.builtinTools.readFile ? t("enabledClick") : t("disabledClick")} read_file`}
-                        aria-pressed={skills.builtinTools.readFile}
+                        className={`toggle-btn ${(!hasValidWhitelistDir || !officeCliState?.installed) ? "toggle-off" : skills.builtinTools.officeCli ? "toggle-on" : "toggle-off"}`}
+                        onClick={() => {
+                          if (!hasValidWhitelistDir || !officeCliState?.installed) return;
+                          setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCli: !prev.builtinTools.officeCli } }))
+                        }}
+                        title={!hasValidWhitelistDir ? t("skillsWhitelistHint") : officeCliState?.installed ? (skills.builtinTools.officeCli ? t("enabledClick") : t("disabledClick")) : t("builtInOfficeCliNotInstalled")}
+                        aria-label={`${skills.builtinTools.officeCli ? t("enabledClick") : t("disabledClick")} officecli`}
+                        aria-pressed={hasValidWhitelistDir && skills.builtinTools.officeCli}
+                        disabled={!hasValidWhitelistDir || !officeCliState?.installed}
                       />
-                      <div className="built-in-tool-icon"><FileText size={15} /></div>
+                      <div className="built-in-tool-icon"><OfficeLogoIcon size={15} /></div>
                       <div className="built-in-tool-body">
-                        <div className="built-in-tool-name">read_file</div>
-                        <div className="built-in-tool-desc">{t("builtInReadFileDesc")}</div>
-                      </div>
-                    </div>
-                    <div className="built-in-tool">
-                      <button
-                        className={`toggle-btn ${skills.builtinTools.shellCommand ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, shellCommand: !prev.builtinTools.shellCommand } }))}
-                        title={skills.builtinTools.shellCommand ? t("enabledClick") : t("disabledClick")}
-                        aria-label={`${skills.builtinTools.shellCommand ? t("enabledClick") : t("disabledClick")} shell_command`}
-                        aria-pressed={skills.builtinTools.shellCommand}
-                      />
-                      <div className="built-in-tool-icon"><Terminal size={15} /></div>
-                      <div className="built-in-tool-body">
-                        <div className="built-in-tool-name">shell_command</div>
-                        <div className="built-in-tool-desc">{t("builtInShellDesc")}</div>
-                      </div>
-                    </div>
-                    <div className="built-in-tool">
-                      <button
-                        className={`toggle-btn ${skills.builtinTools.multiEditFile ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, multiEditFile: !prev.builtinTools.multiEditFile } }))}
-                        title={skills.builtinTools.multiEditFile ? t("enabledClick") : t("disabledClick")}
-                        aria-label={`${skills.builtinTools.multiEditFile ? t("enabledClick") : t("disabledClick")} multi_edit_file`}
-                        aria-pressed={skills.builtinTools.multiEditFile}
-                      />
-                      <div className="built-in-tool-icon"><FilePenLine size={15} /></div>
-                      <div className="built-in-tool-body">
-                        <div className="built-in-tool-name">multi_edit_file</div>
-                        <div className="built-in-tool-desc">{t("builtInMultiEditDesc")}</div>
-                      </div>
-                    </div>
-                    <div className="built-in-tool">
-                      <button
-                        className={`toggle-btn ${skills.builtinTools.taskPlanning ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, taskPlanning: !prev.builtinTools.taskPlanning } }))}
-                        title={skills.builtinTools.taskPlanning ? t("enabledClick") : t("disabledClick")}
-                        aria-label={`${skills.builtinTools.taskPlanning ? t("enabledClick") : t("disabledClick")} task-planning`}
-                        aria-pressed={skills.builtinTools.taskPlanning}
-                      />
-                      <div className="built-in-tool-icon"><ListChecks size={15} /></div>
-                      <div className="built-in-tool-body">
-                        <div className="built-in-tool-name">task-planning</div>
-                        <div className="built-in-tool-desc">{t("builtInTaskPlanningDesc")}</div>
-                      </div>
-                    </div>
-                    <div className="built-in-tool">
-                      <button
-                        className={`toggle-btn ${skills.builtinTools.chromeCdp ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, chromeCdp: !prev.builtinTools.chromeCdp } }))}
-                        title={skills.builtinTools.chromeCdp ? t("enabledClick") : t("disabledClick")}
-                        aria-label={`${skills.builtinTools.chromeCdp ? t("enabledClick") : t("disabledClick")} chrome-cdp`}
-                        aria-pressed={skills.builtinTools.chromeCdp}
-                      />
-                      <div className="built-in-tool-icon"><Chrome size={15} /></div>
-                      <div className="built-in-tool-body">
-                        <div className="built-in-tool-name">chrome-cdp</div>
-                        <div className="built-in-tool-desc">{t("builtInChromeCdpDesc")}</div>
-                      </div>
-                    </div>
-                    <div className="built-in-tool">
-                      <button
-                        className={`toggle-btn ${skills.builtinTools.chatPlusAdapterDebugger ? "toggle-on" : "toggle-off"}`}
-                        onClick={() => setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, chatPlusAdapterDebugger: !prev.builtinTools.chatPlusAdapterDebugger } }))}
-                        title={skills.builtinTools.chatPlusAdapterDebugger ? t("enabledClick") : t("disabledClick")}
-                        aria-label={`${skills.builtinTools.chatPlusAdapterDebugger ? t("enabledClick") : t("disabledClick")} chat-plus-adapter-debugger`}
-                        aria-pressed={skills.builtinTools.chatPlusAdapterDebugger}
-                      />
-                      <div className="built-in-tool-icon"><Bug size={15} /></div>
-                      <div className="built-in-tool-body">
-                        <div className="built-in-tool-name">chat-plus-adapter-debugger</div>
-                        <div className="built-in-tool-desc">{t("builtInChatPlusAdapterDesc")}</div>
+                        <div className="built-in-tool-name">
+                          officecli
+                          {officeCliState?.installed && (
+                            <span className="officecli-badge ok" title={officeCliState.path}>
+                              <span className="officecli-dot" />
+                              {officeCliState.version && <>v{officeCliState.version}</>}
+                            </span>
+                          )}
+                          {officeCliState?.installed && (
+                            <span className="officecli-reinstall-wrap">
+                              <button className="btn-icon officecli-reinstall-btn" title={t("builtInOfficeCliReinstall")} onClick={() => setShowReinstallConfirm(!showReinstallConfirm)}>
+                                <RotateCcw size={13} />
+                              </button>
+                              <button
+                                className={`btn-icon officecli-reinstall-btn${showOfficeCliPath ? " active" : ""}`}
+                                title={t("builtInOfficeCliManualPath")}
+                                onClick={() => setShowOfficeCliPath(!showOfficeCliPath)}
+                              >
+                                <FolderOpen size={13} />
+                              </button>
+                              {showReinstallConfirm && (
+                                <span className="officecli-reinstall-popover">
+                                  <span className="officecli-reinstall-popover-text">{t("builtInOfficeCliReinstallConfirm")}</span>
+                                  <span className="officecli-reinstall-popover-actions">
+                                    <button className="btn btn-secondary btn-sm" onClick={handleReinstallOfficeCli}>{t("confirm")}</button>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setShowReinstallConfirm(false)}>{t("cancel")}</button>
+                                  </span>
+                                </span>
+                              )}
+                            </span>
+                          )}
+                          {officeCliState && !officeCliState.installed && !officeCliState.installing && !officeCliState.checking && (
+                            <span className="officecli-badge warn">
+                              {t("builtInOfficeCliNotInstalled")}
+                              <button className="btn-icon officecli-action-btn" title={t("builtInOfficeCliInstallBtn")} onClick={handleInstallOfficeCli} disabled={!!officeCliState?.installing}>
+                                <Download size={13} />
+                              </button>
+                              <button
+                                className={`btn-icon officecli-action-btn${showOfficeCliPath ? " active" : ""}`}
+                                title={t("builtInOfficeCliManualPath")}
+                                onClick={() => setShowOfficeCliPath(!showOfficeCliPath)}
+                              >
+                                <FolderOpen size={13} />
+                              </button>
+                            </span>
+                          )}
+                          {(!officeCliState || officeCliState?.checking) && (
+                            <span className="officecli-badge muted">
+                              {t("builtInOfficeCliChecking")}
+                            </span>
+                          )}
+                          {officeCliState?.installing && (
+                            <span className="officecli-badge muted">
+                              {t("builtInOfficeCliInstalling")}
+                              {installProgress > 0 && <> · {installProgress}%</>}
+                            </span>
+                          )}
+                        </div>
+                        <div className="built-in-tool-desc">{t("builtInOfficeCliDesc")}</div>
+                        {officeCliState && !officeCliState.installing && showOfficeCliPath && (
+                          <div className="officecli-path-row">
+                            <Terminal size={13} className="officecli-path-icon" />
+                            <input
+                              className="officecli-path-input"
+                              type="text"
+                              placeholder={t("builtInOfficeCliPathPlaceholder")}
+                              value={officeCliCustomPath}
+                              onChange={(e) => setOfficeCliCustomPath(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") handleVerifyOfficeCliPath(); }}
+                            />
+                            <button className="btn-icon officecli-action-btn" title={t("builtInOfficeCliVerifyBtn")} onClick={handleVerifyOfficeCliPath}>
+                              <Check size={14} />
+                            </button>
+                          </div>
+                        )}
+                        {officeCliState?.error && (
+                          <div className="officecli-error">
+                            {renderTextWithLinks(officeCliState.error, (url) => { void handleOpenExternalLink(url); })}
+                            {officeCliState.releaseUrl && (
+                              <>
+                                {" "}
+                                <a
+                                  className="officecli-error-link"
+                                  href="#"
+                                  onClick={(e) => { e.preventDefault(); void handleOpenExternalLink(officeCliState.releaseUrl!); }}
+                                >
+                                  {t("builtInOfficeCliOpenReleases")}
+                                </a>
+                              </>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

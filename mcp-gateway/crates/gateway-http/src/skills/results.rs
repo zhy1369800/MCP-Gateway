@@ -24,7 +24,12 @@ fn tool_success_with_planning_reminder(
     mut structured: Value,
     hints: PlanningSuccessHints,
 ) -> ToolResult {
-    if hints.planning_reminder.is_none() && hints.shell_command_reminder.is_none() {
+    if hints.planning_reminder.is_none()
+        && hints.shell_command_reminder.is_none()
+        && hints.read_failure_reminder.is_none()
+        && hints.cdp_stuck_reminder.is_none()
+        && hints.office_cli_post_create_reminder.is_none()
+    {
         return tool_success(text, structured);
     };
 
@@ -39,6 +44,24 @@ fn tool_success_with_planning_reminder(
             fields.insert(
                 "shellCommandReminder".to_string(),
                 Value::String(shell_command_reminder),
+            );
+        }
+        if let Some(read_failure_reminder) = hints.read_failure_reminder {
+            fields.insert(
+                "readFailureReminder".to_string(),
+                Value::String(read_failure_reminder),
+            );
+        }
+        if let Some(cdp_stuck_reminder) = hints.cdp_stuck_reminder {
+            fields.insert(
+                "cdpStuckReminder".to_string(),
+                Value::String(cdp_stuck_reminder),
+            );
+        }
+        if let Some(office_cli_post_create_reminder) = hints.office_cli_post_create_reminder {
+            fields.insert(
+                "officeCliPostCreateReminder".to_string(),
+                Value::String(office_cli_post_create_reminder),
             );
         }
     }
@@ -111,6 +134,20 @@ fn tool_error_with_edit_failure_reminder(
         }
     }
 
+    tool_error(text, structured)
+}
+
+fn tool_error_with_failure_reminder(
+    text: String,
+    mut structured: Value,
+    reminder_key: &'static str,
+    reminder: Option<String>,
+) -> ToolResult {
+    if let Some(reminder) = reminder {
+        if let Value::Object(fields) = &mut structured {
+            fields.insert(reminder_key.to_string(), Value::String(reminder));
+        }
+    }
     tool_error(text, structured)
 }
 
@@ -266,7 +303,7 @@ fn planning_gate_error(
 }
 
 fn planning_gate_instructions() -> &'static str {
-    "## Planning Gate\n\nWhen the bundled `task-planning` skill is enabled, real builtin tool calls are gated by an active plan. Before using this skill for any non-documentation action, call `task-planning` with `action: \"update\"` and a concise todo list. The gateway returns a content-derived `planningId`. Pass it as `planningId` on subsequent builtin tool calls. Reuse the same planningId across multiple tool calls while working through the plan. Successful builtin tool results may include a single `planningReminder` for the current `in_progress` item. If that item is done, use `task-planning` with `action: \"set_status\"`, the active `planningId`, and `status: \"completed\"`; do not resend the full plan for simple status changes. Use full `update` only when the plan steps or approach change. When all plan items are updated to `completed`, that planningId is closed and can no longer be used for tool calls. Documentation reads of SKILL.md files do not require planning fields."
+    "## Planning Integration\n\nThis section only appears when the bundled `task-planning` skill is enabled. If `task-planning` is disabled in the gateway configuration, no `planningId` argument is expected and no planning reminders are ever emitted.\n\nWhen the bundled `task-planning` skill is enabled, real builtin tool calls are gated by an active plan. Before using this skill for any non-documentation action, call `task-planning` with `action: \"update\"` and a concise todo list. The gateway returns a content-derived `planningId`. Pass it as the `planningId` argument on subsequent builtin tool calls (the input schema exposes this argument only while `task-planning` is enabled). Reuse the same planningId across multiple tool calls while working through the plan. Successful builtin tool results may include a single `planningReminder` for the current `in_progress` item, and may also include `readFailureReminder`, `shellCommandReminder`, `cdpStuckReminder`, or `officeCliPostCreateReminder` when the gateway detects recurring trouble. If the current item is done, use `task-planning` with `action: \"set_status\"`, the active `planningId`, and `status: \"completed\"`; do not resend the full plan for simple status changes. Use full `update` only when the plan steps or approach change. When all plan items are updated to `completed`, that planningId is closed and can no longer be used for tool calls. Documentation reads of SKILL.md files do not require planning fields."
 }
 
 fn confirmation_rejected_result(

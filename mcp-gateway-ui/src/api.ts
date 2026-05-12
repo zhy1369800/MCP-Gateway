@@ -223,6 +223,15 @@ export class ApiClient {
     );
   }
 
+  async checkOfficeCli(path?: string): Promise<{ installed: boolean; version?: string; error?: string }> {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    return this.request<{ installed: boolean; version?: string; error?: string }>("GET", `/admin/skills/officecli/check${query}`);
+  }
+
+  async installOfficeCli(): Promise<{ ok: boolean; error?: string }> {
+    return this.request<{ ok: boolean; error?: string }>("POST", "/admin/skills/officecli/install");
+  }
+
   async executeTerminalCommand(command: string, cwd: string): Promise<TerminalTaskSnapshot> {
     return this.request<TerminalTaskSnapshot>("POST", "/admin/terminal/execute", toJsonValue({ command, cwd }));
   }

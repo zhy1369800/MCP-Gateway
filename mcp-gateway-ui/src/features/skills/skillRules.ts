@@ -77,20 +77,21 @@ export function normalizeContainsInput(value: string): string[] {
     .filter((item) => item.length > 0);
 }
 
-export function formToRule(form: SkillRuleFormState, id: string): SkillCommandRule {
+export function formToRule(form: SkillRuleFormState, id: string, originalRule?: SkillCommandRule): SkillCommandRule {
   const commandTree = form.matchType === "commandTree" || form.matchType === "both"
     ? strToArgs(form.commandPattern.trim())
     : [];
   const contains = form.matchType === "contains" || form.matchType === "both"
     ? normalizeContainsInput(form.containsPattern)
     : [];
+  const reasonChanged = form.reason.trim() !== (originalRule?.reason.trim() ?? "");
   return {
     id,
     action: form.action,
     commandTree,
     contains,
     reason: form.reason.trim(),
-    reasonKey: undefined,
+    reasonKey: reasonChanged ? undefined : (originalRule?.reasonKey || undefined),
   };
 }
 
@@ -268,6 +269,9 @@ export function ensureSkillsConfig(
       taskPlanning: raw?.builtinTools?.taskPlanning ?? true,
       chromeCdp: raw?.builtinTools?.chromeCdp ?? true,
       chatPlusAdapterDebugger: raw?.builtinTools?.chatPlusAdapterDebugger ?? true,
+      officeCli: raw?.builtinTools?.officeCli ?? false,
+      officeCliPath: raw?.builtinTools?.officeCliPath ?? undefined,
+      shellEnv: raw?.builtinTools?.shellEnv ?? undefined,
     },
   };
 }

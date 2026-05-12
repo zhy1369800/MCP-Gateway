@@ -181,6 +181,23 @@ After any shell-based write, inspect the resulting changes before reporting succ
 - Run the smallest meaningful formatter, parser, build, or test command for the touched files.
 - If the diff includes unrelated changes, stop and report the discrepancy instead of continuing blindly.
 
+## Coding Change Discipline
+
+When the terminal is being used to investigate or change code, do not treat "the patch applied" as the finish line. The reliable workflow is to understand the system's intent, make the smallest useful change, and verify the behavior that motivated the change.
+
+- Reconstruct the behavior path before changing code. Identify the inputs, transformations, persistence boundary, output, and any tests or callers that define the contract.
+- Prefer evidence from the current codebase over naming guesses. Use search to locate definitions, call sites, adapters, serializers, renderers, configuration, and tests before deciding where the problem lives.
+- Separate model, transport, storage, and presentation concerns. A correct fix usually preserves the layer contract rather than converting one layer's representation into another's.
+- Preserve stable identifiers, metadata, schema fields, ordering, user-authored values, and compatibility behavior unless the requested change specifically requires altering them.
+- Keep edits scoped to the smallest surface that closes the behavior gap. Avoid broad rewrites, new abstractions, or configuration churn when a local contract fix is enough.
+- Before editing, check `git status --short` and inspect files you will touch. Work with existing user changes and do not revert unrelated modifications.
+- When changing conversion, normalization, form, parser, serializer, or migration code, explicitly check round-trip behavior and optional fields.
+- After editing, inspect the focused diff and confirm that the diff expresses the intended behavior. A passing command does not replace reading the diff.
+- Run the smallest meaningful verification command for the touched area: targeted unit tests, typecheck, parser check, formatter check, or build. If no verification is practical, report that and state the residual risk.
+- For bug fixes, add or update a focused test when the project already has a nearby test setup and the behavior is easy to express.
+- If validation reveals a new issue, continue the loop until the change is correct or a real blocker is found. Do not report completion after only the first edit.
+- Be decisive when evidence is sufficient. Ask the user only when required context cannot be inferred safely, when multiple product behaviors are plausible, or when the next action is destructive or externally risky.
+
 ## Safety And Policy
 
 The gateway evaluates commands against the configured skill policy.

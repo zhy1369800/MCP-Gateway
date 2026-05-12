@@ -12,6 +12,9 @@ const GITHUB_REPO = "MCP-Gateway";
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 小时
 const CACHE_KEY = "mcp-update-check";
 
+// Load proxy pool from shared JSON (single source of truth with officecli.rs).
+import githubProxyPool from "../../src-tauri/github-proxy-pool.json";
+
 interface CachedResult {
   checkedAt: number;
   latestVersion: string;
@@ -39,10 +42,11 @@ function isNewerVersion(latest: string, current: string): boolean {
 }
 
 async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
+  const directUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 8000);
-  try {
+
+  const tryFetch = async (url: string): Promise<Response> => {
     const res = await fetch(url, {
       headers: { Accept: "application/vnd.github+json" },
       signal: controller.signal,
@@ -50,6 +54,37 @@ async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
     if (!res.ok) {
       throw new Error(`GitHub API returned ${res.status}`);
     }
+    return res;
+  };
+
+  // Random start offset so repeated checks don't always hit the same proxy first.
+  const offset = Math.floor(Math.random() * githubProxyPool.length);
+
+  let lastError: Error | undefined;
+  for (let i = 0; i < githubProxyPool.length; i++) {
+    const proxy = githubProxyPool[(offset + i) % githubProxyPool.length];
+    try {
+      const res = await tryFetch(`${proxy}${directUrl}`);
+      const data = (await res.json()) as {
+        tag_name: string;
+        html_url: string;
+        body?: string;
+      };
+      const latestVersion = data.tag_name ?? "";
+      return {
+        hasUpdate: isNewerVersion(latestVersion, currentVersion),
+        latestVersion,
+        releaseUrl: data.html_url ?? "",
+        releaseNotes: data.body ?? "",
+      };
+    } catch (e) {
+      lastError = e as Error;
+    }
+  }
+
+  // Fallback: direct GitHub
+  try {
+    const res = await tryFetch(directUrl);
     const data = (await res.json()) as {
       tag_name: string;
       html_url: string;
@@ -62,6 +97,8 @@ async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
       releaseUrl: data.html_url ?? "",
       releaseNotes: data.body ?? "",
     };
+  } catch (e) {
+    throw lastError ?? e;
   } finally {
     clearTimeout(timeoutId);
   }

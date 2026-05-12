@@ -1,23 +1,7 @@
 fn builtin_tools(cfg: &BuiltinToolsConfig) -> Vec<BuiltinTool> {
-    let mut tools = Vec::with_capacity(6);
-    if cfg.read_file {
-        tools.push(BuiltinTool::ReadFile);
-    }
-    if cfg.shell_command {
-        tools.push(BuiltinTool::ShellCommand);
-    }
-    if cfg.multi_edit_file {
-        tools.push(BuiltinTool::MultiEditFile);
-    }
-    if cfg.task_planning {
-        tools.push(BuiltinTool::TaskPlanning);
-    }
-    if cfg.chrome_cdp {
-        tools.push(BuiltinTool::ChromeCdp);
-    }
-    if cfg.chat_plus_adapter_debugger {
-        tools.push(BuiltinTool::ChatPlusAdapterDebugger);
-    }
-    tools
+    BuiltinTool::ALL
+        .iter()
+        .copied()
+        .filter(|tool| tool.is_enabled(cfg))
+        .collect()
 }
-

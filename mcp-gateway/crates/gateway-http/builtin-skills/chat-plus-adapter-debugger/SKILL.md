@@ -516,3 +516,11 @@ continueConversation(ctx) {
 - 如果存在思考组件却把它纳入 `decorateBubbles` 的卡片渲染范围，就判定 DOM 选择器错误
 - 如果请求体是可解析 JSON 且能稳定定位用户消息，却没有优先尝试协议注入，就判定不符合输入侧策略
 - 如果请求不可改写，不是失败；只要 `transformRequest` 明确 `return null` 且 `continueConversation` 可用，就算符合框架
+
+## 配套工具
+
+本 skill 只负责产出或修复 Chat Plus 适配脚本；脚本本身、临时样本、抓回来的 request/response 文件不要走 `shell_command` 的 `echo >` / `Set-Content` / here-doc / `cat` 再自己写文件。
+
+- 落盘生成或修改 adapter 脚本一律走 `multi_edit_file`，让网关记录变更路径、执行 path guard、产出可审查的 diff。
+- 查看样本、临时文件、`netget --request-file` / `--response-file` 产出的内容一律走 `read_file`，输出带行号、受 allowed directories 约束、二进制自动拒绝。
+- 浏览器调试继续走 `chrome-cdp`，不要试图在 `shell_command` 里自己起 Chrome 或 node 调 CDP。
