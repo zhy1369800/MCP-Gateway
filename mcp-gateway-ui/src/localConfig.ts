@@ -54,6 +54,14 @@ export async function setMainWindowTitle(title: string): Promise<void> {
   await invoke("set_main_window_title", { title });
 }
 
+export async function applyTrayLabels(
+  show: string,
+  quit: string,
+  tooltip: string
+): Promise<void> {
+  await invoke("apply_tray_labels", { show, quit, tooltip });
+}
+
 export async function testMcpServerLocal(server: ServerConfig): Promise<ServerConnectivityTestResult> {
   return invoke<ServerConnectivityTestResult>("test_mcp_server_local", { server });
 }

@@ -37,6 +37,7 @@ import {
   clearServerAuthLocal,
   detectLocalRuntimes,
   setMainWindowTitle,
+  applyTrayLabels,
   getServerAuthStateLocal,
   loadLocalConfig,
   openConfigFileLocal,
@@ -629,6 +630,10 @@ function App() {
     document.title = nextTitle;
     setMainWindowTitle(nextTitle).catch(() => {});
   }, [hasAvailableUpdate, lang, t, updateInfo?.latestVersion]);
+
+  useEffect(() => {
+    applyTrayLabels(t("trayMenuShow"), t("trayMenuQuit"), t("trayTooltip")).catch(() => {});
+  }, [lang, t]);
 
   const parsedJsonServers = useMemo(() => {
     if (serversMode !== "json") {

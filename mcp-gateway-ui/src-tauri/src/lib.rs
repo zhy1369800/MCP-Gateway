@@ -21,6 +21,7 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
 mod officecli;
+mod tray;
 
 const EMBEDDED_RUNTIME_ID: &str = "embedded://gateway-runtime";
 
@@ -678,6 +679,17 @@ fn set_main_window_title(app: tauri::AppHandle, title: String) -> Result<(), Str
         .map_err(|error| format!("设置窗口标题失败：{error}"))
 }
 
+#[tauri::command]
+fn apply_tray_labels(
+    app: tauri::AppHandle,
+    show: String,
+    quit: String,
+    tooltip: String,
+) -> Result<(), String> {
+    tray::apply_labels(&app, &show, &quit, &tooltip)
+        .map_err(|error| format!("更新托盘菜单失败：{error}"))
+}
+
 fn has_skill_md_in_directory(root: &Path) -> Result<bool, String> {
     let entries = fs::read_dir(root).map_err(io_error)?;
     for entry in entries {
@@ -1043,6 +1055,12 @@ pub fn run() {
     tauri::Builder::default()
         .manage(GatewayProcessState::default())
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            if let Err(error) = tray::install(app) {
+                eprintln!("failed to install system tray: {error}");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             gateway_status,
             start_gateway,
@@ -1067,7 +1085,8 @@ pub fn run() {
             officecli::officecli_check,
             officecli::officecli_install,
             officecli::officecli_uninstall,
-            officecli::officecli_open_releases
+            officecli::officecli_open_releases,
+            apply_tray_labels
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

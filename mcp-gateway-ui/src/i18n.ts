@@ -6,6 +6,9 @@ const translations = {
     // 顶栏
     appTitle: "MCP 网关",
     windowTitle: "本地 MCP 网关",
+    trayMenuShow: "显示主窗口",
+    trayMenuQuit: "退出",
+    trayTooltip: "MCP 网关",
     running: "运行中",
     stopped: "已停止",
     starting: "启动中…",
@@ -344,6 +347,9 @@ const translations = {
     // Topbar
     appTitle: "MCP Gateway",
     windowTitle: "Local MCP Gateway",
+    trayMenuShow: "Show Window",
+    trayMenuQuit: "Quit",
+    trayTooltip: "MCP Gateway",
     running: "Running",
     stopped: "Stopped",
     starting: "Starting…",
