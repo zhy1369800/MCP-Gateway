@@ -1,4 +1,5 @@
 import type {
+  ActivePlan,
   ApiEnvelope,
   ExportPayload,
   GatewayConfig,
@@ -181,5 +182,16 @@ export class ApiClient {
 
   async installOfficeCli(): Promise<{ ok: boolean; error?: string }> {
     return this.request<{ ok: boolean; error?: string }>("POST", "/admin/skills/officecli/install");
+  }
+
+  async fetchActivePlans(): Promise<ActivePlan[]> {
+    return this.request<ActivePlan[]>("GET", "/admin/skills/plans");
+  }
+
+  async deleteActivePlan(planningId: string): Promise<void> {
+    await this.request<unknown>(
+      "DELETE",
+      `/admin/skills/plans/${encodeURIComponent(planningId)}`,
+    );
   }
 }

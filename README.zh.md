@@ -8,7 +8,7 @@
 
 简单说，它会把你的电脑变成一个可控的 MCP 工具中心：客户端可以通过它读文件、改文件、执行命令、操作浏览器，或者调用你自己写的 Skill 工作流；同时配置、鉴权、目录边界、命令审批都集中在一个界面里管理。
 
-![本地 MCP Gateway 界面](./image.png)
+![本地 MCP Gateway 界面](./image1.png)
 
 ## 它能做什么
 
@@ -75,6 +75,8 @@ http://127.0.0.1:8765/api/v2/sse/playwright
 - `chrome-cdp`
 - `chat-plus-adapter-debugger`（业务场景专用）
 - `officecli`
+
+![内置工具面板](./image2.png)
 
 `chat-plus-adapter-debugger` 专门服务于 Chat Plus 站点适配流程，不是通用能力；做通用智能体时建议关掉它，避免上下文被业务规则占用。
 

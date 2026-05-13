@@ -13,6 +13,7 @@ import {
   ListChecks,
   Chrome,
   Bug,
+  Eye,
   List,
   Languages,
   Save,
@@ -66,6 +67,7 @@ import type {
   ServerAuthState,
   SkillCommandRule,
   SkillPolicyAction,
+  ActivePlan,
   SkillConfirmation,
   ServerConnectivityTestResult,
   SkillsConfig,
@@ -76,6 +78,7 @@ import { useT, type Lang, type TKey } from "./i18n";
 import JsonEditor from "./components/JsonEditor";
 import { useUpdateCheck } from "./hooks/useUpdateCheck";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { formatTime } from "./utils/display";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SkillConfirmations, SkillConfirmationPopup } from "./components/SkillConfirmations";
 import { SkillDirectoryListEditor } from "./components/SkillDirectoryListEditor";
@@ -314,6 +317,13 @@ function App() {
   const [showShellEnvPopover, setShowShellEnvPopover] = useState(false);
   const [shellEnvDraftKey, setShellEnvDraftKey] = useState("");
   const [shellEnvDraftValue, setShellEnvDraftValue] = useState("");
+  const [showPlansModal, setShowPlansModal] = useState(false);
+  const [activePlans, setActivePlans] = useState<ActivePlan[]>([]);
+  const [plansLoading, setPlansLoading] = useState(false);
+  const [deletingPlanId, setDeletingPlanId] = useState<string | null>(null);
+  const [planDeleteConfirmId, setPlanDeleteConfirmId] = useState<string | null>(null);
+  const [planDeleteError, setPlanDeleteError] = useState<string | null>(null);
+
   /** 安装成功后跳过 useEffect 重复 check 的标记 */
   const skipNextOfficeCliCheckRef = useRef(false);
 
@@ -331,6 +341,80 @@ function App() {
     () => new ApiClient(listen, adminToken, apiPrefix),
     [adminToken, apiPrefix, listen],
   );
+
+  const fetchPlans = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (!apiClient) return;
+      if (!silent) setPlansLoading(true);
+      try {
+        const plans = await apiClient.fetchActivePlans();
+        setActivePlans(plans);
+      } catch {
+        if (!silent) setActivePlans([]);
+      } finally {
+        if (!silent) setPlansLoading(false);
+      }
+    },
+    [apiClient],
+  );
+
+  const handleOpenPlans = useCallback(() => {
+    setShowPlansModal(true);
+    setPlanDeleteConfirmId(null);
+    setPlanDeleteError(null);
+    fetchPlans();
+  }, [fetchPlans]);
+
+  const handleRefreshPlans = useCallback(() => {
+    fetchPlans({ silent: true });
+  }, [fetchPlans]);
+
+  const togglePlanDeleteConfirm = useCallback((planningId: string) => {
+    setPlanDeleteError(null);
+    setPlanDeleteConfirmId((prev) => (prev === planningId ? null : planningId));
+  }, []);
+
+  const cancelPlanDeleteConfirm = useCallback(() => {
+    setPlanDeleteError(null);
+    setPlanDeleteConfirmId(null);
+  }, []);
+
+  const handleConfirmDeletePlan = useCallback(
+    async (planningId: string) => {
+      if (!apiClient) return;
+      if (deletingPlanId) return;
+      setPlanDeleteError(null);
+      setDeletingPlanId(planningId);
+      try {
+        await apiClient.deleteActivePlan(planningId);
+        setActivePlans((prev) => prev.filter((p) => p.planningId !== planningId));
+        setPlanDeleteConfirmId(null);
+        fetchPlans({ silent: true });
+      } catch (error) {
+        setPlanDeleteError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setDeletingPlanId(null);
+      }
+    },
+    [apiClient, deletingPlanId, fetchPlans],
+  );
+
+  useEffect(() => {
+    if (!showPlansModal) return;
+    const interval = window.setInterval(() => {
+      fetchPlans({ silent: true });
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [showPlansModal, fetchPlans]);
+
+  useEffect(() => {
+    if (!showPlansModal) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowPlansModal(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showPlansModal]);
   const createServerUiId = useCallback(() => `server-ui-${serverUiIdSeqRef.current++}`, []);
   const createServerUiIds = useCallback(
     (count: number) => Array.from({ length: count }, () => createServerUiId()),
@@ -2195,6 +2279,17 @@ function App() {
                           <div className="built-in-tool-body">
                             <div className="built-in-tool-name">
                               {tool.name}
+                              {tool.key === "taskPlanning" && (
+                                <span className="shell-env-wrap">
+                                  <button
+                                    className={`btn-icon shell-env-btn${showPlansModal ? " active" : ""}`}
+                                    title={t("planViewBtn")}
+                                    onClick={handleOpenPlans}
+                                  >
+                                    <Eye size={13} />
+                                  </button>
+                                </span>
+                              )}
                               {tool.key === "shellCommand" && (
                                 <span className="shell-env-wrap">
                                   <button
@@ -2334,8 +2429,8 @@ function App() {
                                 <span className="officecli-reinstall-popover">
                                   <span className="officecli-reinstall-popover-text">{t("builtInOfficeCliReinstallConfirm")}</span>
                                   <span className="officecli-reinstall-popover-actions">
-                                    <button className="btn btn-secondary btn-sm" onClick={handleReinstallOfficeCli}>{t("confirm")}</button>
                                     <button className="btn btn-secondary btn-sm" onClick={() => setShowReinstallConfirm(false)}>{t("cancel")}</button>
+                                    <button className="btn-primary-sm" onClick={handleReinstallOfficeCli}>{t("confirm")}</button>
                                   </span>
                                 </span>
                               )}
@@ -2713,6 +2808,110 @@ function App() {
         onConfirm={confirmSkillGroupDelete}
         t={t}
       />
+
+      {showPlansModal && (
+        <div className="modal-overlay" onClick={() => setShowPlansModal(false)}>
+          <div className="modal-content plans-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">{t("planViewTitle")}</div>
+            <div className="modal-body plans-modal-body">
+              {plansLoading && activePlans.length === 0 && (
+                <div className="shell-env-empty">{t("planViewLoading")}</div>
+              )}
+              {!plansLoading && activePlans.length === 0 && (
+                <div className="shell-env-empty">{t("planViewEmpty")}</div>
+              )}
+              {activePlans.map((plan) => (
+                <div key={plan.planningId} className="plan-card">
+                  <div className="plan-card-header">
+                    <code className="plan-id">{plan.planningId}</code>
+                    <div className="plan-card-actions">
+                      <span className="plan-updated">{formatTime(plan.updatedAt)}</span>
+                      <span className="plan-delete-wrap">
+                        <button
+                          type="button"
+                          className={`plan-delete-btn${planDeleteConfirmId === plan.planningId ? " active" : ""}`}
+                          title={t("planDeleteTitle")}
+                          aria-label={t("planDeleteTitle")}
+                          aria-expanded={planDeleteConfirmId === plan.planningId}
+                          disabled={deletingPlanId === plan.planningId}
+                          onClick={() => togglePlanDeleteConfirm(plan.planningId)}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                        {planDeleteConfirmId === plan.planningId && (
+                          <span
+                            className="plan-delete-popover"
+                            role="dialog"
+                            aria-label={t("planDeleteTitle")}
+                          >
+                            <span className="plan-delete-popover-text">{t("planDeleteConfirm")}</span>
+                            {planDeleteError && (
+                              <span className="plan-delete-popover-error">{planDeleteError}</span>
+                            )}
+                            <span className="plan-delete-popover-actions">
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                onClick={cancelPlanDeleteConfirm}
+                                disabled={deletingPlanId === plan.planningId}
+                              >
+                                {t("cancel")}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-danger-sm"
+                                onClick={() => handleConfirmDeletePlan(plan.planningId)}
+                                disabled={deletingPlanId === plan.planningId}
+                              >
+                                {deletingPlanId === plan.planningId
+                                  ? t("planViewLoading")
+                                  : t("planDeleteConfirmBtn")}
+                              </button>
+                            </span>
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                  {plan.explanation && (
+                    <div className="plan-explanation">{plan.explanation}</div>
+                  )}
+                  <div className="plan-progress">
+                    <span className="plan-progress-text">{plan.completedSteps}/{plan.totalSteps}</span>
+                    <div className="plan-progress-bar">
+                      <div
+                        className="plan-progress-fill"
+                        style={{ width: `${plan.totalSteps > 0 ? (plan.completedSteps / plan.totalSteps) * 100 : 0}%` }}
+                      />
+                    </div>
+                    {plan.pendingCount > 0 && (
+                      <span className="plan-pending-pill">
+                        {t("planPendingLabel").replace("{n}", String(plan.pendingCount))}
+                      </span>
+                    )}
+                  </div>
+                  <ul className="plan-step-list">
+                    {plan.plan.map((item, i) => (
+                      <li key={i} className={`plan-step plan-step-${item.status}`}>
+                        <span className={`plan-step-dot plan-dot-${item.status}`} />
+                        <span className="plan-step-text">{item.step}</span>
+                        <span className={`plan-step-tag plan-tag-${item.status}`}>{t(`planStatus_${item.status}` as TKey) ?? item.status}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <div className="modal-footer plans-modal-footer">
+              <span className="plans-auto-refresh-hint">{t("planAutoRefresh")}</span>
+              <div className="plans-footer-actions">
+                <button className="btn btn-secondary" onClick={() => setShowPlansModal(false)}>{t("planViewClose")}</button>
+                <button className="btn btn-start" onClick={handleRefreshPlans} disabled={plansLoading}>{t("planViewRefresh")}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

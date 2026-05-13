@@ -20,6 +20,8 @@ use crate::routes;
         routes::admin::export_mcp_servers_payload,
         routes::admin::get_skills,
         routes::admin::get_skill_events,
+        routes::admin::get_active_plans,
+        routes::admin::delete_active_plan,
         routes::admin::get_pending_skill_confirmations,
         routes::admin::approve_skill_confirmation,
         routes::admin::reject_skill_confirmation,
@@ -34,7 +36,10 @@ use crate::routes;
             gateway_core::ServerConfig,
             crate::SkillSummary,
             crate::SkillConfirmation,
-            crate::ConfirmationStatus
+            crate::ConfirmationStatus,
+            crate::ActivePlanSummary,
+            crate::ActivePlanStepDto,
+            crate::PlanItemStatusDto
         )
     ),
     tags((name = "mcp-gateway", description = "MCP Gateway V2 API"))

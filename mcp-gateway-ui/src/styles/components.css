@@ -1357,18 +1357,19 @@ html, body {
 .officecli-reinstall-popover {
   position: absolute;
   top: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
+  right: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
+  min-width: 260px;
+  max-width: 320px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius);
-  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
   z-index: 100;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .officecli-reinstall-popover-text {
@@ -1381,6 +1382,25 @@ html, body {
   display: flex;
   gap: 6px;
   justify-content: flex-end;
+}
+
+.btn-primary-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 55%, transparent);
+  background: color-mix(in srgb, var(--accent-blue) 18%, transparent);
+  color: var(--accent-blue);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.btn-primary-sm:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-blue) 28%, transparent);
+  border-color: var(--accent-blue);
+}
+.btn-primary-sm:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* path input row — full width below desc */
@@ -3256,4 +3276,242 @@ html, body {
   margin: 0;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-color);
+}
+
+/* ── Plans Modal ── */
+.plan-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.plan-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.plan-id {
+  font-size: 12px;
+  background: var(--bg-secondary);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--accent-blue);
+}
+.plan-updated {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.plan-explanation {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.plan-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.plan-progress-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.plan-progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-secondary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.plan-progress-fill {
+  height: 100%;
+  background: var(--accent-green);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.plan-step-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.plan-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+.plan-step:last-child {
+  border-bottom: none;
+}
+.plan-step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.plan-dot-pending {
+  background: var(--text-muted);
+}
+.plan-dot-in_progress {
+  background: var(--accent-yellow);
+}
+.plan-dot-completed {
+  background: var(--accent-green);
+}
+.plan-step-text {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.plan-step-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.plan-tag-pending {
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+}
+.plan-tag-in_progress {
+  background: rgba(249,226,175,0.15);
+  color: var(--accent-yellow);
+}
+.plan-tag-completed {
+  background: rgba(166,227,161,0.15);
+  color: var(--accent-green);
+}
+
+.plan-pending-pill {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.plans-modal-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.plans-auto-refresh-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.plans-footer-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.plans-modal {
+  max-width: 700px;
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.plans-modal .modal-header {
+  flex-shrink: 0;
+}
+.plans-modal .modal-footer {
+  flex-shrink: 0;
+}
+.plans-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.plan-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.plan-delete-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.plan-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--accent-red);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.plan-delete-btn:hover:not(:disabled),
+.plan-delete-btn.active {
+  background: color-mix(in srgb, var(--accent-red) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent-red) 40%, transparent);
+}
+.plan-delete-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.plan-delete-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  min-width: 220px;
+  max-width: 280px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  z-index: 100;
+  white-space: normal;
+}
+.plan-delete-popover-text {
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.plan-delete-popover-error {
+  color: var(--accent-red);
+  font-size: 11px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.plan-delete-popover-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.btn-danger-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent-red) 55%, transparent);
+  background: color-mix(in srgb, var(--accent-red) 18%, transparent);
+  color: var(--accent-red);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.btn-danger-sm:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-red) 28%, transparent);
+  border-color: var(--accent-red);
+}
+.btn-danger-sm:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }

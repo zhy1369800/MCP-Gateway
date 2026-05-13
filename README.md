@@ -8,7 +8,7 @@ It exposes local capabilities as standard MCP `SSE` and `Streamable HTTP` endpoi
 
 In practice, it turns a local machine into a controllable MCP tool hub: clients can call tools to read files, edit files, run commands, operate a browser, or use your own Skill workflows while keeping configuration, auth, path guards, and approvals in one UI.
 
-![Local MCP Gateway UI](./image.png)
+![Local MCP Gateway UI](./image1.png)
 
 ## What It Does
 
@@ -75,6 +75,8 @@ Bundled tools currently include:
 - `chrome-cdp`
 - `chat-plus-adapter-debugger` (business-specific)
 - `officecli`
+
+![Built-in tools panel](./image2.png)
 
 `chat-plus-adapter-debugger` targets the Chat Plus adapter workflow; keep it off for general-purpose agents.
 

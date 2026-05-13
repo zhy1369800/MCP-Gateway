@@ -241,4 +241,20 @@ export interface LocalRuntimeSummary {
   terminal: TerminalEncodingStatus;
 }
 
+export interface ActivePlanStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+export interface ActivePlan {
+  planningId: string;
+  explanation?: string;
+  updatedAt: string;
+  totalSteps: number;
+  completedSteps: number;
+  pendingCount: number;
+  inProgressStep?: ActivePlanStep;
+  plan: ActivePlanStep[];
+}
+
 
