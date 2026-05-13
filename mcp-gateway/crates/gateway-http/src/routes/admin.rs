@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use axum::extract::{Path, Query, State};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
 use serde::Deserialize;
@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::response::{self, ApiResult};
 use crate::state::AppState;
-use crate::{SkillConfirmation, SkillSummary};
+use crate::{ActivePlanSummary, SkillConfirmation, SkillSummary};
 
 pub fn router(state: AppState, api_prefix: &str) -> Router {
     let prefix = api_prefix.trim_end_matches('/');
@@ -40,6 +40,14 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
             get(export_mcp_servers_payload),
         )
         .route(&format!("{}/admin/skills", prefix), get(get_skills))
+        .route(
+            &format!("{}/admin/skills/plans", prefix),
+            get(get_active_plans),
+        )
+        .route(
+            &format!("{}/admin/skills/plans/:planning_id", prefix),
+            delete(delete_active_plan),
+        )
         .route(
             &format!("{}/admin/skills/events", prefix),
             get(get_skill_events),
@@ -444,6 +452,40 @@ pub async fn get_skill_events(
         "events": events,
         "nextAfter": next_after
     })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/admin/skills/plans",
+    responses((status = 200, description = "Active plans list", body = Vec<ActivePlanSummary>))
+)]
+pub async fn get_active_plans(State(state): State<AppState>) -> ApiResult<Vec<ActivePlanSummary>> {
+    let plans = state.skills.list_active_plans().await;
+    Ok(response::ok(plans))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v2/admin/skills/plans/{planning_id}",
+    params(("planning_id" = String, Path, description = "Active planning id")),
+    responses(
+        (status = 200, description = "Plan removed"),
+        (status = 404, description = "Planning id not found")
+    )
+)]
+pub async fn delete_active_plan(
+    State(state): State<AppState>,
+    Path(planning_id): Path<String>,
+) -> ApiResult<Value> {
+    let removed = state.skills.delete_plan(&planning_id).await;
+    if !removed {
+        return Err(response::err_response(AppError::NotFound(format!(
+            "planning id not found: {planning_id}"
+        ))));
+    }
+    Ok(response::ok(
+        json!({ "planningId": planning_id, "removed": true }),
+    ))
 }
 
 #[utoipa::path(

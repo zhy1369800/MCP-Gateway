@@ -10,7 +10,13 @@ impl SkillsService {
     }
 
     pub fn is_skills_server(&self, config: &GatewayConfig, server_name: &str) -> bool {
-        config.skills.server_name == server_name || config.skills.builtin_server_name == server_name
+        if config.skills.server_name == server_name || config.skills.builtin_server_name == server_name {
+            return true;
+        }
+        // Check if server_name matches any skill group name (format: __groupName__)
+        config.skills.root_groups.iter().any(|g| {
+            !g.name.is_empty() && format!("__{}__", g.name) == server_name
+        })
     }
 
     pub async fn handle_mcp_request(
@@ -51,7 +57,7 @@ impl SkillsService {
                 let (discovered, summaries) = if is_builtin {
                     (Vec::new(), Vec::new())
                 } else {
-                    let discovered = match self.discover_skills(&config.skills).await {
+                    let discovered = match self.discover_skills_for_server(config, server_name).await {
                         Ok(skills) => skills,
                         Err(error) => {
                             return jsonrpc_error(
@@ -107,7 +113,7 @@ impl SkillsService {
 
                 let planning_scope = planning_scope_key(session_id);
                 let result = match self
-                    .execute_tool_call(config, tool_params, &planning_scope, is_builtin)
+                    .execute_tool_call(config, tool_params, &planning_scope, is_builtin, server_name)
                     .await
                 {
                     Ok(output) => output,
@@ -313,6 +319,7 @@ impl SkillsService {
         params: ToolCallParams,
         planning_scope: &str,
         is_builtin_endpoint: bool,
+        server_name: &str,
     ) -> Result<ToolResult, AppError> {
         if let Some(tool) = BuiltinTool::from_name(&params.name) {
             if is_builtin_endpoint {
@@ -333,7 +340,7 @@ impl SkillsService {
             )));
         }
 
-        let skills = self.discover_skills(&config.skills).await?;
+        let skills = self.discover_skills_for_server(config, server_name).await?;
         let bindings = build_skill_tool_bindings(&skills);
         let Some((tool_name, skill)) = bindings
             .iter()

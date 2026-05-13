@@ -224,6 +224,34 @@ pub struct SkillSummary {
     pub has_scripts: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivePlanStepDto {
+    pub step: String,
+    pub status: PlanItemStatusDto,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanItemStatusDto {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivePlanSummary {
+    pub planning_id: String,
+    pub explanation: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub total_steps: usize,
+    pub completed_steps: usize,
+    pub pending_count: usize,
+    pub in_progress_step: Option<ActivePlanStepDto>,
+    pub plan: Vec<ActivePlanStepDto>,
+}
+
 #[derive(Debug, Clone)]
 struct DiscoveredSkill {
     skill: String,
@@ -592,9 +620,10 @@ struct StreamCaptureState {
 
 #[derive(Debug)]
 struct SkillCommandExecution {
-    status: std::process::ExitStatus,
+    status: Option<std::process::ExitStatus>,
     stdout: StreamCapturedOutput,
     stderr: StreamCapturedOutput,
+    timed_out: bool,
 }
 
 

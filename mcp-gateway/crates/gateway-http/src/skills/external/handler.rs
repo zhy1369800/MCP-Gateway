@@ -154,12 +154,29 @@ impl SkillsService {
         let stderr = output.stderr.text;
         let stdout_truncated = output.stdout.truncated;
         let stderr_truncated = output.stderr.truncated;
-        let exit_code = output.status.code().unwrap_or(-1);
+        let exit_code = output.status.as_ref().and_then(|s| s.code()).unwrap_or(-1);
+
+        if output.timed_out {
+            let timeout_text = command_timeout_text(timeout_ms, &stdout, &stderr);
+            let mut structured = serde_json::Map::new();
+            structured.insert("status".to_string(), Value::String("timed_out".to_string()));
+            structured.insert("tool".to_string(), Value::String(tool_name.to_string()));
+            structured.insert("skill".to_string(), Value::String(skill.skill.clone()));
+            structured.insert("command".to_string(), Value::String(command_preview));
+            structured.insert("exitCode".to_string(), json!(exit_code));
+            structured.insert("durationMs".to_string(), json!(duration_ms));
+            structured.insert("stdoutTruncated".to_string(), Value::Bool(stdout_truncated));
+            structured.insert("stderrTruncated".to_string(), Value::Bool(stderr_truncated));
+            structured.insert("timeoutMs".to_string(), json!(timeout_ms));
+            return Ok(tool_error(timeout_text, Value::Object(structured)));
+        }
+
+        let status = output.status.as_ref().expect("status must be Some when not timed out");
 
         let mut structured = serde_json::Map::new();
         structured.insert(
             "status".to_string(),
-            Value::String(if output.status.success() {
+            Value::String(if status.success() {
                 "completed".to_string()
             } else {
                 "failed".to_string()
@@ -176,7 +193,7 @@ impl SkillsService {
 
         let output_text = command_output_text(&stdout, &stderr);
 
-        if output.status.success() {
+        if status.success() {
             Ok(tool_success(output_text, structured))
         } else {
             Ok(tool_error(
@@ -186,11 +203,38 @@ impl SkillsService {
         }
     }
 
+    /// Resolve the effective roots for a given server_name.
+    /// If it matches a group, use that group's roots; otherwise use the top-level roots.
+    fn resolve_roots_for_server(config: &GatewayConfig, server_name: &str) -> Vec<String> {
+        for group in &config.skills.root_groups {
+            if !group.name.is_empty() && format!("__{}__", group.name) == server_name {
+                return group.roots.clone();
+            }
+        }
+        config.skills.roots.clone()
+    }
+
+    async fn discover_skills_for_server(
+        &self,
+        config: &GatewayConfig,
+        server_name: &str,
+    ) -> Result<Vec<DiscoveredSkill>, AppError> {
+        let roots = Self::resolve_roots_for_server(config, server_name);
+        self.discover_skills_for_roots(roots).await
+    }
+
     async fn discover_skills(
         &self,
         skills_config: &SkillsConfig,
     ) -> Result<Vec<DiscoveredSkill>, AppError> {
         let roots = skills_config.roots.clone();
+        self.discover_skills_for_roots(roots).await
+    }
+
+    async fn discover_skills_for_roots(
+        &self,
+        roots: Vec<String>,
+    ) -> Result<Vec<DiscoveredSkill>, AppError> {
         let signature = roots_signature(&roots);
 
         {

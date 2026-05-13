@@ -13,7 +13,10 @@ use gateway_core::GatewayConfig;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub use openapi::ApiDoc;
-pub use skills::{ConfirmationStatus, SkillConfirmation, SkillSummary, SkillsService};
+pub use skills::{
+    ActivePlanStepDto, ActivePlanSummary, ConfirmationStatus, PlanItemStatusDto, SkillConfirmation,
+    SkillSummary, SkillsService,
+};
 pub use state::{AppState, SseHub};
 
 pub fn build_router(state: AppState, config: &GatewayConfig) -> Router {

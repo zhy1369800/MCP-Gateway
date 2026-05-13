@@ -17,6 +17,7 @@ import githubProxyPool from "../../src-tauri/github-proxy-pool.json";
 
 interface CachedResult {
   checkedAt: number;
+  currentVersion: string; // 记录缓存时的运行版本，版本变化时强制重新检查
   latestVersion: string;
   releaseUrl: string;
   releaseNotes: string;
@@ -41,12 +42,11 @@ function isNewerVersion(latest: string, current: string): boolean {
   return false;
 }
 
-async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
-  const directUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
+/** 单次 fetch，独立超时 */
+async function tryFetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 8000);
-
-  const tryFetch = async (url: string): Promise<Response> => {
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
     const res = await fetch(url, {
       headers: { Accept: "application/vnd.github+json" },
       signal: controller.signal,
@@ -55,7 +55,13 @@ async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
       throw new Error(`GitHub API returned ${res.status}`);
     }
     return res;
-  };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
+  const directUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 
   // Random start offset so repeated checks don't always hit the same proxy first.
   const offset = Math.floor(Math.random() * githubProxyPool.length);
@@ -64,7 +70,7 @@ async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
   for (let i = 0; i < githubProxyPool.length; i++) {
     const proxy = githubProxyPool[(offset + i) % githubProxyPool.length];
     try {
-      const res = await tryFetch(`${proxy}${directUrl}`);
+      const res = await tryFetchWithTimeout(`${proxy}${directUrl}`, 6000);
       const data = (await res.json()) as {
         tag_name: string;
         html_url: string;
@@ -84,7 +90,7 @@ async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
 
   // Fallback: direct GitHub
   try {
-    const res = await tryFetch(directUrl);
+    const res = await tryFetchWithTimeout(directUrl, 8000);
     const data = (await res.json()) as {
       tag_name: string;
       html_url: string;
@@ -99,8 +105,6 @@ async function fetchLatestRelease(currentVersion: string): Promise<UpdateInfo> {
     };
   } catch (e) {
     throw lastError ?? e;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -111,7 +115,7 @@ export function useUpdateCheck(currentVersion: string): UpdateInfo | null {
     let cancelled = false;
 
     const run = async () => {
-      // 读取缓存，24h 内不重复请求
+      // 读取缓存
       try {
         const raw = localStorage.getItem(CACHE_KEY);
         if (raw) {
@@ -120,7 +124,14 @@ export function useUpdateCheck(currentVersion: string): UpdateInfo | null {
           };
           const checkedAt =
             typeof cached.checkedAt === "number" ? cached.checkedAt : 0;
-          if (Date.now() - checkedAt < CHECK_INTERVAL_MS) {
+          const cachedForVersion =
+            typeof cached.currentVersion === "string"
+              ? cached.currentVersion
+              : "";
+
+          // 仅当版本未变且未过期时使用缓存
+          const versionUnchanged = cachedForVersion === currentVersion;
+          if (versionUnchanged && Date.now() - checkedAt < CHECK_INTERVAL_MS) {
             const latestVersion =
               typeof cached.latestVersion === "string"
                 ? cached.latestVersion
@@ -153,9 +164,10 @@ export function useUpdateCheck(currentVersion: string): UpdateInfo | null {
         const result = await fetchLatestRelease(currentVersion);
         if (cancelled) return;
         setUpdateInfo(result);
-        // 写入缓存
+        // 写入缓存（包含当前版本号）
         const cache: CachedResult = {
           checkedAt: Date.now(),
+          currentVersion,
           latestVersion: result.latestVersion,
           releaseUrl: result.releaseUrl,
           releaseNotes: result.releaseNotes,

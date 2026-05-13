@@ -61,6 +61,12 @@ export interface SkillRootEntry {
   enabled: boolean;
 }
 
+export interface SkillGroupEntry {
+  name: string;
+  roots: string[];
+  rootEntries?: SkillRootEntry[];
+}
+
 export interface BuiltinToolsConfig {
   readFile: boolean;
   shellCommand: boolean;
@@ -76,6 +82,7 @@ export interface BuiltinToolsConfig {
 export interface SkillsConfig {
   roots: string[];
   rootEntries?: SkillRootEntry[];
+  rootGroups?: SkillGroupEntry[];
   policy: SkillsPolicyConfig;
   execution: SkillsExecutionConfig;
   builtinTools: BuiltinToolsConfig;
@@ -233,3 +240,21 @@ export interface LocalRuntimeSummary {
   uv: LocalRuntimeAvailability;
   terminal: TerminalEncodingStatus;
 }
+
+export interface ActivePlanStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+export interface ActivePlan {
+  planningId: string;
+  explanation?: string;
+  updatedAt: string;
+  totalSteps: number;
+  completedSteps: number;
+  pendingCount: number;
+  inProgressStep?: ActivePlanStep;
+  plan: ActivePlanStep[];
+}
+
+

@@ -116,6 +116,7 @@ impl SkillsService {
                         json!({
                             "status": "completed",
                             "tool": BuiltinTool::TaskPlanning.name(),
+                            "planningId": planning_id,
                             "planning": {
                                 "active": false,
                                 "completed": true,
@@ -146,6 +147,7 @@ impl SkillsService {
                     json!({
                         "status": "completed",
                         "tool": BuiltinTool::TaskPlanning.name(),
+                        "planningId": planning_id,
                         "planning": {
                             "active": true,
                             "planningId": planning_id,
@@ -237,6 +239,7 @@ impl SkillsService {
                         json!({
                             "status": "completed",
                             "tool": BuiltinTool::TaskPlanning.name(),
+                            "planningId": planning_id,
                             "planning": {
                                 "active": false,
                                 "completed": true,
@@ -275,6 +278,7 @@ impl SkillsService {
                     json!({
                         "status": "completed",
                         "tool": BuiltinTool::TaskPlanning.name(),
+                        "planningId": planning_id,
                         "planning": {
                             "active": true,
                             "planningId": planning_id,
@@ -293,12 +297,12 @@ impl SkillsService {
             }
             TaskPlanningAction::Clear => {
                 let mut guard = self.planning.write().await;
-                let removed = if let Some(planning_id) = args
+                let trimmed_planning_id = args
                     .planning_id
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
+                    .filter(|value| !value.is_empty());
+                let removed = if let Some(planning_id) = trimmed_planning_id {
                     match resolve_planning_state_key(&guard, planning_scope, planning_id) {
                         Ok(key) => guard.remove(&key).is_some(),
                         Err(PlanningLookupError::Unknown) => false,
@@ -315,17 +319,25 @@ impl SkillsService {
                     guard.len() != before
                 };
 
+                let mut planning_payload = serde_json::Map::new();
+                planning_payload.insert("active".to_string(), json!(false));
+                planning_payload.insert("removed".to_string(), json!(removed));
+                let mut top_payload = serde_json::Map::new();
+                top_payload.insert("status".to_string(), json!("completed"));
+                top_payload.insert(
+                    "tool".to_string(),
+                    json!(BuiltinTool::TaskPlanning.name()),
+                );
+                if let Some(planning_id) = trimmed_planning_id {
+                    top_payload.insert("planningId".to_string(), json!(planning_id));
+                    planning_payload
+                        .insert("planningId".to_string(), json!(planning_id));
+                }
+                top_payload.insert("planning".to_string(), Value::Object(planning_payload));
+
                 Ok(tool_success(
                     "Plan cleared".to_string(),
-                    json!({
-                        "status": "completed",
-                        "tool": BuiltinTool::TaskPlanning.name(),
-                        "planning": {
-                            "active": false,
-                            "removed": removed,
-                            "planningId": args.planning_id
-                        }
-                    }),
+                    Value::Object(top_payload),
                 ))
             }
         }

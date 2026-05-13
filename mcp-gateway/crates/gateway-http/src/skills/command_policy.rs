@@ -65,11 +65,12 @@ async fn execute_skill_command(
             stderr_task.abort();
             let stdout = snapshot_stream_output(&stdout_state);
             let stderr = snapshot_stream_output(&stderr_state);
-            return Err(AppError::Upstream(command_timeout_text(
-                timeout_ms,
-                &stdout.text,
-                &stderr.text,
-            )));
+            return Ok(SkillCommandExecution {
+                status: None,
+                stdout,
+                stderr,
+                timed_out: true,
+            });
         }
     };
 
@@ -83,9 +84,10 @@ async fn execute_skill_command(
     let stderr = snapshot_stream_output(&stderr_state);
 
     Ok(SkillCommandExecution {
-        status,
+        status: Some(status),
         stdout,
         stderr,
+        timed_out: false,
     })
 }
 
@@ -391,10 +393,14 @@ fn find_outside_whitelist_path(
     whitelist: &[PathBuf],
 ) -> Option<(String, String, PathBuf)> {
     let script_file = normalize_root_path(script_path.to_path_buf());
-    let script_dir = script_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let script_dir = if script_path.is_dir() {
+        script_path.to_path_buf()
+    } else {
+        script_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
     for (token, source) in collect_path_candidates(command_args, script_text) {
         let resolved = resolve_candidate_path(&script_dir, &token);
         if resolved == script_file {

@@ -1,8 +1,7 @@
 import type { TFunction } from "../../i18n";
-import type { SkillCommandRule, SkillPolicyAction, SkillRootEntry, SkillsConfig } from "../../types";
+import type { SkillCommandRule, SkillGroupEntry, SkillPolicyAction, SkillRootEntry, SkillsConfig } from "../../types";
 import { argsToStr, strToArgs } from "../../utils/serverConfig";
 
-export const EXTERNAL_SKILL_SERVER_NAME = "__skills__";
 export const BUILTIN_SKILL_SERVER_NAME = "__builtin_skills__";
 
 export function parseRulesJson(input: string): SkillCommandRule[] {
@@ -233,9 +232,20 @@ export function ensureSkillsConfig(
     }
   }
 
+  const normalizedGroups: SkillGroupEntry[] = Array.isArray(raw?.rootGroups)
+    ? raw.rootGroups.map((g) => ({
+        name: (g?.name ?? "").trim(),
+        roots: Array.isArray(g?.roots) ? g.roots.map((p) => p.trim()).filter((p) => p.length > 0) : [],
+        rootEntries: Array.isArray(g?.rootEntries)
+          ? g.rootEntries.map((e) => ({ path: (e?.path ?? "").trim(), enabled: e?.enabled === true })).filter((e) => e.path.length > 0)
+          : (Array.isArray(g?.roots) ? g.roots.map((p) => ({ path: p.trim(), enabled: true })).filter((e) => e.path.length > 0) : []),
+      })).filter((g) => g.rootEntries.length > 0 || g.name.length > 0)
+    : [];
+
   return {
     roots: rootEntries.filter((entry) => entry.enabled).map((entry) => entry.path),
     rootEntries,
+    rootGroups: normalizedGroups.length > 0 ? normalizedGroups : undefined,
     policy: {
       defaultAction: raw?.policy?.defaultAction ?? "allow",
       rules: rules.map((rule) => ({
