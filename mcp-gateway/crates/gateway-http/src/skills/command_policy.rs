@@ -393,10 +393,14 @@ fn find_outside_whitelist_path(
     whitelist: &[PathBuf],
 ) -> Option<(String, String, PathBuf)> {
     let script_file = normalize_root_path(script_path.to_path_buf());
-    let script_dir = script_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let script_dir = if script_path.is_dir() {
+        script_path.to_path_buf()
+    } else {
+        script_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
     for (token, source) in collect_path_candidates(command_args, script_text) {
         let resolved = resolve_candidate_path(&script_dir, &token);
         if resolved == script_file {

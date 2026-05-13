@@ -182,6 +182,10 @@ fn is_path_like(token: &str) -> bool {
     if token.contains("://") {
         return false;
     }
+    // rg glob patterns: !pattern, *.{ext}, **, etc.
+    if token.starts_with('!') || token.contains('*') || token.contains('?') {
+        return false;
+    }
     if token.starts_with("~/")
         || token.starts_with("./")
         || token.starts_with("../")
@@ -1069,18 +1073,17 @@ mod tests {
             .stderr(std::process::Stdio::piped());
         configure_skill_command(&mut command);
 
-        let error = execute_skill_command(&mut command, timeout_ms, 4096, false, None, None)
+        let result = execute_skill_command(&mut command, timeout_ms, 4096, false, None, None)
             .await
-            .expect_err("command should time out");
+            .expect("command should execute successfully");
 
-        match error {
-            AppError::Upstream(message) => {
-                assert!(message.contains(&format!("command timed out after {timeout_ms}ms")));
-                assert!(message.contains("Last output:"));
-                assert!(message.contains("waiting for input"));
-            }
-            other => panic!("expected upstream timeout error, got {other:?}"),
-        }
+        assert!(result.timed_out, "command should time out");
+        assert!(result.status.is_none());
+        assert!(
+            result.stdout.text.contains("waiting for input"),
+            "stdout should contain last output, got: {}",
+            result.stdout.text
+        );
     }
 
     #[test]

@@ -459,9 +459,7 @@ pub async fn get_skill_events(
     path = "/api/v2/admin/skills/plans",
     responses((status = 200, description = "Active plans list", body = Vec<ActivePlanSummary>))
 )]
-pub async fn get_active_plans(
-    State(state): State<AppState>,
-) -> ApiResult<Vec<ActivePlanSummary>> {
+pub async fn get_active_plans(State(state): State<AppState>) -> ApiResult<Vec<ActivePlanSummary>> {
     let plans = state.skills.list_active_plans().await;
     Ok(response::ok(plans))
 }
@@ -485,7 +483,9 @@ pub async fn delete_active_plan(
             "planning id not found: {planning_id}"
         ))));
     }
-    Ok(response::ok(json!({ "planningId": planning_id, "removed": true })))
+    Ok(response::ok(
+        json!({ "planningId": planning_id, "removed": true }),
+    ))
 }
 
 #[utoipa::path(

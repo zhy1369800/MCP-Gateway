@@ -439,7 +439,7 @@ impl SkillsService {
             .filter(|state| !plan_all_completed(&state.plan))
             .map(plan_state_to_summary)
             .collect();
-        plans.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        plans.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         plans
     }
 }
