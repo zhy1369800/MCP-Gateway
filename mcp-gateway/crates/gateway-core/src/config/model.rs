@@ -166,7 +166,6 @@ fn default_ai_adapter_enabled() -> bool {
     true
 }
 
-
 fn default_system_prompt_enabled() -> bool {
     true
 }

@@ -10,7 +10,9 @@ use gateway_core::{
     load_config_from_path, migrate_v1_to_v2_file, rotate_token, save_config_atomic,
     validate_config, ConfigService, ProcessManager, RunMode,
 };
-use gateway_http::{build_router, spawn_idle_reaper, AiSessionManager, AppState, SkillsService, SseHub};
+use gateway_http::{
+    build_router, spawn_idle_reaper, AiSessionManager, AppState, SkillsService, SseHub,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {

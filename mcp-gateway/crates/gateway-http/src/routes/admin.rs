@@ -94,7 +94,10 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
             put(update_ai_session_system_prompt),
         )
         .route(
-            &format!("{}/admin/ai-sessions/:session_id/system-prompt-tool", prefix),
+            &format!(
+                "{}/admin/ai-sessions/:session_id/system-prompt-tool",
+                prefix
+            ),
             put(toggle_ai_session_system_prompt_tool),
         )
         .with_state(state)
@@ -446,7 +449,13 @@ pub async fn export_mcp_servers_payload(State(state): State<AppState>) -> ApiRes
                     .streamable_http
                     .base_path
                     .trim_end_matches('/'),
-                format_args!("/{}", percent_encoding::utf8_percent_encode(&session.name, percent_encoding::NON_ALPHANUMERIC))
+                format_args!(
+                    "/{}",
+                    percent_encoding::utf8_percent_encode(
+                        &session.name,
+                        percent_encoding::NON_ALPHANUMERIC
+                    )
+                )
             );
 
             let mut entry = serde_json::Map::new();
@@ -694,7 +703,9 @@ pub async fn update_ai_session_system_prompt(
         .update_system_prompt(&session_id, body.text.clone())
         .await
         .map_err(|e| response::err_response(AppError::BadRequest(e)))?;
-    Ok(response::ok(json!({ "sessionId": session_id, "systemPromptOverride": body.text })))
+    Ok(response::ok(
+        json!({ "sessionId": session_id, "systemPromptOverride": body.text }),
+    ))
 }
 
 pub async fn toggle_ai_session_system_prompt_tool(
@@ -707,7 +718,9 @@ pub async fn toggle_ai_session_system_prompt_tool(
         .toggle_system_prompt_tool(&session_id, body.enabled)
         .await
         .map_err(|e| response::err_response(AppError::BadRequest(e)))?;
-    Ok(response::ok(json!({ "sessionId": session_id, "systemPromptToolEnabled": enabled })))
+    Ok(response::ok(
+        json!({ "sessionId": session_id, "systemPromptToolEnabled": enabled }),
+    ))
 }
 
 fn gateway_base_url(listen: &str) -> Result<String, AppError> {

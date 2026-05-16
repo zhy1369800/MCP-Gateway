@@ -13,8 +13,8 @@ use axum::Router;
 use gateway_core::GatewayConfig;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-pub use openapi::ApiDoc;
 pub use ai_adapter::AiSessionManager;
+pub use openapi::ApiDoc;
 pub use skills::{
     ActivePlanStepDto, ActivePlanSummary, ConfirmationStatus, PlanItemStatusDto, SkillConfirmation,
     SkillSummary, SkillsService,

@@ -167,7 +167,10 @@ impl AiSessionManager {
         };
 
         self.sessions.write().await.insert(id.clone(), state);
-        self.name_index.write().await.insert(mcp_name.clone(), id.clone());
+        self.name_index
+            .write()
+            .await
+            .insert(mcp_name.clone(), id.clone());
 
         AiSession {
             id,
@@ -206,7 +209,9 @@ impl AiSessionManager {
                 let mut sessions = self.sessions.write().await;
                 if let Some(state) = sessions.get_mut(session_id) {
                     if let Some(call) = state.pending_calls.pop_front() {
-                        state.inflight_calls.insert(call.call_id.clone(), call.clone());
+                        state
+                            .inflight_calls
+                            .insert(call.call_id.clone(), call.clone());
                         return Some(call);
                     }
                 } else {
@@ -249,18 +254,28 @@ impl AiSessionManager {
 
     pub async fn list_sessions(&self) -> Vec<AiSession> {
         let sessions = self.sessions.read().await;
-        sessions.values().map(|s| self.state_to_session(s)).collect()
+        sessions
+            .values()
+            .map(|s| self.state_to_session(s))
+            .collect()
     }
 
     /// Rename session (update display_name and MCP server name)
-    pub async fn rename_session(&self, session_id: &str, new_display_name: &str) -> Result<AiSession, String> {
+    pub async fn rename_session(
+        &self,
+        session_id: &str,
+        new_display_name: &str,
+    ) -> Result<AiSession, String> {
         let new_mcp_name = format!("__{}__", new_display_name);
 
         {
             let name_index = self.name_index.read().await;
             if let Some(existing_id) = name_index.get(&new_mcp_name) {
                 if existing_id != session_id {
-                    return Err(format!("Name '{}' is already used by another session", new_display_name));
+                    return Err(format!(
+                        "Name '{}' is already used by another session",
+                        new_display_name
+                    ));
                 }
             }
         }
@@ -371,7 +386,6 @@ impl AiSessionManager {
         Ok(true)
     }
 
-
     /// Toggle a tool enabled/disabled for a session. Returns the updated tool or error.
     pub async fn toggle_tool(
         &self,
@@ -426,17 +440,26 @@ impl AiSessionManager {
     pub async fn get_effective_system_prompt(&self, session_id: &str) -> Option<(bool, String)> {
         let sessions = self.sessions.read().await;
         let state = sessions.get(session_id)?;
-        let text = state.system_prompt_override.clone().unwrap_or_else(|| state.system_prompt.clone());
+        let text = state
+            .system_prompt_override
+            .clone()
+            .unwrap_or_else(|| state.system_prompt.clone());
         Some((state.system_prompt_tool_enabled, text))
     }
     /// Get effective system prompt by MCP server name
-    pub async fn get_effective_system_prompt_by_name(&self, server_name: &str) -> Option<(bool, String)> {
+    pub async fn get_effective_system_prompt_by_name(
+        &self,
+        server_name: &str,
+    ) -> Option<(bool, String)> {
         let name_index = self.name_index.read().await;
         let session_id = name_index.get(server_name)?.clone();
         drop(name_index);
         let sessions = self.sessions.read().await;
         let state = sessions.get(&session_id)?;
-        let text = state.system_prompt_override.clone().unwrap_or_else(|| state.system_prompt.clone());
+        let text = state
+            .system_prompt_override
+            .clone()
+            .unwrap_or_else(|| state.system_prompt.clone());
         Some((state.system_prompt_tool_enabled, text))
     }
     pub async fn is_ai_adapter_server(&self, server_name: &str) -> bool {
@@ -474,4 +497,3 @@ impl AiSessionManager {
         None
     }
 }
-

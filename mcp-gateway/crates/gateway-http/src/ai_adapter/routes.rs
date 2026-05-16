@@ -39,7 +39,9 @@ fn heartbeat_token(session_id: &str) -> String {
 // ── Helper functions ──
 
 fn extract_api_key(headers: &HeaderMap, config: &AiAdapterConfig) -> String {
-    let valid_keys: Vec<&str> = config.api_keys.iter()
+    let valid_keys: Vec<&str> = config
+        .api_keys
+        .iter()
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .collect();
@@ -117,7 +119,9 @@ fn arguments_to_json_string(value: &Value) -> String {
 
 /// Check API key auth. Returns true if authorized (or no keys configured).
 fn check_auth(headers: &HeaderMap, config: &AiAdapterConfig) -> bool {
-    let valid_keys: Vec<&str> = config.api_keys.iter()
+    let valid_keys: Vec<&str> = config
+        .api_keys
+        .iter()
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .collect();
@@ -129,7 +133,9 @@ fn check_auth(headers: &HeaderMap, config: &AiAdapterConfig) -> bool {
 
 /// Anthropic: x-api-key, no sk-ant prefix check
 fn extract_anthropic_api_key(headers: &HeaderMap, config: &AiAdapterConfig) -> String {
-    let valid_keys: Vec<&str> = config.api_keys.iter()
+    let valid_keys: Vec<&str> = config
+        .api_keys
+        .iter()
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .collect();
@@ -154,19 +160,25 @@ pub fn router(state: AppState, config: &AiAdapterConfig) -> Router {
     let base = config.base_path.trim_end_matches('/').to_string();
     Router::new()
         .route(&format!("{}/v1/models", base), get(handle_models))
-        .route(&format!("{}/v1/chat/completions", base), post(handle_openai_chat))
-        .route(&format!("{}/v1/responses", base), post(handle_openai_responses))
-        .route(&format!("{}/v1/messages", base), post(handle_anthropic_messages))
+        .route(
+            &format!("{}/v1/chat/completions", base),
+            post(handle_openai_chat),
+        )
+        .route(
+            &format!("{}/v1/responses", base),
+            post(handle_openai_responses),
+        )
+        .route(
+            &format!("{}/v1/messages", base),
+            post(handle_anthropic_messages),
+        )
         .route(&format!("{}/health", base), get(handle_ai_health))
         .with_state(state)
 }
 
 // ── GET endpoints ──
 
-async fn handle_models(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn handle_models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let config = state.config_service.get_config().await;
     if !check_auth(&headers, &config.ai_adapter) {
         return unauthorized_response();
@@ -178,7 +190,8 @@ async fn handle_models(
             {"id": "claude-opus-4-7", "object": "model", "created": 1, "owned_by": "anthropic"},
             {"id": "gpt-5.5", "object": "model", "created": 1, "owned_by": "openai"}
         ]
-    })).into_response()
+    }))
+    .into_response()
 }
 
 async fn handle_ai_health(State(state): State<AppState>) -> impl IntoResponse {
@@ -261,21 +274,24 @@ async fn handle_openai_chat(
     };
 
     // Tool result messages -> resolve on existing session
-    let has_tool_results = request.messages.iter().any(|m| matches!(m.role, OpenAiRole::Tool));
+    let has_tool_results = request
+        .messages
+        .iter()
+        .any(|m| matches!(m.role, OpenAiRole::Tool));
     if has_tool_results {
         let sid = if let Some(ref s) = session_id_header {
             s.clone()
         } else {
             // Fallback: find session by call_id from tool messages
-            let call_id = request.messages.iter()
+            let call_id = request
+                .messages
+                .iter()
                 .filter(|m| matches!(m.role, OpenAiRole::Tool))
                 .filter_map(|m| m.tool_call_id.as_deref())
                 .next()
                 .unwrap_or("");
             match state.ai_sessions.find_session_by_call_id(call_id).await {
-                Some(id) => {
-                    id
-                }
+                Some(id) => id,
                 None => {
                     return (StatusCode::BAD_REQUEST, Json(json!({"error": {"message": "Cannot find session for tool results", "type": "invalid_request_error"}}))).into_response();
                 }
@@ -299,7 +315,8 @@ async fn handle_openai_chat(
         }
     }
 
-    let session = state.ai_sessions
+    let session = state
+        .ai_sessions
         .create_session(AiProtocol::OpenaiChat, system_prompt, tools, source)
         .await;
 
@@ -312,16 +329,27 @@ async fn handle_openai_chat_tool_results(
     request: &OpenAiChatRequest,
 ) -> axum::response::Response {
     for msg in &request.messages {
-        if !matches!(msg.role, OpenAiRole::Tool) { continue; }
-        let Some(tool_call_id) = msg.tool_call_id.as_deref() else { continue };
+        if !matches!(msg.role, OpenAiRole::Tool) {
+            continue;
+        }
+        let Some(tool_call_id) = msg.tool_call_id.as_deref() else {
+            continue;
+        };
         let content = match &msg.content {
             Some(value) => json_to_text(value),
             None => String::new(),
         };
-        let _ = state.ai_sessions.resolve_tool_call(
-            session_id, tool_call_id,
-            PendingToolResult { content, is_error: false },
-        ).await;
+        let _ = state
+            .ai_sessions
+            .resolve_tool_call(
+                session_id,
+                tool_call_id,
+                PendingToolResult {
+                    content,
+                    is_error: false,
+                },
+            )
+            .await;
     }
 
     chat_sse_response(state.ai_sessions.clone(), session_id.to_string())
@@ -332,7 +360,10 @@ fn chat_sse_response(
     session_id: String,
 ) -> axum::response::Response {
     let session_id_header = session_id.clone();
-    let response_id = format!("chatcmpl-{}", &Uuid::new_v4().to_string().replace('-', "")[..29]);
+    let response_id = format!(
+        "chatcmpl-{}",
+        &Uuid::new_v4().to_string().replace('-', "")[..29]
+    );
     let (tx, rx) = mpsc::channel::<Event>(16);
 
     spawn_chat_pump(ai_sessions, session_id, response_id, tx);
@@ -352,7 +383,10 @@ fn spawn_chat_pump(
     tx: mpsc::Sender<Event>,
 ) {
     tokio::spawn(async move {
-        if run_chat_pump(&ai_sessions, &session_id, &response_id, &tx).await.is_err() {
+        if run_chat_pump(&ai_sessions, &session_id, &response_id, &tx)
+            .await
+            .is_err()
+        {
             // tx.send failed => client disconnected, clean up session
             ai_sessions.remove_session(&session_id).await;
         }
@@ -423,16 +457,24 @@ fn chat_heartbeat_events(response_id: &str, session_id: &str) -> Vec<Event> {
 
 fn collect_responses_tool_outputs(input: &Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let Some(items) = input.as_array() else { return out };
+    let Some(items) = input.as_array() else {
+        return out;
+    };
     for item in items {
         let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
-        if kind != "function_call_output" { continue; }
-        let call_id = item.get("call_id")
+        if kind != "function_call_output" {
+            continue;
+        }
+        let call_id = item
+            .get("call_id")
             .or_else(|| item.get("tool_call_id"))
             .or_else(|| item.get("id"))
             .and_then(Value::as_str)
-            .unwrap_or("").to_string();
-        if call_id.is_empty() { continue; }
+            .unwrap_or("")
+            .to_string();
+        if call_id.is_empty() {
+            continue;
+        }
         let output = item.get("output").cloned().unwrap_or(Value::Null);
         out.push((call_id, json_to_text(&output)));
     }
@@ -519,11 +561,21 @@ fn yield_responses_tool_call_events(
     });
 
     vec![
-        Event::default().event("response.output_item.added").data(added.to_string()),
-        Event::default().event("response.function_call_arguments.delta").data(delta.to_string()),
-        Event::default().event("response.function_call_arguments.done").data(done.to_string()),
-        Event::default().event("response.output_item.done").data(item_done.to_string()),
-        Event::default().event("response.completed").data(completed.to_string()),
+        Event::default()
+            .event("response.output_item.added")
+            .data(added.to_string()),
+        Event::default()
+            .event("response.function_call_arguments.delta")
+            .data(delta.to_string()),
+        Event::default()
+            .event("response.function_call_arguments.done")
+            .data(done.to_string()),
+        Event::default()
+            .event("response.output_item.done")
+            .data(item_done.to_string()),
+        Event::default()
+            .event("response.completed")
+            .data(completed.to_string()),
     ]
 }
 
@@ -546,11 +598,16 @@ async fn handle_openai_responses(
         let sid = if let Some(ref s) = session_id_header {
             s.clone()
         } else {
-            let first_call_id = tool_outputs.first().map(|(id, _)| id.as_str()).unwrap_or("");
-            match state.ai_sessions.find_session_by_call_id(first_call_id).await {
-                Some(id) => {
-                    id
-                }
+            let first_call_id = tool_outputs
+                .first()
+                .map(|(id, _)| id.as_str())
+                .unwrap_or("");
+            match state
+                .ai_sessions
+                .find_session_by_call_id(first_call_id)
+                .await
+            {
+                Some(id) => id,
                 None => {
                     return (StatusCode::BAD_REQUEST, Json(json!({"error": {"message": "Cannot find session for tool results", "type": "invalid_request_error"}}))).into_response();
                 }
@@ -560,26 +617,50 @@ async fn handle_openai_responses(
     }
 
     // New request -> always create new session
-    let system_prompt = body.get("instructions").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let system_prompt = body
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let tools_value = body.get("tools").cloned().unwrap_or(Value::Array(vec![]));
-    let mut tools: Vec<AiToolDef> = tools_value.as_array()
-        .map(|arr| arr.iter().filter_map(|t| {
-            let (name, description, parameters) = if let Some(func) = t.get("function") {
-                (
-                    func.get("name").and_then(|v| v.as_str())?.to_string(),
-                    func.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    func.get("parameters").cloned().unwrap_or(Value::Object(serde_json::Map::new())),
-                )
-            } else {
-                (
-                    t.get("name").and_then(|v| v.as_str())?.to_string(),
-                    t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    t.get("parameters").cloned().unwrap_or(Value::Object(serde_json::Map::new())),
-                )
-            };
-            let input_schema = ensure_input_schema_type_object(parameters);
-            Some(AiToolDef { name, description, input_schema, enabled: true })
-        }).collect())
+    let mut tools: Vec<AiToolDef> = tools_value
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let (name, description, parameters) = if let Some(func) = t.get("function") {
+                        (
+                            func.get("name").and_then(|v| v.as_str())?.to_string(),
+                            func.get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            func.get("parameters")
+                                .cloned()
+                                .unwrap_or(Value::Object(serde_json::Map::new())),
+                        )
+                    } else {
+                        (
+                            t.get("name").and_then(|v| v.as_str())?.to_string(),
+                            t.get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            t.get("parameters")
+                                .cloned()
+                                .unwrap_or(Value::Object(serde_json::Map::new())),
+                        )
+                    };
+                    let input_schema = ensure_input_schema_type_object(parameters);
+                    Some(AiToolDef {
+                        name,
+                        description,
+                        input_schema,
+                        enabled: true,
+                    })
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     let source = extract_source(&headers);
@@ -594,7 +675,8 @@ async fn handle_openai_responses(
         }
     }
 
-    let session = state.ai_sessions
+    let session = state
+        .ai_sessions
         .create_session(AiProtocol::OpenaiResponses, system_prompt, tools, source)
         .await;
 
@@ -607,10 +689,17 @@ async fn handle_openai_responses_tool_results(
     outputs: Vec<(String, String)>,
 ) -> axum::response::Response {
     for (call_id, content) in &outputs {
-        let _ = state.ai_sessions.resolve_tool_call(
-            session_id, call_id,
-            PendingToolResult { content: content.clone(), is_error: false },
-        ).await;
+        let _ = state
+            .ai_sessions
+            .resolve_tool_call(
+                session_id,
+                call_id,
+                PendingToolResult {
+                    content: content.clone(),
+                    is_error: false,
+                },
+            )
+            .await;
     }
 
     responses_sse_response(state.ai_sessions.clone(), session_id.to_string())
@@ -621,7 +710,10 @@ fn responses_sse_response(
     session_id: String,
 ) -> axum::response::Response {
     let session_id_header = session_id.clone();
-    let response_id = format!("resp_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]);
+    let response_id = format!(
+        "resp_{}",
+        &Uuid::new_v4().to_string().replace('-', "")[..24]
+    );
     let (tx, rx) = mpsc::channel::<Event>(16);
 
     spawn_responses_pump(ai_sessions, session_id, response_id, tx);
@@ -641,7 +733,10 @@ fn spawn_responses_pump(
     tx: mpsc::Sender<Event>,
 ) {
     tokio::spawn(async move {
-        if run_responses_pump(&ai_sessions, &session_id, &response_id, &tx).await.is_err() {
+        if run_responses_pump(&ai_sessions, &session_id, &response_id, &tx)
+            .await
+            .is_err()
+        {
             ai_sessions.remove_session(&session_id).await;
         }
     });
@@ -672,17 +767,25 @@ async fn run_responses_pump(
         "sequence_number": seq.fetch_add(1, Ordering::SeqCst),
         "response": created_envelope.clone(),
     });
-    tx.send(Event::default().event("response.created").data(created.to_string()))
-        .await
-        .map_err(|_| ())?;
+    tx.send(
+        Event::default()
+            .event("response.created")
+            .data(created.to_string()),
+    )
+    .await
+    .map_err(|_| ())?;
     let in_progress = json!({
         "type": "response.in_progress",
         "sequence_number": seq.fetch_add(1, Ordering::SeqCst),
         "response": created_envelope,
     });
-    tx.send(Event::default().event("response.in_progress").data(in_progress.to_string()))
-        .await
-        .map_err(|_| ())?;
+    tx.send(
+        Event::default()
+            .event("response.in_progress")
+            .data(in_progress.to_string()),
+    )
+    .await
+    .map_err(|_| ())?;
 
     let dur = Duration::from_secs(SSE_HEARTBEAT_INTERVAL_SECS);
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + dur, dur);
@@ -710,7 +813,11 @@ async fn run_responses_pump(
     }
 }
 
-fn responses_heartbeat_events(response_id: &str, session_id: &str, seq: &Arc<AtomicU64>) -> Vec<Event> {
+fn responses_heartbeat_events(
+    response_id: &str,
+    session_id: &str,
+    seq: &Arc<AtomicU64>,
+) -> Vec<Event> {
     let next_seq = || seq.fetch_add(1, Ordering::SeqCst);
     let ping_name = heartbeat_token(session_id);
     let call_id = format!("{}:{}", session_id, Uuid::new_v4());
@@ -781,11 +888,21 @@ fn responses_heartbeat_events(response_id: &str, session_id: &str, seq: &Arc<Ato
     });
 
     vec![
-        Event::default().event("response.output_item.added").data(added.to_string()),
-        Event::default().event("response.function_call_arguments.delta").data(delta.to_string()),
-        Event::default().event("response.function_call_arguments.done").data(args_done.to_string()),
-        Event::default().event("response.output_item.done").data(item_done.to_string()),
-        Event::default().event("response.completed").data(completed.to_string()),
+        Event::default()
+            .event("response.output_item.added")
+            .data(added.to_string()),
+        Event::default()
+            .event("response.function_call_arguments.delta")
+            .data(delta.to_string()),
+        Event::default()
+            .event("response.function_call_arguments.done")
+            .data(args_done.to_string()),
+        Event::default()
+            .event("response.output_item.done")
+            .data(item_done.to_string()),
+        Event::default()
+            .event("response.completed")
+            .data(completed.to_string()),
     ]
 }
 
@@ -794,13 +911,25 @@ fn responses_heartbeat_events(response_id: &str, session_id: &str, seq: &Arc<Ato
 fn collect_anthropic_tool_results(request: &AnthropicRequest) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for msg in &request.messages {
-        if msg.role != "user" { continue; }
-        let Some(blocks) = msg.content.as_array() else { continue };
+        if msg.role != "user" {
+            continue;
+        }
+        let Some(blocks) = msg.content.as_array() else {
+            continue;
+        };
         for block in blocks {
             let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
-            if kind != "tool_result" { continue; }
-            let id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or("").to_string();
-            if id.is_empty() { continue; }
+            if kind != "tool_result" {
+                continue;
+            }
+            let id = block
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() {
+                continue;
+            }
             let content = block.get("content").cloned().unwrap_or(Value::Null);
             out.push((id, json_to_text(&content)));
         }
@@ -834,7 +963,10 @@ async fn handle_anthropic_messages(
         let sid = if let Some(ref s) = session_id_header {
             s.clone()
         } else {
-            let first_call_id = tool_results.first().map(|(id, _)| id.as_str()).unwrap_or("");
+            let first_call_id = tool_results
+                .first()
+                .map(|(id, _)| id.as_str())
+                .unwrap_or("");
             match state.ai_sessions.find_session_by_call_id(first_call_id).await {
                 Some(id) => id,
                 None => return (StatusCode::BAD_REQUEST, Json(json!({"error": {"message": "Cannot find session for tool results", "type": "invalid_request_error"}}))).into_response(),
@@ -858,7 +990,8 @@ async fn handle_anthropic_messages(
         }
     }
 
-    let session = state.ai_sessions
+    let session = state
+        .ai_sessions
         .create_session(AiProtocol::Anthropic, system_prompt, tools, source)
         .await;
 
@@ -871,10 +1004,17 @@ async fn handle_anthropic_tool_results(
     results: Vec<(String, String)>,
 ) -> axum::response::Response {
     for (call_id, content) in &results {
-        let _ = state.ai_sessions.resolve_tool_call(
-            session_id, call_id,
-            PendingToolResult { content: content.clone(), is_error: false },
-        ).await;
+        let _ = state
+            .ai_sessions
+            .resolve_tool_call(
+                session_id,
+                call_id,
+                PendingToolResult {
+                    content: content.clone(),
+                    is_error: false,
+                },
+            )
+            .await;
     }
 
     anthropic_sse_response(state.ai_sessions.clone(), session_id.to_string())
@@ -914,11 +1054,21 @@ fn yield_anthropic_tool_call_events(block_index: u64, tc: &PendingToolCall) -> V
     let msg_stop = json!({"type": "message_stop"});
 
     vec![
-        Event::default().event("content_block_start").data(block_start.to_string()),
-        Event::default().event("content_block_delta").data(delta.to_string()),
-        Event::default().event("content_block_stop").data(block_stop.to_string()),
-        Event::default().event("message_delta").data(msg_delta.to_string()),
-        Event::default().event("message_stop").data(msg_stop.to_string()),
+        Event::default()
+            .event("content_block_start")
+            .data(block_start.to_string()),
+        Event::default()
+            .event("content_block_delta")
+            .data(delta.to_string()),
+        Event::default()
+            .event("content_block_stop")
+            .data(block_stop.to_string()),
+        Event::default()
+            .event("message_delta")
+            .data(msg_delta.to_string()),
+        Event::default()
+            .event("message_stop")
+            .data(msg_stop.to_string()),
     ]
 }
 
@@ -947,7 +1097,10 @@ fn spawn_anthropic_pump(
     tx: mpsc::Sender<Event>,
 ) {
     tokio::spawn(async move {
-        if run_anthropic_pump(&ai_sessions, &session_id, &response_id, &tx).await.is_err() {
+        if run_anthropic_pump(&ai_sessions, &session_id, &response_id, &tx)
+            .await
+            .is_err()
+        {
             ai_sessions.remove_session(&session_id).await;
         }
     });
@@ -973,9 +1126,13 @@ async fn run_anthropic_pump(
             "usage": {"input_tokens": 0, "output_tokens": 0}
         }
     });
-    tx.send(Event::default().event("message_start").data(start.to_string()))
-        .await
-        .map_err(|_| ())?;
+    tx.send(
+        Event::default()
+            .event("message_start")
+            .data(start.to_string()),
+    )
+    .await
+    .map_err(|_| ())?;
 
     let dur = Duration::from_secs(SSE_HEARTBEAT_INTERVAL_SECS);
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + dur, dur);
@@ -1031,14 +1188,20 @@ fn anthropic_heartbeat_events(session_id: &str) -> Vec<Event> {
     let msg_stop = json!({ "type": "message_stop" });
 
     vec![
-        Event::default().event("content_block_start").data(block_start.to_string()),
-        Event::default().event("content_block_delta").data(delta.to_string()),
-        Event::default().event("content_block_stop").data(block_stop.to_string()),
-        Event::default().event("message_delta").data(msg_delta.to_string()),
-        Event::default().event("message_stop").data(msg_stop.to_string()),
+        Event::default()
+            .event("content_block_start")
+            .data(block_start.to_string()),
+        Event::default()
+            .event("content_block_delta")
+            .data(delta.to_string()),
+        Event::default()
+            .event("content_block_stop")
+            .data(block_stop.to_string()),
+        Event::default()
+            .event("message_delta")
+            .data(msg_delta.to_string()),
+        Event::default()
+            .event("message_stop")
+            .data(msg_stop.to_string()),
     ]
 }
-
-
-
-

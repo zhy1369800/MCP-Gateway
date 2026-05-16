@@ -180,7 +180,9 @@ pub struct AnthropicResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum AnthropicContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
