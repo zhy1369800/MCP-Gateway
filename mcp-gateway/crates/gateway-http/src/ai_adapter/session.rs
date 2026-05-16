@@ -10,6 +10,9 @@ use uuid::Uuid;
 /// Max concurrent pending calls per session
 const MAX_PENDING_CALLS: usize = 16;
 
+/// A pair of notify + result mutex used for resolving pending/inflight tool calls.
+type NotifyResultPair = (Arc<Notify>, Arc<Mutex<Option<PendingToolResult>>>);
+
 /// AI adapter session protocol format
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -118,6 +121,12 @@ pub struct AiSessionManager {
     name_index: Arc<RwLock<HashMap<String, String>>>,
     /// Monotonically increasing session counter for naming
     counter: Arc<tokio::sync::Mutex<u32>>,
+}
+
+impl Default for AiSessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AiSessionManager {
@@ -349,7 +358,7 @@ impl AiSessionManager {
         call_id: &str,
         result: PendingToolResult,
     ) -> Result<bool, String> {
-        let targets: Vec<(Arc<Notify>, Arc<Mutex<Option<PendingToolResult>>>)> = {
+        let targets: Vec<NotifyResultPair> = {
             let sessions = self.sessions.read().await;
             let state = sessions
                 .get(session_id)

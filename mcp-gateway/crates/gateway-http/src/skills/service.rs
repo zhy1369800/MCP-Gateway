@@ -376,7 +376,7 @@ impl SkillsService {
                         .collect(),
                     None => Vec::new(),
                 };
-                if session.as_ref().map_or(false, |s| s.system_prompt_tool_enabled) {
+                if session.as_ref().is_some_and(|s| s.system_prompt_tool_enabled) {
                     let sp = json!({
                         "name": "system_prompt",
                         "description": "读取系统提示词和 skillToken 的值。无参数，直接返回内容。",

@@ -247,7 +247,7 @@ fn yield_chat_tool_call_events(response_id: &str, tc: &PendingToolCall) -> Vec<E
         json!([{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]),
     );
 
-    let done = Event::default().data("[DONE]".to_string());
+    let done = Event::default().data("[DONE]");
     vec![role_chunk, tool_chunk, finish_chunk, done]
 }
 
@@ -401,26 +401,24 @@ async fn run_chat_pump(
 ) -> Result<(), ()> {
     let dur = Duration::from_secs(SSE_HEARTBEAT_INTERVAL_SECS);
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + dur, dur);
-    loop {
-        tokio::select! {
-            biased;
-            call = ai_sessions.wait_for_pending_call(session_id) => {
-                match call {
-                    Some(tc) => {
-                        for ev in yield_chat_tool_call_events(response_id, &tc) {
-                            tx.send(ev).await.map_err(|_| ())?;
-                        }
-                        return Ok(());
+    tokio::select! {
+        biased;
+        call = ai_sessions.wait_for_pending_call(session_id) => {
+            match call {
+                Some(tc) => {
+                    for ev in yield_chat_tool_call_events(response_id, &tc) {
+                        tx.send(ev).await.map_err(|_| ())?;
                     }
-                    None => return Ok(()),
+                    Ok(())
                 }
+                None => Ok(()),
             }
-            _ = heartbeat.tick() => {
-                for ev in chat_heartbeat_events(response_id, session_id) {
-                    tx.send(ev).await.map_err(|_| ())?;
-                }
-                return Ok(());
+        }
+        _ = heartbeat.tick() => {
+            for ev in chat_heartbeat_events(response_id, session_id) {
+                tx.send(ev).await.map_err(|_| ())?;
             }
+            Ok(())
         }
     }
 }
@@ -449,7 +447,7 @@ fn chat_heartbeat_events(response_id: &str, session_id: &str) -> Vec<Event> {
         response_id,
         json!([{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]),
     );
-    let done = Event::default().data("[DONE]".to_string());
+    let done = Event::default().data("[DONE]");
     vec![tool_chunk, finish, done]
 }
 
@@ -789,26 +787,24 @@ async fn run_responses_pump(
 
     let dur = Duration::from_secs(SSE_HEARTBEAT_INTERVAL_SECS);
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + dur, dur);
-    loop {
-        tokio::select! {
-            biased;
-            call = ai_sessions.wait_for_pending_call(session_id) => {
-                match call {
-                    Some(tc) => {
-                        for ev in yield_responses_tool_call_events(response_id, &seq, &tc) {
-                            tx.send(ev).await.map_err(|_| ())?;
-                        }
-                        return Ok(());
+    tokio::select! {
+        biased;
+        call = ai_sessions.wait_for_pending_call(session_id) => {
+            match call {
+                Some(tc) => {
+                    for ev in yield_responses_tool_call_events(response_id, &seq, &tc) {
+                        tx.send(ev).await.map_err(|_| ())?;
                     }
-                    None => return Ok(()),
+                    Ok(())
                 }
+                None => Ok(()),
             }
-            _ = heartbeat.tick() => {
-                for ev in responses_heartbeat_events(response_id, session_id, &seq) {
-                    tx.send(ev).await.map_err(|_| ())?;
-                }
-                return Ok(());
+        }
+        _ = heartbeat.tick() => {
+            for ev in responses_heartbeat_events(response_id, session_id, &seq) {
+                tx.send(ev).await.map_err(|_| ())?;
             }
+            Ok(())
         }
     }
 }
@@ -1136,26 +1132,24 @@ async fn run_anthropic_pump(
 
     let dur = Duration::from_secs(SSE_HEARTBEAT_INTERVAL_SECS);
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + dur, dur);
-    loop {
-        tokio::select! {
-            biased;
-            call = ai_sessions.wait_for_pending_call(session_id) => {
-                match call {
-                    Some(tc) => {
-                        for ev in yield_anthropic_tool_call_events(0, &tc) {
-                            tx.send(ev).await.map_err(|_| ())?;
-                        }
-                        return Ok(());
+    tokio::select! {
+        biased;
+        call = ai_sessions.wait_for_pending_call(session_id) => {
+            match call {
+                Some(tc) => {
+                    for ev in yield_anthropic_tool_call_events(0, &tc) {
+                        tx.send(ev).await.map_err(|_| ())?;
                     }
-                    None => return Ok(()),
+                    Ok(())
                 }
+                None => Ok(()),
             }
-            _ = heartbeat.tick() => {
-                for ev in anthropic_heartbeat_events(session_id) {
-                    tx.send(ev).await.map_err(|_| ())?;
-                }
-                return Ok(());
+        }
+        _ = heartbeat.tick() => {
+            for ev in anthropic_heartbeat_events(session_id) {
+                tx.send(ev).await.map_err(|_| ())?;
             }
+            Ok(())
         }
     }
 }
