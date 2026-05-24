@@ -367,10 +367,15 @@ impl SkillsService {
                         .iter()
                         .filter(|t| t.enabled)
                         .map(|t| {
+                            let input_schema = if s.system_prompt_tool_enabled {
+                                ai_adapter_input_schema_with_skill_token(&t.input_schema)
+                            } else {
+                                t.input_schema.clone()
+                            };
                             json!({
                                 "name": t.name,
                                 "description": t.description,
-                                "inputSchema": t.input_schema
+                                "inputSchema": input_schema
                             })
                         })
                         .collect(),
@@ -580,4 +585,53 @@ fn strip_ai_adapter_private_arguments(arguments: &Value) -> Value {
         object.remove("skill_token");
     }
     cleaned
+}
+
+fn ai_adapter_input_schema_with_skill_token(input_schema: &Value) -> Value {
+    let mut schema = input_schema.clone();
+    if !schema.is_object() {
+        schema = json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        });
+    }
+
+    if let Some(object) = schema.as_object_mut() {
+        object.insert("type".to_string(), Value::String("object".to_string()));
+
+        let properties = object
+            .entry("properties".to_string())
+            .or_insert_with(|| json!({}));
+        if !properties.is_object() {
+            *properties = json!({});
+        }
+        if let Some(properties_object) = properties.as_object_mut() {
+            properties_object
+                .entry("skillToken".to_string())
+                .or_insert_with(|| {
+                    json!({
+                        "type": "string",
+                        "description": "Gateway-only skillToken returned by the system_prompt tool. Required for gateway validation and stripped before forwarding to the AI client."
+                    })
+                });
+        }
+
+        let required = object
+            .entry("required".to_string())
+            .or_insert_with(|| json!([]));
+        if !required.is_array() {
+            *required = json!([]);
+        }
+        if let Some(required_array) = required.as_array_mut() {
+            let has_skill_token = required_array
+                .iter()
+                .any(|value| value.as_str() == Some("skillToken"));
+            if !has_skill_token {
+                required_array.push(Value::String("skillToken".to_string()));
+            }
+        }
+    }
+
+    schema
 }

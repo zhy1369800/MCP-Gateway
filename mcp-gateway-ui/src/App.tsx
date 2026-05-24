@@ -32,6 +32,7 @@ import {
   Trash2,
   X,
   ChevronDown,
+  Network,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
@@ -566,6 +567,7 @@ function App() {
     { key: "taskPlanning", name: "task-planning", icon: <ListChecks size={15} />, descKey: "builtInTaskPlanningDesc", requiresWhitelist: false },
     { key: "chromeCdp", name: "chrome-cdp", icon: <Chrome size={15} />, descKey: "builtInChromeCdpDesc", requiresWhitelist: false },
     { key: "chatPlusAdapterDebugger", name: "chat-plus-adapter-debugger", icon: <Bug size={15} />, descKey: "builtInChatPlusAdapterDesc", requiresWhitelist: false },
+    { key: "codeGraph", name: "codegraph", icon: <Network size={15} />, descKey: "builtInCodeGraphDesc", requiresWhitelist: true },
   ];
 
   const setWhitelistItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {

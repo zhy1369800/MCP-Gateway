@@ -3262,6 +3262,7 @@ html, body {
   .server-row-endpoints { grid-template-columns: 1fr; }
   .skills-dir-row { grid-template-columns: minmax(0, 1fr) auto 10px 24px; }
   .skills-dir-row.with-toggle { grid-template-columns: 36px minmax(0, 1fr) auto 10px 24px; }
+  .skill-group-items .skills-dir-row.with-toggle { grid-template-columns: 36px minmax(0, 1fr) auto; }
   .skills-dir-status { display: none; }
   .skills-action-select { width: 100%; }
   .built-in-tools-grid { grid-template-columns: 1fr; }
@@ -3728,6 +3729,13 @@ html, body {
   border-radius: 10px;
 }
 
+.skill-group-name-rename-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
 .skill-group-actions {
   display: flex;
   align-items: center;
@@ -3745,11 +3753,26 @@ html, body {
 }
 
 .skill-group-items .skills-dir-row {
+  grid-template-columns: 36px minmax(0, 1fr) auto;
   padding: 6px 10px;
 }
 
 .skill-group-items .skills-dir-row + .skills-dir-row {
   border-top: 1px solid var(--border-color);
+}
+
+.skills-dir-row-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: max-content;
+}
+
+.skills-dir-status-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .skill-group-empty {

@@ -22,6 +22,8 @@ const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
     include_str!("../../builtin-skills/chat-plus-adapter-debugger/SKILL.md");
 const BUILTIN_OFFICECLI_SKILL_MD: &str =
     include_str!("../../builtin-skills/officecli/SKILL.md");
+const BUILTIN_CODEGRAPH_SKILL_MD: &str =
+    include_str!("../../builtin-skills/codegraph/SKILL.md");
 const BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "windows")]
@@ -438,6 +440,7 @@ enum BuiltinTool {
     ChromeCdp,
     ChatPlusAdapterDebugger,
     OfficeCli,
+    CodeGraph,
 }
 
 #[derive(Debug, Clone)]
@@ -625,5 +628,4 @@ struct SkillCommandExecution {
     stderr: StreamCapturedOutput,
     timed_out: bool,
 }
-
 

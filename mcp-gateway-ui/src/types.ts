@@ -75,6 +75,7 @@ export interface BuiltinToolsConfig {
   chromeCdp: boolean;
   chatPlusAdapterDebugger: boolean;
   officeCli: boolean;
+  codeGraph: boolean;
   officeCliPath?: string;
   shellEnv?: Record<string, string>;
 }
@@ -302,4 +303,3 @@ export interface AiSession {
   systemPromptOverride?: string | null;
   hasPendingCall: boolean;
 }
-

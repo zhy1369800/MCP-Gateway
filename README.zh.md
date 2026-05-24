@@ -95,6 +95,7 @@ http://127.0.0.1:8765/api/v2/sse/playwright
 - `chrome-cdp`
 - `chat-plus-adapter-debugger`（业务场景专用）
 - `officecli`
+- `codegraph`
 
 ![内置工具面板](./image2.png)
 

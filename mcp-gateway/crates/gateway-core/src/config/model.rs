@@ -339,6 +339,8 @@ pub struct BuiltinToolsConfig {
     pub chat_plus_adapter_debugger: bool,
     #[serde(default = "default_builtin_tool_disabled")]
     pub office_cli: bool,
+    #[serde(default = "default_builtin_tool_disabled")]
+    pub code_graph: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub office_cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -355,6 +357,7 @@ impl Default for BuiltinToolsConfig {
             chrome_cdp: default_builtin_tool_enabled(),
             chat_plus_adapter_debugger: default_builtin_tool_enabled(),
             office_cli: default_builtin_tool_disabled(),
+            code_graph: default_builtin_tool_disabled(),
             office_cli_path: None,
             shell_env: HashMap::new(),
         }

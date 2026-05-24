@@ -7,6 +7,7 @@ impl BuiltinTool {
         BuiltinTool::ChromeCdp,
         BuiltinTool::ChatPlusAdapterDebugger,
         BuiltinTool::OfficeCli,
+        BuiltinTool::CodeGraph,
     ];
 
     pub(crate) fn is_enabled(self, cfg: &BuiltinToolsConfig) -> bool {
@@ -18,6 +19,7 @@ impl BuiltinTool {
             BuiltinTool::ChromeCdp => cfg.chrome_cdp,
             BuiltinTool::ChatPlusAdapterDebugger => cfg.chat_plus_adapter_debugger,
             BuiltinTool::OfficeCli => cfg.office_cli,
+            BuiltinTool::CodeGraph => cfg.code_graph,
         }
     }
 
@@ -30,6 +32,7 @@ impl BuiltinTool {
             BuiltinTool::ChromeCdp => chrome_cdp_tool_definition,
             BuiltinTool::ChatPlusAdapterDebugger => chat_plus_adapter_debugger_tool_definition,
             BuiltinTool::OfficeCli => office_cli_tool_definition,
+            BuiltinTool::CodeGraph => codegraph_tool_definition,
         }
     }
 
@@ -55,6 +58,7 @@ impl BuiltinTool {
                 Some(Self::ChatPlusAdapterDebugger)
             }
             value if value.eq_ignore_ascii_case(Self::OfficeCli.name()) => Some(Self::OfficeCli),
+            value if value.eq_ignore_ascii_case(Self::CodeGraph.name()) => Some(Self::CodeGraph),
             _ => None,
         }
     }
@@ -68,6 +72,7 @@ impl BuiltinTool {
             Self::ChromeCdp => "chrome-cdp",
             Self::ChatPlusAdapterDebugger => "chat-plus-adapter-debugger",
             Self::OfficeCli => "officecli",
+            Self::CodeGraph => "codegraph",
         }
     }
 }

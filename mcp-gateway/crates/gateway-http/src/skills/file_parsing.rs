@@ -1258,6 +1258,19 @@ mod tests {
             adapter.structured.get("docSource").and_then(Value::as_str),
             Some("embedded")
         );
+
+        let (tool, path) = builtin_skill_doc_read("cat builtin://codegraph/SKILL.md")
+            .expect("codegraph doc read");
+        let codegraph = builtin_skill_doc_result(tool, "doc", path, "cg123".to_string(), false);
+        assert!(!codegraph.is_error);
+        assert!(codegraph.text.contains("# CodeGraph"));
+        assert!(codegraph.text.contains("npx -y @colbymchenry/codegraph"));
+        assert!(codegraph.text.contains("codegraph serve --mcp"));
+        assert!(codegraph.text.contains("cg123"));
+        assert_eq!(
+            codegraph.structured.get("docSource").and_then(Value::as_str),
+            Some("embedded")
+        );
     }
 
     #[test]
@@ -1762,6 +1775,7 @@ mod tests {
             chrome_cdp: true,
             chat_plus_adapter_debugger: true,
             office_cli: false,
+            code_graph: false,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };
@@ -1786,6 +1800,7 @@ mod tests {
             chrome_cdp: true,
             chat_plus_adapter_debugger: false,
             office_cli: false,
+            code_graph: false,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };
@@ -1799,11 +1814,11 @@ mod tests {
 
     #[test]
     fn disabled_tool_rejected_in_execute_builtin_tool() {
-        // officecli is gated: it stays disabled until the admin UI detects or installs the binary.
-        // Defaults therefore enable every builtin except officecli, so ALL.len() - 1 = 6.
+        // officecli and codegraph are gated: they stay disabled until explicitly enabled.
         let all_enabled = BuiltinToolsConfig::default();
-        assert_eq!(builtin_tools(&all_enabled).len(), BuiltinTool::ALL.len() - 1);
+        assert_eq!(builtin_tools(&all_enabled).len(), BuiltinTool::ALL.len() - 2);
         assert!(!all_enabled.office_cli);
+        assert!(!all_enabled.code_graph);
 
         let all_disabled = BuiltinToolsConfig {
             read_file: false,
@@ -1813,10 +1828,133 @@ mod tests {
             chrome_cdp: false,
             chat_plus_adapter_debugger: false,
             office_cli: false,
+            code_graph: false,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };
         assert_eq!(builtin_tools(&all_disabled).len(), 0);
+    }
+
+    #[test]
+    fn codegraph_default_hidden_and_enabled_definition_has_schema() {
+        let os = "Windows";
+        let now = "2024-01-01T00:00:00Z";
+        let default_tools = builtin_tool_definitions(os, now, &BuiltinToolsConfig::default());
+        assert!(!default_tools.iter().any(|tool| {
+            tool.get("name").and_then(Value::as_str) == Some(BuiltinTool::CodeGraph.name())
+        }));
+
+        let mut cfg = BuiltinToolsConfig::default();
+        cfg.code_graph = true;
+        let tools = builtin_tool_definitions(os, now, &cfg);
+        let codegraph = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("codegraph"))
+            .expect("codegraph tool exists when enabled");
+        let properties = codegraph
+            .get("inputSchema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .expect("schema properties");
+        assert!(properties.contains_key("exec"));
+        assert!(properties.contains_key("timeoutMs"));
+        assert!(properties.contains_key("skillToken"));
+        assert!(codegraph
+            .get("description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("builtin://codegraph/SKILL.md")));
+    }
+
+    #[test]
+    fn codegraph_exec_is_converted_to_npx_args() {
+        let args = codegraph_npx_args_from_exec("codegraph status").expect("parse codegraph");
+        assert_eq!(
+            args,
+            vec![
+                "-y".to_string(),
+                "@colbymchenry/codegraph".to_string(),
+                "status".to_string()
+            ]
+        );
+
+        let args = codegraph_npx_args_from_exec("codegraph query AuthService")
+            .expect("parse codegraph query");
+        assert_eq!(
+            args,
+            vec![
+                "-y".to_string(),
+                "@colbymchenry/codegraph".to_string(),
+                "query".to_string(),
+                "AuthService".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn codegraph_exec_rejects_wrong_prefix_and_blocked_subcommands() {
+        assert!(codegraph_npx_args_from_exec("npx -y @colbymchenry/codegraph status").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph serve --mcp").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph install").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph uninit").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph unknown").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph --version").is_ok());
+    }
+
+    #[tokio::test]
+    async fn shell_command_blocks_codegraph_when_dedicated_tool_enabled() {
+        let service = SkillsService::new();
+        let sandbox = std::env::temp_dir().join(format!("gateway-codegraph-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+
+        let mut config = GatewayConfig::default();
+        config.skills.builtin_tools.task_planning = false;
+        config.skills.builtin_tools.code_graph = true;
+        config.skills.policy.path_guard.enabled = true;
+        config.skills.policy.path_guard.whitelist_dirs = vec![normalize_display_path(
+            &normalize_root_path(sandbox.clone()),
+        )];
+
+        let token = builtin_skill_token(BuiltinTool::ShellCommand);
+        let direct = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::ShellCommand,
+                json!({
+                    "exec": "codegraph status",
+                    "cwd": normalize_display_path(&sandbox),
+                    "skillToken": token
+                }),
+                "scope:codegraph-shell-block",
+            )
+            .await
+            .expect("shell result");
+        assert!(direct.is_error);
+        assert_eq!(
+            direct.structured.get("redirectTo").and_then(Value::as_str),
+            Some("codegraph")
+        );
+
+        let token = builtin_skill_token(BuiltinTool::ShellCommand);
+        let npx = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::ShellCommand,
+                json!({
+                    "exec": "npx -y @colbymchenry/codegraph status",
+                    "cwd": normalize_display_path(&sandbox),
+                    "skillToken": token
+                }),
+                "scope:codegraph-shell-block",
+            )
+            .await
+            .expect("shell result");
+        assert!(npx.is_error);
+        assert_eq!(
+            npx.structured.get("redirectTo").and_then(Value::as_str),
+            Some("codegraph")
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     #[tokio::test]
@@ -2284,6 +2422,102 @@ mod tests {
         assert_eq!(response["result"]["isError"], false);
     }
 
+    #[tokio::test]
+    async fn ai_adapter_tools_list_adds_gateway_only_skill_token_schema() {
+        use crate::ai_adapter::session::{AiProtocol, AiToolDef};
+        use crate::ai_adapter::AiSessionManager;
+
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let ai_sessions = AiSessionManager::new();
+        let session = ai_sessions
+            .create_session(
+                AiProtocol::OpenaiChat,
+                "Gateway validation is enabled.".to_string(),
+                vec![AiToolDef {
+                    name: "search".to_string(),
+                    description: "Search".to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        },
+                        "required": ["query"]
+                    }),
+                    enabled: true,
+                }],
+                "test".to_string(),
+            )
+            .await;
+
+        let response = service
+            .handle_ai_adapter_mcp_request(
+                &config,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                }),
+                None,
+                &session.name,
+                &ai_sessions,
+            )
+            .await;
+        let tools = response["result"]["tools"]
+            .as_array()
+            .expect("tools list");
+        let search = tools
+            .iter()
+            .find(|tool| tool["name"] == "search")
+            .expect("search tool");
+
+        assert_eq!(
+            search["inputSchema"]["properties"]["skillToken"]["type"],
+            "string"
+        );
+        let required = search["inputSchema"]["required"]
+            .as_array()
+            .expect("required list");
+        assert!(required.iter().any(|value| value == "query"));
+        assert!(required.iter().any(|value| value == "skillToken"));
+
+        let stored = ai_sessions
+            .get_session(&session.id)
+            .await
+            .expect("stored session");
+        assert!(stored.tools[0].input_schema["properties"]
+            .get("skillToken")
+            .is_none());
+
+        ai_sessions
+            .toggle_system_prompt_tool(&session.id, false)
+            .await
+            .expect("disable system_prompt tool");
+        let disabled_response = service
+            .handle_ai_adapter_mcp_request(
+                &config,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list"
+                }),
+                None,
+                &session.name,
+                &ai_sessions,
+            )
+            .await;
+        let disabled_tools = disabled_response["result"]["tools"]
+            .as_array()
+            .expect("disabled tools list");
+        let disabled_search = disabled_tools
+            .iter()
+            .find(|tool| tool["name"] == "search")
+            .expect("search tool when disabled");
+        assert!(disabled_search["inputSchema"]["properties"]
+            .get("skillToken")
+            .is_none());
+    }
+
 
     #[tokio::test]
     async fn builtin_tool_all_covers_every_variant() {
@@ -2303,6 +2537,7 @@ mod tests {
             chrome_cdp: true,
             chat_plus_adapter_debugger: true,
             office_cli: true,
+            code_graph: true,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };
@@ -2321,6 +2556,7 @@ mod tests {
             chrome_cdp: false,
             chat_plus_adapter_debugger: false,
             office_cli: false,
+            code_graph: false,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };

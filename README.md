@@ -95,6 +95,7 @@ Bundled tools currently include:
 - `chrome-cdp`
 - `chat-plus-adapter-debugger` (business-specific)
 - `officecli`
+- `codegraph`
 
 ![Built-in tools panel](./image2.png)
 

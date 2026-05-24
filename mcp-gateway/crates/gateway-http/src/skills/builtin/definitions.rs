@@ -74,7 +74,8 @@ fn render_builtin_tool_description(
         BuiltinTool::TaskPlanning
         | BuiltinTool::ChromeCdp
         | BuiltinTool::ChatPlusAdapterDebugger
-        | BuiltinTool::OfficeCli => {
+        | BuiltinTool::OfficeCli
+        | BuiltinTool::CodeGraph => {
             format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Preferred documentation read: {doc_read_hint}.")
         }
     };
@@ -121,6 +122,7 @@ fn builtin_skill_md_content(tool: BuiltinTool) -> &'static str {
         BuiltinTool::ChromeCdp => BUILTIN_CHROME_CDP_SKILL_MD,
         BuiltinTool::ChatPlusAdapterDebugger => BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD,
         BuiltinTool::OfficeCli => BUILTIN_OFFICECLI_SKILL_MD,
+        BuiltinTool::CodeGraph => BUILTIN_CODEGRAPH_SKILL_MD,
     }
 }
 
@@ -342,4 +344,3 @@ fn builtin_skill_doc_arg(arg: &str) -> Option<(BuiltinTool, String)> {
 
     None
 }
-
