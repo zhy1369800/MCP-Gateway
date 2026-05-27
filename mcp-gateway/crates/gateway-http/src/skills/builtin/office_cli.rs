@@ -67,6 +67,10 @@ fn office_cli_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> 
                         "type": "string",
                         "description": "officecli command to execute. First call this tool with readSkill=true. After reading SKILL.md, use commands like 'officecli create file.docx', 'officecli set ...', 'officecli get ...' etc."
                     },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Concrete working directory for the operation. It must be inside one configured allowed directory. Required when more than one allowed directory exists; use the directory containing the Office document when operating on a relative file path."
+                    },
                     "timeoutMs": {
                         "type": "integer",
                         "minimum": 1000,
@@ -320,12 +324,15 @@ impl SkillsService {
                     "durationMs": duration_ms,
                     "stdoutTruncated": output.stdout.truncated,
                     "stderrTruncated": output.stderr.truncated,
+                    "stdout": stdout,
+                    "stderr": stderr,
                     "timeoutMs": timeout_ms
                 }),
             ));
         }
 
         let status = output.status.as_ref().expect("status must be Some when not timed out");
+        let output_text = command_output_text(&stdout, &stderr);
 
         let structured = json!({
             "status": if status.success() { "completed" } else { "failed" },
@@ -335,7 +342,10 @@ impl SkillsService {
             "exitCode": exit_code,
             "durationMs": duration_ms,
             "stdoutTruncated": output.stdout.truncated,
-            "stderrTruncated": output.stderr.truncated
+            "stderrTruncated": output.stderr.truncated,
+            "stdout": stdout,
+            "stderr": stderr,
+            "output": output_text.clone()
         });
         self.record_tool_event_data(
             &call_id,
@@ -349,7 +359,6 @@ impl SkillsService {
             },
         )
         .await;
-        let output_text = command_output_text(&stdout, &stderr);
 
         if status.success() {
             Ok(tool_success_with_planning_reminder(
@@ -366,11 +375,13 @@ impl SkillsService {
             ))
         } else {
             Ok(tool_error(
-                command_failure_text(exit_code, &stdout, &stderr),
+                command_failure_text(
+                    exit_code,
+                    structured.get("stdout").and_then(|value| value.as_str()).unwrap_or(""),
+                    structured.get("stderr").and_then(|value| value.as_str()).unwrap_or(""),
+                ),
                 structured,
             ))
         }
     }
 }
-
-

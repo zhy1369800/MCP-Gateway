@@ -1886,6 +1886,33 @@ mod tests {
     }
 
     #[test]
+    fn officecli_enabled_definition_exposes_cwd_schema() {
+        let os = "Windows";
+        let now = "2024-01-01T00:00:00Z";
+        let cfg = BuiltinToolsConfig {
+            office_cli: true,
+            ..Default::default()
+        };
+        let tools = builtin_tool_definitions(os, now, &cfg);
+        let officecli = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("officecli"))
+            .expect("officecli tool exists when enabled");
+        let properties = officecli
+            .get("inputSchema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .expect("schema properties");
+
+        assert!(properties.contains_key("cwd"));
+        assert!(properties
+            .get("cwd")
+            .and_then(|schema| schema.get("description"))
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("allowed directory")));
+    }
+
+    #[test]
     fn codegraph_exec_is_converted_to_npx_args() {
         let args = codegraph_npx_args_from_exec("codegraph status").expect("parse codegraph");
         assert_eq!(
@@ -1908,6 +1935,22 @@ mod tests {
                 "AuthService".to_string()
             ]
         );
+
+        let args = codegraph_npx_args_from_exec("codegraph callers AuthService --json")
+            .expect("parse codegraph callers");
+        assert_eq!(
+            args,
+            vec![
+                "-y".to_string(),
+                "@colbymchenry/codegraph".to_string(),
+                "callers".to_string(),
+                "AuthService".to_string(),
+                "--json".to_string()
+            ]
+        );
+
+        assert!(codegraph_npx_args_from_exec("codegraph callees AuthService").is_ok());
+        assert!(codegraph_npx_args_from_exec("codegraph impact AuthService").is_ok());
     }
 
     #[test]
@@ -1915,7 +1958,9 @@ mod tests {
         assert!(codegraph_npx_args_from_exec("npx -y @colbymchenry/codegraph status").is_err());
         assert!(codegraph_npx_args_from_exec("codegraph serve --mcp").is_err());
         assert!(codegraph_npx_args_from_exec("codegraph install").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph uninstall").is_err());
         assert!(codegraph_npx_args_from_exec("codegraph uninit").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph unlock").is_err());
         assert!(codegraph_npx_args_from_exec("codegraph unknown").is_err());
         assert!(codegraph_npx_args_from_exec("codegraph --version").is_ok());
     }

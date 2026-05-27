@@ -15,7 +15,7 @@ fn codegraph_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> V
                     },
                     "exec": {
                         "type": "string",
-                        "description": "CodeGraph command to execute. First call this tool with readSkill=true. After reading SKILL.md, use commands like 'codegraph status', 'codegraph init -i', 'codegraph query AuthService', or 'codegraph context \"task\"'."
+                        "description": "CodeGraph command to execute. First call this tool with readSkill=true. After reading SKILL.md, use commands like 'codegraph status', 'codegraph init -i', 'codegraph query AuthService', 'codegraph callers AuthService', or 'codegraph context \"task\"'."
                     },
                     "cwd": {
                         "type": "string",
@@ -82,13 +82,13 @@ fn codegraph_npx_args_from_exec(exec: &str) -> Result<Vec<String>, AppError> {
 
     let Some(subcommand) = command_args.first() else {
         return Err(AppError::BadRequest(
-            "codegraph command requires a subcommand such as status, init, query, files, context, affected, help, or --version".to_string(),
+            "codegraph command requires a subcommand such as status, init, query, files, context, callers, callees, impact, affected, help, or --version".to_string(),
         ));
     };
     let normalized_subcommand = subcommand.to_ascii_lowercase();
     if matches!(
         normalized_subcommand.as_str(),
-        "serve" | "install" | "uninit"
+        "serve" | "install" | "uninstall" | "uninit" | "unlock"
     ) {
         return Err(AppError::BadRequest(format!(
             "codegraph {subcommand} is not allowed in the built-in codegraph tool"
@@ -96,7 +96,7 @@ fn codegraph_npx_args_from_exec(exec: &str) -> Result<Vec<String>, AppError> {
     }
     if !matches!(
         normalized_subcommand.as_str(),
-        "init" | "index" | "sync" | "status" | "query" | "files" | "context" | "affected" | "help" | "--version"
+        "init" | "index" | "sync" | "status" | "query" | "files" | "context" | "callers" | "callees" | "impact" | "affected" | "help" | "--version"
     ) {
         return Err(AppError::BadRequest(format!(
             "codegraph subcommand is not allowed: {subcommand}"
