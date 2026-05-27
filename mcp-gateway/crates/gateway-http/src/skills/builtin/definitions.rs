@@ -45,40 +45,14 @@ fn render_builtin_tool_description(
     os: &str,
     now: &str,
     planning_enabled: bool,
-    read_file_enabled: bool,
+    _read_file_enabled: bool,
 ) -> String {
     let frontmatter = builtin_skill_frontmatter(tool);
-    let skill_uri = builtin_skill_uri(tool);
     let skill_root_uri = builtin_skill_uri_root(tool);
-    let shell_read_cmd = if cfg!(target_os = "windows") {
-        format!("Get-Content -Raw {skill_uri}")
-    } else {
-        format!("cat {skill_uri}")
-    };
-    let read_file_doc = format!("`read_file` with `path`: `{skill_uri}` and no `skillToken`");
-    let doc_read_hint = if read_file_enabled && tool != BuiltinTool::ReadFile {
-        read_file_doc.clone()
-    } else {
-        format!("shell `exec`: `{shell_read_cmd}`")
-    };
-    let read_requirement = match tool {
-        BuiltinTool::ReadFile => {
-            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Suggested arguments: `{{\"path\":\"{skill_uri}\"}}`.")
-        }
-        BuiltinTool::ShellCommand => {
-            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Suggested `exec`: `{shell_read_cmd}`.")
-        }
-        BuiltinTool::MultiEditFile => {
-            format!("Before calling `{}`, read the complete SKILL.md; this read does not require `skillToken`. Preferred documentation read: {doc_read_hint}.", tool.name())
-        }
-        BuiltinTool::TaskPlanning
-        | BuiltinTool::ChromeCdp
-        | BuiltinTool::ChatPlusAdapterDebugger
-        | BuiltinTool::OfficeCli
-        | BuiltinTool::CodeGraph => {
-            format!("The only acceptable first call to this tool is a documentation-read call that reads the complete SKILL.md and does not require `skillToken`. Preferred documentation read: {doc_read_hint}.")
-        }
-    };
+    let self_read = format!("call `{}` with `{{\"readSkill\":true}}`", tool.name());
+    let read_requirement = format!(
+        "The only acceptable first call to this tool is a documentation-read call that reads this tool's complete SKILL.md and does not require `skillToken`: {self_read}."
+    );
     let frontmatter_block = if frontmatter.block.trim().is_empty() {
         "none".to_string()
     } else {
@@ -86,7 +60,7 @@ fn render_builtin_tool_description(
     };
 
     let mut description = format!(
-        "Bundled skill: {}.\nMANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this bundled skill for any real action, you MUST first read its full SKILL.md. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. {read_requirement} The SKILL.md response includes the required `skillToken` only inside the returned markdown content. You must obtain it by reading the complete SKILL.md document; this SKILL.md read is the one call that does not need `skillToken`. Do not use regex, grep, Select-String, line ranges, or other partial-read tricks to fetch only the token. Every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call; a rejected call fails and must be retried with the correct token. The gateway serves bundled SKILL.md reads from embedded content, so this direct documentation read does not require a workspace `cwd`.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill URI: {skill_root_uri}.\nSKILL.md URI: {skill_uri}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
+        "Bundled skill: {}.\nMANDATORY BEFORE USE: this tool description is only a short discovery summary, not the operating instructions. Before using this bundled skill for any real action, you MUST first read its full SKILL.md through this same tool. Do not infer safe usage from this description alone; skipping SKILL.md can cause incorrect or dangerous tool use. {read_requirement} The SKILL.md response includes the required `skillToken` only inside the returned markdown content. You must obtain it by reading the complete SKILL.md document through this same tool; this SKILL.md read is the one call that does not need `skillToken`. Do not use regex, grep, Select-String, line ranges, or other partial-read tricks to fetch only the token. Every later non-documentation call to this skill MUST include that exact `skillToken` argument or the gateway will reject the call; a rejected call fails and must be retried with the correct token. The gateway serves bundled SKILL.md reads from embedded content, so this direct documentation read does not require a workspace `cwd` or any other builtin tool.\nCurrent OS: {os}.\nCurrent datetime: {now}.\nSkill URI: {skill_root_uri}.\nFront matter summary:\nname: {}\ndescription: {}\nmetadata: {}\nFront matter raw (YAML):\n{}",
         frontmatter.name,
         frontmatter.name,
         if frontmatter.description.trim().is_empty() {
@@ -138,52 +112,7 @@ fn builtin_skill_uri(tool: BuiltinTool) -> String {
     format!("builtin://{}/SKILL.md", tool.name())
 }
 
-fn builtin_skill_doc_read(command: &str) -> Option<(BuiltinTool, String)> {
-    let tokens = split_shell_tokens(command);
-    let (program, args) = tokens.split_first()?;
-    let normalized_program = normalize_command_token(program);
-    if !matches!(
-        normalized_program.as_str(),
-        "cat" | "type" | "get-content" | "gc"
-    ) {
-        return None;
-    }
-
-    args.iter().find_map(|arg| builtin_skill_doc_arg(arg))
-}
-
-fn builtin_skill_doc_result(
-    tool: BuiltinTool,
-    command: &str,
-    matched_path: String,
-    token: String,
-    planning_enabled: bool,
-) -> ToolResult {
-    let mut text = render_builtin_skill_md(tool, planning_enabled);
-    text.push_str(&format!(
-        "\n\n[skillToken]\nUse this exact skillToken for subsequent non-documentation calls to `{}`: {}\n",
-        tool.name(),
-        token
-    ));
-    tool_success(
-        text,
-        json!({
-            "status": "completed",
-            "tool": BuiltinTool::ShellCommand.name(),
-            "command": command,
-            "builtinSkill": tool.name(),
-            "path": matched_path,
-            "docSource": "embedded"
-        }),
-    )
-}
-
-fn builtin_skill_read_doc_result(
-    tool: BuiltinTool,
-    matched_path: String,
-    token: String,
-    planning_enabled: bool,
-) -> ToolResult {
+fn builtin_skill_self_doc_result(tool: BuiltinTool, token: String, planning_enabled: bool) -> ToolResult {
     let mut text = render_builtin_skill_md(tool, planning_enabled);
     text.push_str(&format!(
         "\n\n[skillToken]\nUse this exact skillToken for subsequent non-documentation calls to `{}`: {}\n",
@@ -194,10 +123,11 @@ fn builtin_skill_read_doc_result(
         text.clone(),
         json!({
             "status": "completed",
-            "tool": BuiltinTool::ReadFile.name(),
+            "tool": tool.name(),
             "builtinSkill": tool.name(),
-            "path": matched_path,
+            "path": builtin_skill_uri(tool),
             "docSource": "embedded",
+            "readSkill": true,
             "content": text
         }),
     )
@@ -259,7 +189,7 @@ fn validate_skill_token_result(
 fn skill_token_error(tool_name: &str, message: &str) -> ToolResult {
     tool_error(
         format!(
-            "{message}. This call failed and must be retried with the correct token. Read the complete SKILL.md first; that documentation-read call does not require `skillToken`. Then retry `{tool_name}` with the returned `skillToken` argument. Do not use regex, grep, Select-String, line ranges, or partial reads to fetch only the token."
+            "{message}. This call failed and must be retried with the correct token. First call `{tool_name}` with `{{\"readSkill\":true}}`; that documentation-read call does not require `skillToken`. Then retry `{tool_name}` with the returned `skillToken` argument. Do not use regex, grep, Select-String, line ranges, or partial reads to fetch only the token."
         ),
         json!({
             "status": "error",
@@ -267,7 +197,7 @@ fn skill_token_error(tool_name: &str, message: &str) -> ToolResult {
             "tool": tool_name,
             "message": message,
             "requiredArgument": "skillToken",
-            "nextStep": "This call failed. Read the complete corresponding SKILL.md with the documented first-call command; that SKILL.md read does not require skillToken. Then retry with the returned skillToken. Do not use regex, grep, Select-String, line ranges, or partial reads to fetch only the token."
+            "nextStep": format!("This call failed. First call `{tool_name}` with {{\"readSkill\":true}}; that SKILL.md read does not require skillToken. Then retry with the returned skillToken. Do not use regex, grep, Select-String, line ranges, or partial reads to fetch only the token.")
         }),
     )
 }
@@ -322,25 +252,4 @@ fn is_external_skill_doc_read_command(command: &str, skill: &DiscoveredSkill) ->
         };
         resolved == skill_md
     })
-}
-
-fn builtin_skill_doc_arg(arg: &str) -> Option<(BuiltinTool, String)> {
-    let candidate = strip_matching_quotes(arg)
-        .trim()
-        .trim_end_matches(';')
-        .trim();
-    if candidate.is_empty() || candidate.starts_with('-') {
-        return None;
-    }
-
-    // Iterate over ALL builtin tools regardless of enabled/disabled state.
-    // Reading documentation should always be allowed without skillToken.
-    for &tool in BuiltinTool::ALL {
-        let uri = builtin_skill_uri(tool);
-        if candidate.eq_ignore_ascii_case(&uri) {
-            return Some((tool, uri));
-        }
-    }
-
-    None
 }

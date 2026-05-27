@@ -5,11 +5,15 @@ fn read_file_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> V
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["path"],
+                "required": [],
                 "properties": {
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
+                    },
                     "path": {
                         "type": "string",
-                        "description": "Text file path to read. Relative paths resolve from cwd. Use builtin://<skill>/SKILL.md to read bundled skill documentation."
+                        "description": "Text file path to read. Relative paths resolve from cwd."
                     },
                     "cwd": {
                         "type": "string",
@@ -28,7 +32,7 @@ fn read_file_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> V
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for normal file reads. First read the complete builtin://read_file/SKILL.md without skillToken, then use the returned skillToken. Documentation reads do not require it."
+                        "description": "Required for normal file reads. First call read_file with readSkill=true, then use the returned skillToken. Documentation reads do not require it."
                     }
                 }
             }
@@ -43,18 +47,20 @@ impl SkillsService {
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
-        let requested_path = args.path.trim();
-        if requested_path.is_empty() {
-            return Err(AppError::BadRequest("path cannot be empty".to_string()));
-        }
-
-        if let Some((tool, matched_path)) = builtin_skill_doc_arg(requested_path) {
-            return Ok(builtin_skill_read_doc_result(
-                tool,
-                matched_path,
-                builtin_skill_token(tool),
+        if args.read_skill {
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::ReadFile,
+                builtin_skill_token(BuiltinTool::ReadFile),
                 Self::planning_enabled(config),
             ));
+        }
+        let requested_path = args
+            .path
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| AppError::BadRequest("path is required".to_string()))?;
+        if requested_path.is_empty() {
+            return Err(AppError::BadRequest("path cannot be empty".to_string()));
         }
 
         if let Some(result) = validate_skill_token_result(
@@ -431,4 +437,3 @@ fn truncate_line_for_read(line: &str) -> (String, bool) {
     value.push_str(" [line truncated]");
     (value, true)
 }
-

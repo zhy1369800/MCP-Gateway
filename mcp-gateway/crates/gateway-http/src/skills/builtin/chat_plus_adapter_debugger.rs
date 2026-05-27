@@ -5,11 +5,15 @@ fn chat_plus_adapter_debugger_tool_definition(os: &str, now: &str, cfg: &Builtin
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["exec"],
+                "required": [],
                 "properties": {
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
+                    },
                     "exec": {
                         "type": "string",
-                        "description": "Documentation read or Chrome CDP debugging action. First call must read the complete builtin://chat-plus-adapter-debugger/SKILL.md. Then use `capture start`, `network search <filter>`, `network get <request-id>`, `network perf`, or documented raw CDP commands such as `netclear`, `net`, `netget`, `html`, `snap`, and `evalraw`."
+                        "description": "Chrome CDP debugging action. First call this tool with readSkill=true. Then use `capture start`, `network search <filter>`, `network get <request-id>`, `network perf`, or documented raw CDP commands such as `netclear`, `net`, `netget`, `html`, `snap`, and `evalraw`."
                     },
                     "timeoutMs": {
                         "type": "integer",
@@ -18,7 +22,7 @@ fn chat_plus_adapter_debugger_tool_definition(os: &str, now: &str, cfg: &Builtin
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation action. First read the complete builtin://chat-plus-adapter-debugger/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                        "description": "Required for every non-documentation action. First call chat-plus-adapter-debugger with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -32,19 +36,21 @@ impl SkillsService {
         args: BuiltinShellArgs,
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
-        let command_preview = args.exec.trim().to_string();
-        if command_preview.is_empty() {
-            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-        }
-
-        if let Some((doc_tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-            return Ok(builtin_skill_doc_result(
-                doc_tool,
-                &command_preview,
-                matched_path,
-                builtin_skill_token(doc_tool),
+        if args.read_skill {
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::ChatPlusAdapterDebugger,
+                builtin_skill_token(BuiltinTool::ChatPlusAdapterDebugger),
                 Self::planning_enabled(config),
             ));
+        }
+        let command_preview = args
+            .exec
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| AppError::BadRequest("exec is required".to_string()))?
+            .to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
         }
 
         if let Some(result) = validate_skill_token_result(

@@ -12,8 +12,12 @@ fn shell_command_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["exec"],
+                "required": [],
                 "properties": {
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
+                    },
                     "exec": {
                         "type": "string",
                         "description": "Shell command to run."
@@ -29,7 +33,7 @@ fn shell_command_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. First read the complete builtin://shell_command/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                        "description": "Required for every non-documentation call. First call shell_command with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     },
                     "writes": {
                         "type": "array",
@@ -49,31 +53,23 @@ impl SkillsService {
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
-        let command_preview = args.exec.trim().to_string();
-        if command_preview.is_empty() {
-            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-        }
-
-        if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-            let mut result = builtin_skill_doc_result(
-                tool,
-                &command_preview,
-                matched_path,
-                builtin_skill_token(tool),
+        if args.read_skill {
+            let mut result = builtin_skill_self_doc_result(
+                BuiltinTool::ShellCommand,
+                builtin_skill_token(BuiltinTool::ShellCommand),
                 Self::planning_enabled(config),
             );
-            // Append user-configured env vars info to the SKILL.md response
-            if !config.skills.builtin_tools.shell_env.is_empty() {
-                let env_section = format!(
-                    "\n\n## User Environment Variables\nThe following environment variables are pre-configured and available in every shell session:\n{}\nYou can use these variables directly in commands without needing to set them.",
-                    config.skills.builtin_tools.shell_env.keys()
-                        .map(|k| format!("- `{k}`"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                );
-                result.text.push_str(&env_section);
-            }
+            append_shell_env_section(&mut result, config);
             return Ok(result);
+        }
+        let command_preview = args
+            .exec
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| AppError::BadRequest("exec is required".to_string()))?
+            .to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
         }
 
         if let Some(result) = validate_skill_token_result(
@@ -392,4 +388,22 @@ impl SkillsService {
             ))
         }
     }
+}
+
+fn append_shell_env_section(result: &mut ToolResult, config: &GatewayConfig) {
+    if config.skills.builtin_tools.shell_env.is_empty() {
+        return;
+    }
+    let env_section = format!(
+        "\n\n## User Environment Variables\nThe following environment variables are pre-configured and available in every shell session:\n{}\nYou can use these variables directly in commands without needing to set them.",
+        config
+            .skills
+            .builtin_tools
+            .shell_env
+            .keys()
+            .map(|key| format!("- `{key}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    result.text.push_str(&env_section);
 }

@@ -604,20 +604,20 @@ mod tests {
     }
 
     #[test]
-    fn tool_args_require_exec_not_legacy_cmd() {
+    fn builtin_shell_args_allow_read_skill_without_exec() {
         let args = decode_tool_args::<BuiltinShellArgs>(&json!({
             "exec": "Get-ChildItem -Name",
             "cwd": "D:/workspace"
         }))
         .expect("exec argument should decode");
-        assert_eq!(args.exec, "Get-ChildItem -Name");
+        assert_eq!(args.exec.as_deref(), Some("Get-ChildItem -Name"));
 
-        let error = decode_tool_args::<BuiltinShellArgs>(&json!({
-            "cmd": "Get-ChildItem -Name",
-            "cwd": "D:/workspace"
+        let args = decode_tool_args::<BuiltinShellArgs>(&json!({
+            "readSkill": true
         }))
-        .expect_err("legacy cmd argument should not decode");
-        assert!(error.message().contains("missing field `exec`"));
+        .expect("readSkill documentation call should not require exec");
+        assert!(args.read_skill);
+        assert!(args.exec.is_none());
     }
 
     #[test]
@@ -1156,16 +1156,17 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .expect("shell description");
-        assert!(shell_description.contains("builtin://shell_command/SKILL.md"));
         assert!(shell_description.contains("MANDATORY BEFORE USE"));
-        assert!(shell_description.contains("you MUST first read its full SKILL.md"));
+        assert!(shell_description.contains("through this same tool"));
+        assert!(shell_description.contains("{\"readSkill\":true}"));
         assert!(shell_description.contains("returned markdown content"));
         assert!(shell_description.contains("partial-read tricks"));
         assert!(shell_description.contains("prefer rg or rg --files"));
         assert!(shell_description.contains("node_modules"));
         assert!(!shell_description.contains("structuredContent.skillToken"));
         assert!(shell_description.contains("Front matter summary:"));
-        assert!(shell_description.contains("SKILL.md URI:"));
+        assert!(!shell_description.contains("SKILL.md URI:"));
+        assert!(!shell_description.contains("Legacy alternative"));
         assert!(!shell_description.contains("Prefer fast discovery commands"));
 
         let names: Vec<&str> = tools
@@ -1187,10 +1188,11 @@ mod tests {
 
     #[test]
     fn builtin_skill_docs_are_served_from_embedded_skill_md() {
-        let (tool, path) =
-            builtin_skill_doc_read("Get-Content -Raw builtin://shell_command/SKILL.md")
-                .expect("shell doc read");
-        let shell = builtin_skill_doc_result(tool, "doc", path, "abc123".to_string(), false);
+        let shell = builtin_skill_self_doc_result(
+            BuiltinTool::ShellCommand,
+            builtin_skill_token(BuiltinTool::ShellCommand),
+            false,
+        );
         assert!(!shell.is_error);
         assert!(shell.text.contains("# Shell Command"));
         assert!(shell
@@ -1201,7 +1203,6 @@ mod tests {
             .contains("## Project And Workflow Navigation With Ripgrep"));
         assert!(shell.text.contains("rg --files"));
         assert!(shell.text.contains("Do not use `Get-ChildItem -Recurse`"));
-        assert!(shell.text.contains("abc123"));
         assert_eq!(
             shell.structured.get("builtinSkill").and_then(Value::as_str),
             Some("shell_command")
@@ -1212,38 +1213,49 @@ mod tests {
         );
         assert!(shell.structured.get("skillToken").is_none());
 
-        let (tool, path) = builtin_skill_doc_read("cat builtin://multi_edit_file/SKILL.md")
-            .expect("multi_edit_file doc read");
-        let multi_edit = builtin_skill_doc_result(tool, "doc", path, "fed456".to_string(), false);
+        let multi_edit = builtin_skill_self_doc_result(
+            BuiltinTool::MultiEditFile,
+            builtin_skill_token(BuiltinTool::MultiEditFile),
+            false,
+        );
         assert!(!multi_edit.is_error);
         assert!(multi_edit.text.contains("# Multi Edit File"));
         assert!(multi_edit.text.contains("\"edits\""));
-        assert!(multi_edit.text.contains("fed456"));
+        assert_eq!(
+            multi_edit
+                .structured
+                .get("readSkill")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(multi_edit.structured.get("skillToken").is_none());
 
-        let (tool, path) = builtin_skill_doc_read("cat builtin://task-planning/SKILL.md")
-            .expect("task-planning doc read");
-        let planning = builtin_skill_doc_result(tool, "doc", path, "plan123".to_string(), true);
+        let planning = builtin_skill_self_doc_result(
+            BuiltinTool::TaskPlanning,
+            builtin_skill_token(BuiltinTool::TaskPlanning),
+            true,
+        );
         assert!(!planning.is_error);
         assert!(planning.text.contains("# Task Planning"));
         assert!(planning.text.contains("planningId"));
-        assert!(planning.text.contains("plan123"));
         assert!(planning.structured.get("skillToken").is_none());
 
-        let (tool, path) = builtin_skill_doc_read("cat builtin://chrome-cdp/SKILL.md")
-            .expect("chrome-cdp doc read");
-        let cdp = builtin_skill_doc_result(tool, "doc", path, "987abc".to_string(), false);
+        let cdp = builtin_skill_self_doc_result(
+            BuiltinTool::ChromeCdp,
+            builtin_skill_token(BuiltinTool::ChromeCdp),
+            false,
+        );
         assert!(!cdp.is_error);
         assert!(cdp.text.contains("# Chrome CDP"));
         assert!(cdp.text.contains("Chrome DevTools Protocol over WebSocket"));
         assert!(cdp.text.contains("netclear"));
         assert!(cdp.text.contains("CDP_PROFILE_MODE=persistent"));
 
-        let (tool, path) = builtin_skill_doc_read(
-            "Get-Content -Raw builtin://chat-plus-adapter-debugger/SKILL.md",
-        )
-        .expect("chat-plus adapter debugger doc read");
-        let adapter = builtin_skill_doc_result(tool, "doc", path, "654fed".to_string(), false);
+        let adapter = builtin_skill_self_doc_result(
+            BuiltinTool::ChatPlusAdapterDebugger,
+            builtin_skill_token(BuiltinTool::ChatPlusAdapterDebugger),
+            false,
+        );
         assert!(!adapter.is_error);
         assert!(adapter.text.contains("# Chat Plus Adapter Debugger"));
         assert!(adapter.text.contains("decorateBubbles"));
@@ -1259,14 +1271,15 @@ mod tests {
             Some("embedded")
         );
 
-        let (tool, path) = builtin_skill_doc_read("cat builtin://codegraph/SKILL.md")
-            .expect("codegraph doc read");
-        let codegraph = builtin_skill_doc_result(tool, "doc", path, "cg123".to_string(), false);
+        let codegraph = builtin_skill_self_doc_result(
+            BuiltinTool::CodeGraph,
+            builtin_skill_token(BuiltinTool::CodeGraph),
+            false,
+        );
         assert!(!codegraph.is_error);
         assert!(codegraph.text.contains("# CodeGraph"));
         assert!(codegraph.text.contains("npx -y @colbymchenry/codegraph"));
         assert!(codegraph.text.contains("codegraph serve --mcp"));
-        assert!(codegraph.text.contains("cg123"));
         assert_eq!(
             codegraph.structured.get("docSource").and_then(Value::as_str),
             Some("embedded")
@@ -1399,6 +1412,7 @@ mod tests {
             cwd: None,
             skill_token: None,
             planning_id: None,
+            read_skill: false,
             files: Vec::new(),
             operations: Vec::new(),
             edits: vec![
@@ -1457,6 +1471,7 @@ mod tests {
             cwd: None,
             skill_token: None,
             planning_id: None,
+            read_skill: false,
             files: Vec::new(),
             operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
@@ -1491,6 +1506,7 @@ mod tests {
             cwd: None,
             skill_token: None,
             planning_id: None,
+            read_skill: false,
             files: Vec::new(),
             operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
@@ -1523,6 +1539,7 @@ mod tests {
             cwd: None,
             skill_token: None,
             planning_id: None,
+            read_skill: false,
             files: Vec::new(),
             operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
@@ -1844,8 +1861,10 @@ mod tests {
             tool.get("name").and_then(Value::as_str) == Some(BuiltinTool::CodeGraph.name())
         }));
 
-        let mut cfg = BuiltinToolsConfig::default();
-        cfg.code_graph = true;
+        let cfg = BuiltinToolsConfig {
+            code_graph: true,
+            ..Default::default()
+        };
         let tools = builtin_tool_definitions(os, now, &cfg);
         let codegraph = tools
             .iter()
@@ -1859,10 +1878,11 @@ mod tests {
         assert!(properties.contains_key("exec"));
         assert!(properties.contains_key("timeoutMs"));
         assert!(properties.contains_key("skillToken"));
+        assert!(properties.contains_key("readSkill"));
         assert!(codegraph
             .get("description")
             .and_then(Value::as_str)
-            .is_some_and(|description| description.contains("builtin://codegraph/SKILL.md")));
+            .is_some_and(|description| description.contains("{\"readSkill\":true}")));
     }
 
     #[test]

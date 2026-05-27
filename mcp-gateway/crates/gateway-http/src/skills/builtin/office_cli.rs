@@ -57,11 +57,15 @@ fn office_cli_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> 
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["exec"],
+                "required": [],
                 "properties": {
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
+                    },
                     "exec": {
                         "type": "string",
-                        "description": "officecli command to execute. First call must read the complete builtin://officecli/SKILL.md. After reading it, use commands like 'officecli create file.docx', 'officecli set ...', 'officecli get ...' etc."
+                        "description": "officecli command to execute. First call this tool with readSkill=true. After reading SKILL.md, use commands like 'officecli create file.docx', 'officecli set ...', 'officecli get ...' etc."
                     },
                     "timeoutMs": {
                         "type": "integer",
@@ -70,7 +74,7 @@ fn office_cli_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> 
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. First read the complete builtin://officecli/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                        "description": "Required for every non-documentation call. First call officecli with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -85,19 +89,21 @@ impl SkillsService {
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
-        let command_preview = args.exec.trim().to_string();
-        if command_preview.is_empty() {
-            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-        }
-
-        if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-            return Ok(builtin_skill_doc_result(
-                tool,
-                &command_preview,
-                matched_path,
-                builtin_skill_token(tool),
+        if args.read_skill {
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::OfficeCli,
+                builtin_skill_token(BuiltinTool::OfficeCli),
                 Self::planning_enabled(config),
             ));
+        }
+        let command_preview = args
+            .exec
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| AppError::BadRequest("exec is required".to_string()))?
+            .to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
         }
 
         if let Some(result) = validate_skill_token_result(
@@ -366,7 +372,5 @@ impl SkillsService {
         }
     }
 }
-
-
 
 
