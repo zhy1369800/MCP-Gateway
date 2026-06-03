@@ -57,11 +57,19 @@ fn office_cli_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> 
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["exec"],
+                "required": [],
                 "properties": {
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
+                    },
                     "exec": {
                         "type": "string",
-                        "description": "officecli command to execute. First call must read the complete builtin://officecli/SKILL.md. After reading it, use commands like 'officecli create file.docx', 'officecli set ...', 'officecli get ...' etc."
+                        "description": "officecli command to execute. First call this tool with readSkill=true. After reading SKILL.md, use commands like 'officecli create file.docx', 'officecli set ...', 'officecli get ...' etc."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Concrete working directory for the operation. It must be inside one configured allowed directory. Required when more than one allowed directory exists; use the directory containing the Office document when operating on a relative file path."
                     },
                     "timeoutMs": {
                         "type": "integer",
@@ -70,7 +78,7 @@ fn office_cli_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> 
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. First read the complete builtin://officecli/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                        "description": "Required for every non-documentation call. First call officecli with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -85,19 +93,21 @@ impl SkillsService {
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
-        let command_preview = args.exec.trim().to_string();
-        if command_preview.is_empty() {
-            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-        }
-
-        if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-            return Ok(builtin_skill_doc_result(
-                tool,
-                &command_preview,
-                matched_path,
-                builtin_skill_token(tool),
+        if args.read_skill {
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::OfficeCli,
+                builtin_skill_token(BuiltinTool::OfficeCli),
                 Self::planning_enabled(config),
             ));
+        }
+        let command_preview = args
+            .exec
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| AppError::BadRequest("exec is required".to_string()))?
+            .to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
         }
 
         if let Some(result) = validate_skill_token_result(
@@ -314,12 +324,15 @@ impl SkillsService {
                     "durationMs": duration_ms,
                     "stdoutTruncated": output.stdout.truncated,
                     "stderrTruncated": output.stderr.truncated,
+                    "stdout": stdout,
+                    "stderr": stderr,
                     "timeoutMs": timeout_ms
                 }),
             ));
         }
 
         let status = output.status.as_ref().expect("status must be Some when not timed out");
+        let output_text = command_output_text(&stdout, &stderr);
 
         let structured = json!({
             "status": if status.success() { "completed" } else { "failed" },
@@ -329,7 +342,10 @@ impl SkillsService {
             "exitCode": exit_code,
             "durationMs": duration_ms,
             "stdoutTruncated": output.stdout.truncated,
-            "stderrTruncated": output.stderr.truncated
+            "stderrTruncated": output.stderr.truncated,
+            "stdout": stdout,
+            "stderr": stderr,
+            "output": output_text.clone()
         });
         self.record_tool_event_data(
             &call_id,
@@ -343,7 +359,6 @@ impl SkillsService {
             },
         )
         .await;
-        let output_text = command_output_text(&stdout, &stderr);
 
         if status.success() {
             Ok(tool_success_with_planning_reminder(
@@ -360,13 +375,13 @@ impl SkillsService {
             ))
         } else {
             Ok(tool_error(
-                command_failure_text(exit_code, &stdout, &stderr),
+                command_failure_text(
+                    exit_code,
+                    structured.get("stdout").and_then(|value| value.as_str()).unwrap_or(""),
+                    structured.get("stderr").and_then(|value| value.as_str()).unwrap_or(""),
+                ),
                 structured,
             ))
         }
     }
 }
-
-
-
-

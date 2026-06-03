@@ -30,6 +30,9 @@ import {
   FolderOpen,
   Plus,
   Trash2,
+  X,
+  ChevronDown,
+  Network,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
@@ -37,6 +40,7 @@ import {
   clearServerAuthLocal,
   detectLocalRuntimes,
   setMainWindowTitle,
+  applyTrayLabels,
   getServerAuthStateLocal,
   loadLocalConfig,
   openConfigFileLocal,
@@ -61,6 +65,7 @@ import {
 } from "./tauri/officecli";
 import { usePolling, type PollOutcome } from "./hooks/usePolling";
 import type {
+  AiSession,
   GatewayConfig,
   LocalRuntimeSummary,
   ServerConfig,
@@ -81,6 +86,8 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { formatTime } from "./utils/display";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SkillConfirmations, SkillConfirmationPopup } from "./components/SkillConfirmations";
+import { SessionToolsModal } from "./components/SessionToolsModal";
+import { SystemPromptModal } from "./components/SystemPromptModal";
 import { SkillDirectoryListEditor } from "./components/SkillDirectoryListEditor";
 import { SkillGroupsEditor } from "./components/SkillGroupsEditor";
 import { SkillPolicyRulesEditor } from "./components/SkillPolicyRulesEditor";
@@ -237,7 +244,7 @@ function App() {
   };
 
   // ── 导航状态 ──
-  const [activeSection, setActiveSection] = useState<"info" | "settings" | "builtin" | "externalMcp" | "externalSkill">("info");
+  const [activeSection, setActiveSection] = useState<"info" | "settings" | "builtin" | "externalMcp" | "externalSkill" | "aiAdapter">("info");
 
   const [servers, setServers] = useState<ServerConfig[]>([]);
   const [listen, setListen] = useState("127.0.0.1:8765");
@@ -282,6 +289,20 @@ function App() {
   const [draggedServerOffsetY, setDraggedServerOffsetY] = useState(0);
   const [draggedServerHeight, setDraggedServerHeight] = useState(0);
   // 删除确认弹窗状态
+  const [aiSessions, setAiSessions] = useState<AiSession[]>([]);
+
+  const [aiAdapterKeys, setAiAdapterKeys] = useState<string[]>([""]);
+  const [aiAdapterEnabled, setAiAdapterEnabled] = useState<boolean>(true);
+  const [sessionNamePresets, setSessionNamePresets] = useState<string[]>([]);
+  const [presetAddModalOpen, setPresetAddModalOpen] = useState(false);
+  const [presetAddName, setPresetAddName] = useState("");
+  const [presetDeleteTarget, setPresetDeleteTarget] = useState<string | null>(null);
+  const [presetDropdownOpen, setPresetDropdownOpen] = useState(false);
+  const [systemPromptModalOpen, setSystemPromptModalOpen] = useState(false);
+  const [editingPromptText, setEditingPromptText] = useState("");
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
+  const [renameSessionName, setRenameSessionName] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; index: number; name: string }>({
     open: false, index: -1, name: ""
   });
@@ -323,6 +344,29 @@ function App() {
   const [deletingPlanId, setDeletingPlanId] = useState<string | null>(null);
   const [planDeleteConfirmId, setPlanDeleteConfirmId] = useState<string | null>(null);
   const [planDeleteError, setPlanDeleteError] = useState<string | null>(null);
+  const [toolsModalSessionId, setToolsModalSessionId] = useState<string | null>(null);
+  const [sessionToolStates, setSessionToolStates] = useState<Record<string, Set<string>>>({});
+
+  const openToolsModal = useCallback((session: AiSession) => {
+    // Only tools where enabled !== false are considered enabled
+    const currentEnabled = new Set(session.tools.filter(t => t.enabled !== false).map(t => t.name));
+    setSessionToolStates(prev => ({ ...prev, [session.id]: currentEnabled }));
+    setToolsModalSessionId(session.id);
+  }, []);
+
+  const closeToolsModal = useCallback(() => {
+    setToolsModalSessionId(null);
+  }, []);
+
+  const activeToolsModal = useMemo(() => {
+    if (!toolsModalSessionId) return null;
+    const session = aiSessions.find(s => s.id === toolsModalSessionId);
+    if (!session) return null;
+    return {
+      session,
+      enabledTools: sessionToolStates[toolsModalSessionId] ?? new Set(session.tools.filter(t => t.enabled !== false).map(t => t.name)),
+    };
+  }, [toolsModalSessionId, aiSessions, sessionToolStates]);
 
   /** 安装成功后跳过 useEffect 重复 check 的标记 */
   const skipNextOfficeCliCheckRef = useRef(false);
@@ -341,6 +385,67 @@ function App() {
     () => new ApiClient(listen, adminToken, apiPrefix),
     [adminToken, apiPrefix, listen],
   );
+
+  const toggleSessionTool = useCallback(async (sessionId: string, toolName: string) => {
+    // Optimistic update: toggle in local state first
+    let newEnabled = false;
+    const session = aiSessions.find(s => s.id === sessionId);
+    setSessionToolStates(prev => {
+      const current = new Set(prev[sessionId] ?? []);
+      if (current.has(toolName)) {
+        current.delete(toolName);
+        newEnabled = false;
+      } else {
+        current.add(toolName);
+        newEnabled = true;
+      }
+      return { ...prev, [sessionId]: current };
+    });
+    // Persist to backend
+    try {
+      if (apiClient) {
+        await apiClient.updateSessionTool(sessionId, toolName, newEnabled);
+        // Sync aiSessions so toolCount / enabled count updates immediately
+        setAiSessions(prev => prev.map(s => {
+          if (s.id !== sessionId) return s;
+          const updatedTools = s.tools.map(t => t.name === toolName ? { ...t, enabled: newEnabled } : t);
+          return { ...s, tools: updatedTools, toolCount: updatedTools.length };
+        }));
+        // Sync disabled_tools in local config: add name when disabling, remove when enabling
+        if (!newEnabled && session) {
+          const toolDef = session.tools.find(t => t.name === toolName);
+          if (toolDef) {
+            const cfg = await loadLocalConfig();
+            const existing = cfg.disabledTools ?? [];
+            if (!existing.some(dt => dt.name === toolDef.name)) {
+              cfg.disabledTools = [...existing, { name: toolDef.name }];
+              await saveLocalConfig(cfg);
+            }
+          }
+        } else if (newEnabled && session) {
+          const toolDef = session.tools.find(t => t.name === toolName);
+          if (toolDef) {
+            const cfg = await loadLocalConfig();
+            const existing = cfg.disabledTools ?? [];
+            cfg.disabledTools = existing.filter(dt => dt.name !== toolDef.name);
+            await saveLocalConfig(cfg);
+          }
+        }
+      }
+    } catch (err) {
+      // Rollback on failure
+      setSessionToolStates(prev => {
+        const current = new Set(prev[sessionId] ?? []);
+        if (newEnabled) {
+          current.delete(toolName);
+        } else {
+          current.add(toolName);
+        }
+        return { ...prev, [sessionId]: current };
+      });
+      console.error("Failed to toggle session tool:", err);
+    }
+  }, [apiClient, aiSessions]);
 
   const fetchPlans = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {
@@ -462,6 +567,7 @@ function App() {
     { key: "taskPlanning", name: "task-planning", icon: <ListChecks size={15} />, descKey: "builtInTaskPlanningDesc", requiresWhitelist: false },
     { key: "chromeCdp", name: "chrome-cdp", icon: <Chrome size={15} />, descKey: "builtInChromeCdpDesc", requiresWhitelist: false },
     { key: "chatPlusAdapterDebugger", name: "chat-plus-adapter-debugger", icon: <Bug size={15} />, descKey: "builtInChatPlusAdapterDesc", requiresWhitelist: false },
+    { key: "codeGraph", name: "codegraph", icon: <Network size={15} />, descKey: "builtInCodeGraphDesc", requiresWhitelist: true },
   ];
 
   const setWhitelistItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {
@@ -507,6 +613,10 @@ function App() {
     setHttpPath(nextHttpPath);
     setAdminToken(nextAdminToken);
     setMcpToken(nextMcpToken);
+    const nextAiApiKeys = cfg.aiAdapter?.apiKeys ?? [];
+    setAiAdapterKeys(nextAiApiKeys.length > 0 ? nextAiApiKeys : [""]);
+    setAiAdapterEnabled(cfg.aiAdapter?.enabled ?? true);
+    setSessionNamePresets(cfg.aiAdapter?.sessionNamePresets ?? []);
     const nextSkills = ensureSkillsConfig(cfg.skills, builtinRules);
     setSkills(nextSkills);
     if (nextSkills.builtinTools.officeCliPath) { setOfficeCliCustomPath(nextSkills.builtinTools.officeCliPath); } else { getOfficeCliDefaultPath().then((p) => { setOfficeCliCustomPath(p); setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCliPath: p } })); }).catch(() => {}); }
@@ -577,7 +687,10 @@ function App() {
     setJsonText(buildServersJson(nextServers));
     setJsonError(null);
     setServersMode("visual");
-    const { officeCliPath: _ocpSaved, ...savedBuiltinTools } = nextSkills.builtinTools;
+    // Normalize through the same path the live fingerprint uses so a
+    // freshly-loaded config does not look "dirty" the moment we render.
+    const skillsForSavedFingerprint = normalizeSkillsForSubmit(nextSkills, builtinRules);
+    const { officeCliPath: _ocpSaved, ...savedBuiltinTools } = skillsForSavedFingerprint.builtinTools;
     setSavedConfigFingerprint(createEditableConfigFingerprint(createEditableConfigSnapshot({
       servers: nextServers,
       listen: nextListen,
@@ -586,7 +699,10 @@ function App() {
       httpPath: nextHttpPath,
       adminToken: nextAdminToken,
       mcpToken: nextMcpToken,
-      skills: { ...nextSkills, builtinTools: savedBuiltinTools as typeof nextSkills.builtinTools },
+      skills: { ...skillsForSavedFingerprint, builtinTools: savedBuiltinTools as typeof skillsForSavedFingerprint.builtinTools },
+      aiAdapterEnabled: cfg.aiAdapter?.enabled ?? true,
+      aiAdapterKeys: nextAiApiKeys.length > 0 ? nextAiApiKeys : [""],
+      sessionNamePresets: cfg.aiAdapter?.sessionNamePresets ?? [],
     })));
     setConfigLoaded(true);
   }, [createServerUiIds]);
@@ -596,6 +712,9 @@ function App() {
     reloadLocalConfig().catch((e) => setError(String(e)));
     getConfigPath().then(setConfigPath).catch(() => {});
   }, [reloadLocalConfig]);
+
+  // ── AI Adapter 数据（在 running 声明之后初始化）──
+  // fetchAiSessions 在 running 声明后的 useEffect 中内联定义
 
   useEffect(() => {
     let cancelled = false;
@@ -629,6 +748,10 @@ function App() {
     document.title = nextTitle;
     setMainWindowTitle(nextTitle).catch(() => {});
   }, [hasAvailableUpdate, lang, t, updateInfo?.latestVersion]);
+
+  useEffect(() => {
+    applyTrayLabels(t("trayMenuShow"), t("trayMenuQuit"), t("trayTooltip")).catch(() => {});
+  }, [lang, t]);
 
   const parsedJsonServers = useMemo(() => {
     if (serversMode !== "json") {
@@ -696,6 +819,29 @@ function App() {
   });
 
   const running = !!status?.running;
+
+  // ── AI Adapter 数据 ──
+  const fetchAiSessions = useCallback(async () => {
+    if (!running || !apiClient) return;
+    try {
+      const sessions = await apiClient.getAiSessions();
+      setAiSessions(sessions);
+    } catch {
+      // 静默失败
+    }
+  }, [apiClient, running]);
+
+  useEffect(() => {
+    fetchAiSessions();
+  }, [fetchAiSessions]);
+
+  useEffect(() => {
+    if (!running) return;
+    const interval = window.setInterval(() => {
+      fetchAiSessions();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [running, fetchAiSessions]);
 
   const refreshServerAuthStates = useCallback(async (): Promise<PollOutcome> => {
     if (servers.length === 0) {
@@ -1328,8 +1474,11 @@ function App() {
       adminToken,
       mcpToken,
       skills: { ...skillsForFingerprint, builtinTools: builtinToolsForFp as typeof skillsForFingerprint.builtinTools },
+      aiAdapterEnabled,
+      aiAdapterKeys,
+      sessionNamePresets,
     }));
-  }, [servers, serversMode, parsedJsonServers, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills, defaultSkillRules]);
+  }, [servers, serversMode, parsedJsonServers, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills, defaultSkillRules, aiAdapterEnabled, aiAdapterKeys, sessionNamePresets]);
 
   const isConfigDirty = configLoaded
     && (currentConfigFingerprint === null || currentConfigFingerprint !== savedConfigFingerprint);
@@ -1345,6 +1494,9 @@ function App() {
       adminToken,
       mcpToken,
       skills: normalizeSkillsForSubmit(skills, defaultSkillRules),
+      aiAdapterEnabled,
+      aiAdapterKeys,
+      sessionNamePresets,
     });
     const cfg: GatewayConfig = await loadLocalConfig();
     cfg.servers = snapshot.servers;
@@ -1353,6 +1505,12 @@ function App() {
     cfg.transport = snapshot.transport;
     cfg.security = snapshot.security;
     cfg.skills = snapshot.skills;
+    cfg.aiAdapter = {
+      ...cfg.aiAdapter,
+      enabled: snapshot.aiAdapterEnabled,
+      apiKeys: snapshot.aiAdapterKeys.filter((k) => k.trim().length > 0),
+      sessionNamePresets: snapshot.sessionNamePresets.filter((p) => p.trim().length > 0),
+    };
     await saveLocalConfig(cfg);
     // Exclude officeCliPath from fingerprint (auto-persisted separately)
     const { officeCliPath: _ocpPersist, ...persistBuiltinTools } = snapshot.skills.builtinTools;
@@ -1937,6 +2095,15 @@ function App() {
             >
               <BookOpenText size={16} />
               <span>{t("navExternalSkill")}</span>
+            </button>
+            <button
+              type="button"
+              className={`sidebar-nav-item ${activeSection === "aiAdapter" ? "active" : ""}`}
+              onClick={() => setActiveSection("aiAdapter")}
+            >
+              <Send size={16} />
+              <span>{t("navAiAdapter")}</span>
+              {aiSessions.length > 0 && <span className="sidebar-badge">{aiSessions.length}</span>}
             </button>
           </nav>
 
@@ -2680,6 +2847,316 @@ function App() {
           </>
         )}
 
+      {/* ── AI 外接面板 ── */}
+      {activeSection === "aiAdapter" && (
+        <>
+          {/* Base URL */}
+          <section className="config-section skills-redesign-section">
+            <div className="section-heading-row built-in-tools-heading-row">
+              <div className="section-heading-block">
+                <div className="section-heading">{t("aiAdapterBaseUrl")}</div>
+                <div className="section-description">{t("aiAdapterConfigHint")}</div>
+              </div>
+            </div>
+
+            <div className="ai-adapter-url-row">
+              <button
+                type="button"
+                className={`toggle-btn ai-adapter-toggle ${aiAdapterEnabled ? "toggle-on" : "toggle-off"}`}
+                onClick={() => setAiAdapterEnabled((prev) => !prev)}
+                title={aiAdapterEnabled ? t("enabledClick") : t("disabledClick")}
+                aria-label={`${aiAdapterEnabled ? t("enabledClick") : t("disabledClick")} OpenAI / Anthropic`}
+                aria-pressed={aiAdapterEnabled}
+              />
+              <div className="ai-adapter-url-group">
+                <div className="ai-adapter-provider">
+                  <span className="endpoint-label">OpenAI / Anthropic</span>
+                </div>
+                <div className="ai-adapter-url-box">
+                  <code className="endpoint-url">{baseUrl}/api/v2/ai/v1</code>
+                  <button className="btn-icon" title={t("copyBuiltinSkillHttp")} onClick={() => { navigator.clipboard.writeText(`${baseUrl}/api/v2/ai/v1`); setCopied("ai-adapter-base-url"); setTimeout(() => setCopied(null), 2000); }}>
+                    {copied === "ai-adapter-base-url" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+
+          </section>
+
+          {/* API Keys */}
+          <section className="config-section skills-redesign-section ai-api-keys-section">
+            <div className="section-heading-row built-in-tools-heading-row">
+              <div className="section-heading-block">
+                <div className="section-heading">{t("aiAdapterApiKey")}</div>
+                <div className="section-description">{t("aiAdapterApiKeyPlaceholder")}</div>
+              </div>
+              <div className="section-heading-actions">
+                <button
+                  className="btn-add-dir"
+                  title={t("aiAdapterRandomKey")}
+                  onClick={() => {
+                    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                    let key = "sk-";
+                    for (let i = 0; i < 10; i++) key += chars[Math.floor(Math.random() * chars.length)];
+                    setAiAdapterKeys([...aiAdapterKeys, key]);
+                  }}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+            <div className="skills-redesign">
+              <div className="skills-dir-list">
+                {aiAdapterKeys.map((keyVal, idx) => (
+                  <div className="skills-dir-row no-validation" key={idx}>
+                    <input
+                      className="form-input skills-dir-input"
+                      type="text"
+                      value={keyVal}
+                      placeholder="sk-..."
+                      onChange={(e) => {
+                        const updated = [...aiAdapterKeys];
+                        updated[idx] = e.target.value;
+                        setAiAdapterKeys(updated);
+                      }}
+                    />
+                    <button
+                      className="btn-icon btn-danger-icon skills-dir-remove"
+                      title={t("remove")}
+                      onClick={() => {
+                        const updated = aiAdapterKeys.filter((_, i) => i !== idx);
+                        setAiAdapterKeys(updated.length > 0 ? updated : [""]);
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* 活跃会话 */}
+          <section className="config-section skills-redesign-section ai-sessions-section">
+            <div className="section-heading-row built-in-tools-heading-row">
+              <div className="section-heading-block">
+                <div className="section-heading">{t("aiAdapterSessions")} ({aiSessions.length})</div>
+                <div className="section-description">{aiSessions.length === 0 ? t("aiAdapterNoSessions") : ""}</div>
+              </div>
+            </div>
+
+            {aiSessions.length > 0 && (
+              <div className="skills-redesign">
+                <div className="ai-session-card-list">
+                  {aiSessions.map((session) => (
+                    <div key={session.id} className="ai-session-card" style={renameSessionId === session.id ? { overflow: "visible" } : undefined}>
+                      {renameSessionId === session.id ? (
+                        <div className="ai-session-card-rename">
+                          <input
+                            type="text"
+                            value={renameSessionName}
+                            onChange={(e) => setRenameSessionName(e.target.value)}
+                            className="form-input form-input-sm"
+                            autoFocus
+                            style={{ flex: 1, minWidth: 120 }}
+                          />
+                          <div className="ai-session-preset-dropdown">
+                            <button
+                              className="form-input form-input-sm ai-session-preset-trigger"
+                              onClick={(e) => { e.preventDefault(); setPresetDropdownOpen(!presetDropdownOpen); }}
+                            >
+                              <span>{t("sessionPresetPlaceholder")}</span>
+                              <ChevronDown size={12} />
+                            </button>
+                            {presetDropdownOpen && (
+                              <>
+                                <div className="ai-session-preset-backdrop" onClick={() => setPresetDropdownOpen(false)} />
+                                <div className="ai-session-preset-menu">
+                                  {sessionNamePresets.filter(p => p.trim().length > 0).map((preset, i) => (
+                                    <div key={i} className="ai-session-preset-item">
+                                      <span
+                                        className="ai-session-preset-item-name"
+                                        onClick={() => {
+                                          setRenameSessionName(preset);
+                                          setPresetDropdownOpen(false);
+                                        }}
+                                      >
+                                        {preset}
+                                      </span>
+                                      <button
+                                        className="ai-session-preset-item-del"
+                                        title={t("sessionPresetDelete")}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setPresetDeleteTarget(preset);
+                                          setPresetDropdownOpen(false);
+                                        }}
+                                      >
+                                        <X size={11} />
+                                      </button>
+                                    </div>
+                                  ))}
+                                  <div
+                                    className="ai-session-preset-item ai-session-preset-item-add"
+                                    onClick={() => {
+                                      setPresetAddName("");
+                                      setPresetAddModalOpen(true);
+                                      setPresetDropdownOpen(false);
+                                    }}
+                                  >
+                                    <Plus size={12} />
+                                    <span>{t("sessionPresetAdd")}</span>
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          <button className="btn btn-secondary btn-sm" onClick={async () => {
+                            if (renameSessionName.trim()) {
+                              try {
+                                await apiClient.renameAiSession(session.id, renameSessionName.trim());
+                                fetchAiSessions();
+                              } catch (e) { setError(String(e)); }
+                            }
+                            setRenameSessionId(null);
+                          }}>
+                            {t("saveConfig")}
+                          </button>
+                          <button className="btn btn-secondary btn-sm" onClick={() => setRenameSessionId(null)}>
+                            {t("cancel")}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="ai-session-card-main">
+                          <div className="ai-session-card-header">
+                            <div className="ai-session-card-info">
+                              <div className="ai-session-card-title">
+                                <span className="ai-session-card-name">{session.displayName}</span>
+                                <button
+                                  className="ai-session-rename-action"
+                                  onClick={() => { setRenameSessionId(session.id); setRenameSessionName(session.displayName); }}
+                                  title={t("sessionRename")}
+                                  aria-label={t("sessionRename")}
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                              </div>
+                              <span className={`ai-session-card-protocol protocol-${session.protocol}`} title={t("aiAdapterProtocol")}>
+                                {session.protocol === "openai-chat"
+                                  ? t("aiAdapterProtocolOpenaiChat")
+                                  : session.protocol === "openai-responses"
+                                  ? t("aiAdapterProtocolOpenaiResponses")
+                                  : t("aiAdapterProtocolAnthropic")}
+                              </span>
+                              <button
+                                className="ai-session-card-tools ai-session-card-tools-clickable"
+                                onClick={() => openToolsModal(session)}
+                                title={t("sessionToolsBtnTitle")}
+                              >
+                                <Wrench size={12} />
+                                {session.tools.filter(t => t.enabled !== false).length}/{session.toolCount} tools
+                              </button>
+                            </div>
+                            <div className="ai-session-card-actions">
+                              <button
+                                className="runtime-line-action runtime-line-danger-action"
+                                onClick={async () => {
+                                  try {
+                                    await apiClient.deleteAiSession(session.id);
+                                    fetchAiSessions();
+                                  } catch (e) { setError(String(e)); }
+                                }}
+                                title={t("sessionDelete")}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </div>
+                          <div className="ai-session-card-details">
+                            <div className="ai-session-card-detail-row">
+                              <span className="ai-session-card-detail-label">{t("aiAdapterSessionId")}</span>
+                              <span className="ai-session-card-detail-value">{session.id}</span>
+                            </div>
+                            <div className="ai-session-card-detail-row">
+                              <span className="ai-session-card-detail-label">{t("aiAdapterConnected")}</span>
+                              <span className="ai-session-card-detail-value">{formatTime(session.connectedAt)}</span>
+                            </div>
+                            <div className="ai-session-card-detail-row ai-session-card-toggle-row">
+                              <span className="ai-session-card-detail-label">{t("sessionToolPing")}</span>
+                              <span className="ai-session-card-toggle-description">{t("sessionToolPingDesc")}</span>
+                              <button
+                                className={`toggle-btn ${session.toolPingEnabled !== false ? "toggle-on" : "toggle-off"}`}
+                                onClick={async () => {
+                                  const next = !(session.toolPingEnabled !== false);
+                                  try {
+                                    await apiClient.toggleSessionToolPing(session.id, next);
+                                    setAiSessions((prev) => prev.map((s) => s.id === session.id ? { ...s, toolPingEnabled: next } : s));
+                                  } catch (e) {
+                                    setError(String(e));
+                                  }
+                                }}
+                                title={t("sessionToolPingTitle")}
+                                aria-label={t("sessionToolPingEnableLabel")}
+                                aria-pressed={session.toolPingEnabled !== false}
+                              />
+                            </div>
+                            {session.hasSystemPrompt && (
+                              <div className="ai-session-card-detail-row" style={{ alignItems: "center" }}>
+                                <span className="ai-session-card-detail-label">{t("aiAdapterSystemPrompt")}</span>
+                                <span className="ai-session-card-detail-value ai-session-card-detail-truncate">
+                                  {(session.systemPromptOverride ?? session.systemPrompt).substring(0, 80)}{(session.systemPromptOverride ?? session.systemPrompt).length > 80 ? "..." : ""}
+                                </span>
+                                <button
+                                  className="btn-icon"
+                                  style={{ marginLeft: "4px", flexShrink: 0 }}
+                                  onClick={() => {
+                                    setEditingPromptText(session.systemPromptOverride ?? session.systemPrompt);
+                                    setEditingSessionId(session.id);
+                                    setSystemPromptModalOpen(true);
+                                  }}
+                                  title={t("systemPromptEditBtn")}
+                                  aria-label={t("systemPromptEditBtn")}
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                                <button
+                                  className={`toggle-btn ${session.systemPromptToolEnabled ? "toggle-on" : "toggle-off"}`}
+                                  style={{ marginLeft: "6px", flexShrink: 0, alignSelf: "center" }}
+                                  onClick={async () => { const next = !session.systemPromptToolEnabled; try { await apiClient.toggleSessionSystemPromptTool(session.id, next); setAiSessions((prev) => prev.map((s) => s.id === session.id ? { ...s, systemPromptToolEnabled: next } : s)); } catch (e) { setError(String(e)); } }}
+                                  title={session.systemPromptToolEnabled ? t("enabledClick") : t("disabledClick")}
+                                  aria-label={t("systemPromptEnableLabel")}
+                                  aria-pressed={session.systemPromptToolEnabled}
+                                />
+                              </div>
+                            )}
+                            <div className="ai-session-card-endpoints">
+                              <div className="endpoint-item">
+                                <span className="endpoint-label">SSE</span>
+                                <code className="endpoint-url">{baseUrl}{ssePath}/{encodeURIComponent(session.name)}</code>
+                                <button className="btn-icon" title={t("copyBuiltinSkillSse")} onClick={() => handleCopy(session.name, "sse", `${baseUrl}${ssePath}/${encodeURIComponent(session.name)}`, `session-${session.id}-sse`)}>
+                                  {copied === `session-${session.id}-sse` ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                                </button>
+                              </div>
+                              <div className="endpoint-item">
+                                <span className="endpoint-label">HTTP</span>
+                                <code className="endpoint-url">{baseUrl}{httpPath}/{encodeURIComponent(session.name)}</code>
+                                <button className="btn-icon" title={t("copyBuiltinSkillHttp")} onClick={() => handleCopy(session.name, "streamable-http", `${baseUrl}${httpPath}/${encodeURIComponent(session.name)}`, `session-${session.id}-http`)}>
+                                  {copied === `session-${session.id}-http` ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        </>
+      )}
       </div>
 
       {/* ── 底部通知条：快捷入口 ── */}
@@ -2760,6 +3237,89 @@ function App() {
         onReject={(id) => handleSkillConfirmationAction(id, "reject")}
         onLater={deferSkillConfirmationPopup}
         lang={lang}
+        t={t}
+      />
+
+      <SessionToolsModal
+        open={!!activeToolsModal}
+        sessionName={activeToolsModal?.session.displayName ?? ""}
+        tools={activeToolsModal?.session.tools ?? []}
+        enabledTools={activeToolsModal?.enabledTools ?? new Set()}
+        onToggle={(toolName) => {
+          if (activeToolsModal) {
+            toggleSessionTool(activeToolsModal.session.id, toolName);
+          }
+        }}
+        onClose={closeToolsModal}
+        t={t}
+      />
+
+      <SystemPromptModal
+        open={systemPromptModalOpen}
+        initialText={editingPromptText}
+        onSave={async (text) => {
+          if (editingSessionId) {
+            try {
+              await apiClient.updateSessionSystemPrompt(editingSessionId, text || null);
+              setAiSessions((prev) => prev.map((s) =>
+                s.id === editingSessionId ? { ...s, systemPromptOverride: text || null } : s
+              ));
+            } catch (e) { setError(String(e)); }
+          }
+          setSystemPromptModalOpen(false);
+        }}
+        onClose={() => setSystemPromptModalOpen(false)}
+        t={t}
+      />
+
+      {/* ── 新增预设弹窗 ── */}
+      {presetAddModalOpen && (
+        <div className="modal-overlay" onClick={() => setPresetAddModalOpen(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
+            <div className="modal-header">{t("sessionPresetAdd")}</div>
+            <div className="modal-body" style={{ padding: "16px 20px" }}>
+              <input
+                className="form-input"
+                type="text"
+                value={presetAddName}
+                onChange={(e) => setPresetAddName(e.target.value)}
+                placeholder={t("sessionPresetAddPlaceholder")}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && presetAddName.trim()) {
+                    setSessionNamePresets([...sessionNamePresets, presetAddName.trim()]);
+                    setRenameSessionName(presetAddName.trim());
+                    setPresetAddModalOpen(false);
+                  }
+                }}
+              />
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary btn-sm" onClick={() => setPresetAddModalOpen(false)}>{t("cancel")}</button>
+              <button className="btn btn-start btn-sm" onClick={() => {
+                if (presetAddName.trim()) {
+                  setSessionNamePresets([...sessionNamePresets, presetAddName.trim()]);
+                  setRenameSessionName(presetAddName.trim());
+                  setPresetAddModalOpen(false);
+                }
+              }}>{t("saveConfig")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 删除预设确认弹窗 ── */}
+      <ConfirmDialog
+        open={presetDeleteTarget !== null}
+        title={t("sessionPresetDelete")}
+        message={t("sessionPresetDeleteConfirm").replace("{name}", presetDeleteTarget ?? "")}
+        onCancel={() => setPresetDeleteTarget(null)}
+        onConfirm={() => {
+          if (presetDeleteTarget) {
+            setSessionNamePresets(sessionNamePresets.filter(p => p !== presetDeleteTarget));
+            setPresetDeleteTarget(null);
+          }
+        }}
         t={t}
       />
 

@@ -280,6 +280,7 @@ export function ensureSkillsConfig(
       chromeCdp: raw?.builtinTools?.chromeCdp ?? true,
       chatPlusAdapterDebugger: raw?.builtinTools?.chatPlusAdapterDebugger ?? true,
       officeCli: raw?.builtinTools?.officeCli ?? false,
+      codeGraph: raw?.builtinTools?.codeGraph ?? false,
       officeCliPath: raw?.builtinTools?.officeCliPath ?? undefined,
       shellEnv: raw?.builtinTools?.shellEnv ?? undefined,
     },

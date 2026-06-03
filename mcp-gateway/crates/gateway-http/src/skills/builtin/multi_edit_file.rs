@@ -7,6 +7,10 @@ fn multi_edit_file_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig
                 "additionalProperties": false,
                 "required": [],
                 "properties": {
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
+                    },
                     "path": {
                         "type": "string",
                         "description": "Legacy single-file edit path, relative to cwd unless absolute. Use with top-level edits."
@@ -90,7 +94,7 @@ fn multi_edit_file_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every multi_edit_file call. First read the complete builtin://multi_edit_file/SKILL.md with read_file when available (or shell_command as fallback) without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                        "description": "Required for every non-documentation multi_edit_file call. First call multi_edit_file with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -105,6 +109,13 @@ impl SkillsService {
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
+        if args.read_skill {
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::MultiEditFile,
+                builtin_skill_token(BuiltinTool::MultiEditFile),
+                Self::planning_enabled(config),
+            ));
+        }
         if let Some(result) = validate_skill_token_result(
             BuiltinTool::MultiEditFile.name(),
             &builtin_skill_token(BuiltinTool::MultiEditFile),

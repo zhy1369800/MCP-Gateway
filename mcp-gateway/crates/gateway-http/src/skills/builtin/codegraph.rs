@@ -1,14 +1,9 @@
-fn shell_command_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Value {
-    let mut desc = render_builtin_tool_description(BuiltinTool::ShellCommand, os, now, cfg.task_planning, cfg.read_file);
-    if !cfg.shell_env.is_empty() {
-        desc.push_str("\n\nUser-configured environment variables available in this terminal session:\n");
-        for key in cfg.shell_env.keys() {
-            desc.push_str(&format!("- {key}\n"));
-        }
-    }
+const CODEGRAPH_NPM_PACKAGE: &str = "@colbymchenry/codegraph";
+
+fn codegraph_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> Value {
     json!({
-            "name": BuiltinTool::ShellCommand.name(),
-            "description": desc,
+            "name": BuiltinTool::CodeGraph.name(),
+            "description": render_builtin_tool_description(BuiltinTool::CodeGraph, os, now, cfg.task_planning, cfg.read_file),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -20,11 +15,11 @@ fn shell_command_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
                     },
                     "exec": {
                         "type": "string",
-                        "description": "Shell command to run."
+                        "description": "CodeGraph command to execute. First call this tool with readSkill=true. After reading SKILL.md, use commands like 'codegraph status', 'codegraph init -i', 'codegraph query AuthService', 'codegraph callers AuthService', or 'codegraph context \"task\"'."
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Concrete working directory for the operation. It must be inside one configured allowed directory. Required when more than one allowed directory exists; do not omit it in that case."
+                        "description": "Concrete project directory for CodeGraph. It must be inside one configured allowed directory. Required when more than one allowed directory exists."
                     },
                     "timeoutMs": {
                         "type": "integer",
@@ -33,20 +28,117 @@ fn shell_command_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. First call shell_command with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
-                    },
-                    "writes": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Optional list of file paths the command will modify. Providing this makes the gateway serialize the call against other builtin tool calls (multi_edit_file, read_file, shell_command) touching the same paths, preventing lost updates from concurrent writes. Leave empty for read-only commands."
+                        "description": "Required for every non-documentation call. First call codegraph with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
     })
 }
 
+fn codegraph_npx_program() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "npx.cmd"
+    } else {
+        "npx"
+    }
+}
+
+fn check_npx_available() -> bool {
+    std::process::Command::new(codegraph_npx_program())
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+        .and_then(|mut child| {
+            let start = std::time::Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return Some(status.success()),
+                    Ok(None) if start.elapsed() < std::time::Duration::from_secs(5) => {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        return None;
+                    }
+                }
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn codegraph_npx_args_from_exec(exec: &str) -> Result<Vec<String>, AppError> {
+    let tokens = split_shell_tokens(exec);
+    let Some((program, command_args)) = tokens.split_first() else {
+        return Err(AppError::BadRequest("exec cannot be empty".to_string()));
+    };
+
+    if command_program_stem(program) != "codegraph" {
+        return Err(AppError::BadRequest(format!(
+            "codegraph tool only accepts commands starting with 'codegraph', got: {program}"
+        )));
+    }
+
+    let Some(subcommand) = command_args.first() else {
+        return Err(AppError::BadRequest(
+            "codegraph command requires a subcommand such as status, init, query, files, context, callers, callees, impact, affected, help, or --version".to_string(),
+        ));
+    };
+    let normalized_subcommand = subcommand.to_ascii_lowercase();
+    if matches!(
+        normalized_subcommand.as_str(),
+        "serve" | "install" | "uninstall" | "uninit" | "unlock"
+    ) {
+        return Err(AppError::BadRequest(format!(
+            "codegraph {subcommand} is not allowed in the built-in codegraph tool"
+        )));
+    }
+    if !matches!(
+        normalized_subcommand.as_str(),
+        "init" | "index" | "sync" | "status" | "query" | "files" | "context" | "callers" | "callees" | "impact" | "affected" | "help" | "--version"
+    ) {
+        return Err(AppError::BadRequest(format!(
+            "codegraph subcommand is not allowed: {subcommand}"
+        )));
+    }
+
+    let mut npx_args = vec![
+        "-y".to_string(),
+        CODEGRAPH_NPM_PACKAGE.to_string(),
+    ];
+    npx_args.extend(command_args.iter().cloned());
+    Ok(npx_args)
+}
+
+fn command_program_stem(program: &str) -> String {
+    let normalized = program.trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+    std::path::Path::new(&normalized)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or(normalized)
+}
+
+fn command_invokes_codegraph(program: &str, command_args: &[String]) -> bool {
+    let stem = command_program_stem(program);
+    if stem == "codegraph" {
+        return true;
+    }
+    if stem != "npx" {
+        return false;
+    }
+    command_args.iter().any(|arg| {
+        let normalized = strip_matching_quotes(arg)
+            .trim()
+            .trim_end_matches(';')
+            .to_ascii_lowercase();
+        normalized == CODEGRAPH_NPM_PACKAGE
+            || normalized.starts_with(&format!("{CODEGRAPH_NPM_PACKAGE}@"))
+    })
+}
+
 impl SkillsService {
-    async fn handle_builtin_shell_command(
+    async fn handle_builtin_codegraph(
         &self,
         config: &GatewayConfig,
         args: BuiltinShellArgs,
@@ -54,13 +146,11 @@ impl SkillsService {
     ) -> Result<ToolResult, AppError> {
         let call_id = Uuid::new_v4().to_string();
         if args.read_skill {
-            let mut result = builtin_skill_self_doc_result(
-                BuiltinTool::ShellCommand,
-                builtin_skill_token(BuiltinTool::ShellCommand),
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::CodeGraph,
+                builtin_skill_token(BuiltinTool::CodeGraph),
                 Self::planning_enabled(config),
-            );
-            append_shell_env_section(&mut result, config);
-            return Ok(result);
+            ));
         }
         let command_preview = args
             .exec
@@ -73,8 +163,8 @@ impl SkillsService {
         }
 
         if let Some(result) = validate_skill_token_result(
-            BuiltinTool::ShellCommand.name(),
-            &builtin_skill_token(BuiltinTool::ShellCommand),
+            BuiltinTool::CodeGraph.name(),
+            &builtin_skill_token(BuiltinTool::CodeGraph),
             args.skill_token.as_deref(),
         ) {
             return Ok(result);
@@ -84,7 +174,7 @@ impl SkillsService {
             .check_planning_gate(
                 config,
                 planning_scope,
-                BuiltinTool::ShellCommand,
+                BuiltinTool::CodeGraph,
                 args.planning_id.as_deref(),
             )
             .await
@@ -93,7 +183,7 @@ impl SkillsService {
         }
 
         let cwd = match resolve_builtin_cwd(
-            BuiltinTool::ShellCommand,
+            BuiltinTool::CodeGraph,
             &config.skills,
             args.cwd.as_deref(),
         ) {
@@ -101,59 +191,18 @@ impl SkillsService {
             Err(result) => return Ok(result),
         };
 
-        let tokens = split_shell_tokens(&command_preview);
-        if tokens.is_empty() {
-            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-        }
-        let program = tokens[0].clone();
-        let command_args = tokens[1..].to_vec();
+        let command_args = codegraph_npx_args_from_exec(&command_preview)?;
+        let program = codegraph_npx_program();
 
-        // Block officecli commands from being executed through shell_command when
-        // the dedicated officecli tool is enabled — force AI to use the proper tool.
-        if config.skills.builtin_tools.office_cli {
-            let normalized = program.to_lowercase();
-            let stem = std::path::Path::new(&normalized)
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if stem == "officecli" {
-                return Ok(tool_error(
-                    "officecli commands must be executed through the dedicated `officecli` tool, not `shell_command`. Use the `officecli` tool instead.".to_string(),
-                    json!({
-                        "status": "blocked",
-                        "reason": "officecli is a dedicated built-in tool; do not run it via shell_command",
-                        "tool": BuiltinTool::ShellCommand.name(),
-                        "command": command_preview,
-                        "cwd": normalize_display_path(&cwd),
-                        "policyAction": "deny",
-                        "redirectTo": BuiltinTool::OfficeCli.name()
-                    }),
-                ));
-            }
-        }
-
-        // Block CodeGraph commands from being executed through shell_command
-        // when the dedicated CodeGraph tool is enabled.
-        if config.skills.builtin_tools.code_graph
-            && command_invokes_codegraph(&program, &command_args)
-        {
-            return Ok(tool_error(
-                "codegraph commands must be executed through the dedicated `codegraph` tool, not `shell_command`. Use the `codegraph` tool instead.".to_string(),
-                json!({
-                    "status": "blocked",
-                    "reason": "codegraph is a dedicated built-in tool; do not run it via shell_command",
-                    "tool": BuiltinTool::ShellCommand.name(),
-                    "command": command_preview,
-                    "cwd": normalize_display_path(&cwd),
-                    "policyAction": "deny",
-                    "redirectTo": BuiltinTool::CodeGraph.name()
-                }),
+        if !check_npx_available() {
+            return Err(AppError::BadRequest(
+                "npx is not available; install Node.js or npm first".to_string(),
             ));
         }
 
         let policy = evaluate_policy(
             &config.skills,
-            &program,
+            program,
             &command_args,
             &command_preview,
             &cwd,
@@ -166,8 +215,9 @@ impl SkillsService {
                     json!({
                         "status": "blocked",
                         "reason": reason,
-                        "tool": BuiltinTool::ShellCommand.name(),
+                        "tool": BuiltinTool::CodeGraph.name(),
                         "command": command_preview,
+                        "actualCommand": std::iter::once(program.to_string()).chain(command_args.iter().cloned()).collect::<Vec<_>>().join(" "),
                         "cwd": normalize_display_path(&cwd),
                         "policyAction": "deny",
                         "policyHelp": mcp_gateway_policy_denied_help(&reason)
@@ -175,6 +225,7 @@ impl SkillsService {
                 ));
             }
             PolicyDecision::Confirm { reason, reason_key } => {
+                let display_tokens = split_shell_tokens(&command_preview);
                 let metadata = ConfirmationMetadata {
                     kind: "shell".to_string(),
                     cwd: normalize_display_path(&cwd),
@@ -184,9 +235,9 @@ impl SkillsService {
                 };
                 let confirmation_id = match self
                     .create_confirmation_with_metadata(
-                        "builtin:shell",
-                        "Shell Command",
-                        &tokens,
+                        "builtin:codegraph",
+                        "CodeGraph",
+                        &display_tokens,
                         &command_preview,
                         &reason,
                         metadata,
@@ -210,14 +261,14 @@ impl SkillsService {
                     ConfirmationWaitOutcome::Approved => {}
                     ConfirmationWaitOutcome::Rejected => {
                         return Ok(confirmation_rejected_result(
-                            BuiltinTool::ShellCommand.name(),
+                            BuiltinTool::CodeGraph.name(),
                             &confirmation_id,
                             false,
                         ));
                     }
                     ConfirmationWaitOutcome::TimedOut => {
                         return Ok(confirmation_rejected_result(
-                            BuiltinTool::ShellCommand.name(),
+                            BuiltinTool::CodeGraph.name(),
                             &confirmation_id,
                             true,
                         ));
@@ -227,33 +278,14 @@ impl SkillsService {
             PolicyDecision::Allow => {}
         }
 
-        // If the caller declared the paths this shell command will write,
-        // serialize against the same per-path lock that multi_edit_file and
-        // read_file use. Commands that leave `writes` empty keep the
-        // previous concurrent behavior; declaring paths trades a bit of
-        // parallelism for consistency with the file-edit tools.
-        let shell_locks = if args.writes.is_empty() {
-            Vec::new()
-        } else {
-            let mut write_targets: Vec<PathBuf> = Vec::with_capacity(args.writes.len());
-            for raw in &args.writes {
-                write_targets.push(resolve_file_operation_path(&cwd, raw)?);
-            }
-            let mut seen = std::collections::BTreeSet::new();
-            write_targets.retain(|path| seen.insert(normalize_display_path(path)));
-            self.acquire_file_locks(&write_targets).await
-        };
-        let _shell_locks = shell_locks;
-
         let timeout_ms = args
             .timeout_ms
             .unwrap_or(config.skills.execution.timeout_ms)
             .max(1000);
         let max_output_bytes = config.skills.execution.max_output_bytes.max(1024);
-        let (runner, runner_args) = shell_command_for_current_os(&command_preview);
         self.record_tool_event_data(
             &call_id,
-            BuiltinTool::ShellCommand.name(),
+            BuiltinTool::CodeGraph.name(),
             "started",
             SkillToolEventData {
                 cwd: Some(normalize_display_path(&cwd)),
@@ -264,9 +296,9 @@ impl SkillsService {
         .await;
 
         let started = Instant::now();
-        let mut command = Command::new(&runner);
+        let mut command = Command::new(program);
         command
-            .args(&runner_args)
+            .args(&command_args)
             .current_dir(&cwd)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
@@ -274,27 +306,21 @@ impl SkillsService {
         configure_bundled_tool_path(&mut command);
         configure_skill_command(&mut command);
 
-        // Inject user-configured shell environment variables
-        for (key, value) in &config.skills.builtin_tools.shell_env {
-            command.env(key, value);
-        }
-
-        let disable_truncation = should_disable_output_truncation(&program, &command_args);
         let output = match execute_skill_command(
             &mut command,
             timeout_ms,
             max_output_bytes,
-            disable_truncation,
+            false,
             Some(SkillStreamEmitter {
                 service: self.clone(),
                 call_id: call_id.clone(),
-                tool: BuiltinTool::ShellCommand.name().to_string(),
+                tool: BuiltinTool::CodeGraph.name().to_string(),
                 kind: "stdoutDelta",
             }),
             Some(SkillStreamEmitter {
                 service: self.clone(),
                 call_id: call_id.clone(),
-                tool: BuiltinTool::ShellCommand.name().to_string(),
+                tool: BuiltinTool::CodeGraph.name().to_string(),
                 kind: "stderrDelta",
             }),
         )
@@ -308,11 +334,10 @@ impl SkillsService {
         let stderr = output.stderr.text;
         let exit_code = output.status.as_ref().and_then(|s| s.code()).unwrap_or(-1);
 
-        let timed_out = output.timed_out;
-        if timed_out {
+        if output.timed_out {
             self.record_tool_event_data(
                 &call_id,
-                BuiltinTool::ShellCommand.name(),
+                BuiltinTool::CodeGraph.name(),
                 "finished",
                 SkillToolEventData {
                     status: Some("timed_out".to_string()),
@@ -327,8 +352,9 @@ impl SkillsService {
                 timeout_text,
                 json!({
                     "status": "timed_out",
-                    "tool": BuiltinTool::ShellCommand.name(),
+                    "tool": BuiltinTool::CodeGraph.name(),
                     "command": command_preview,
+                    "actualCommand": std::iter::once(program.to_string()).chain(command_args.iter().cloned()).collect::<Vec<_>>().join(" "),
                     "cwd": normalize_display_path(&cwd),
                     "exitCode": exit_code,
                     "durationMs": duration_ms,
@@ -342,8 +368,9 @@ impl SkillsService {
         let status = output.status.as_ref().expect("status must be Some when not timed out");
         let structured = json!({
             "status": if status.success() { "completed" } else { "failed" },
-            "tool": BuiltinTool::ShellCommand.name(),
+            "tool": BuiltinTool::CodeGraph.name(),
             "command": command_preview,
+            "actualCommand": std::iter::once(program.to_string()).chain(command_args.iter().cloned()).collect::<Vec<_>>().join(" "),
             "cwd": normalize_display_path(&cwd),
             "exitCode": exit_code,
             "durationMs": duration_ms,
@@ -352,7 +379,7 @@ impl SkillsService {
         });
         self.record_tool_event_data(
             &call_id,
-            BuiltinTool::ShellCommand.name(),
+            BuiltinTool::CodeGraph.name(),
             "finished",
             SkillToolEventData {
                 status: Some(if status.success() {
@@ -376,7 +403,7 @@ impl SkillsService {
                     config,
                     planning_scope,
                     args.planning_id.as_deref(),
-                    BuiltinTool::ShellCommand,
+                    BuiltinTool::CodeGraph,
                     Some(&command_preview),
                 )
                 .await,
@@ -388,22 +415,4 @@ impl SkillsService {
             ))
         }
     }
-}
-
-fn append_shell_env_section(result: &mut ToolResult, config: &GatewayConfig) {
-    if config.skills.builtin_tools.shell_env.is_empty() {
-        return;
-    }
-    let env_section = format!(
-        "\n\n## User Environment Variables\nThe following environment variables are pre-configured and available in every shell session:\n{}\nYou can use these variables directly in commands without needing to set them.",
-        config
-            .skills
-            .builtin_tools
-            .shell_env
-            .keys()
-            .map(|key| format!("- `{key}`"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    result.text.push_str(&env_section);
 }

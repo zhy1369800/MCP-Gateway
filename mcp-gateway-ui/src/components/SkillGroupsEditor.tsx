@@ -136,19 +136,20 @@ export function SkillGroupsEditor({
                   {group.name || t("skillGroupNamePlaceholder")}
                   {mcpName && <code className="skill-group-mcp-name">{mcpName}</code>}
                   <span className="skill-group-count">{validCount}/{group.items.length}</span>
+                  <button
+                    className="btn-icon skill-group-name-rename-btn"
+                    title={t("skillGroupRename")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      startRename(group);
+                    }}
+                  >
+                    <Pencil size={12} />
+                  </button>
                 </span>
               )}
 
               <div className="skill-group-actions">
-                {!isEditing && (
-                  <button
-                    className="btn-icon skill-group-action-btn"
-                    title={t("skillGroupRename")}
-                    onClick={() => startRename(group)}
-                  >
-                    <Pencil size={12} />
-                  </button>
-                )}
                 <button
                   className="btn-icon skill-group-action-btn"
                   title={t("addSkillRootPath")}
@@ -220,19 +221,23 @@ export function SkillGroupsEditor({
                         onChange={(e) => onPathChange(group.id, item.id, e.target.value)}
                         onBlur={() => onValidate(group.id, item.id)}
                       />
-                      <button className="btn btn-secondary btn-sm skills-dir-browse" onClick={() => onBrowse(group.id, item.id)}>
-                        <FolderOpen size={13} />
-                        {t("browseFolder")}
-                      </button>
-                      <span className={`skills-dir-dot ${item.status}`} aria-hidden />
-                      <span className={`skills-dir-status ${item.status}`}>{statusLabel(item.status)}</span>
-                      <button
-                        className="btn-icon btn-danger-icon skills-dir-remove"
-                        title={t("remove")}
-                        onClick={() => onRemoveItem(group.id, item.id)}
-                      >
-                        ✕
-                      </button>
+                      <span className="skills-dir-row-actions">
+                        <button className="btn btn-secondary btn-sm skills-dir-browse" onClick={() => onBrowse(group.id, item.id)}>
+                          <FolderOpen size={13} />
+                          {t("browseFolder")}
+                        </button>
+                        <span className="skills-dir-status-wrap">
+                          <span className={`skills-dir-dot ${item.status}`} aria-hidden />
+                          <span className={`skills-dir-status ${item.status}`}>{statusLabel(item.status)}</span>
+                        </span>
+                        <button
+                          className="btn-icon btn-danger-icon skills-dir-remove"
+                          title={t("remove")}
+                          onClick={() => onRemoveItem(group.id, item.id)}
+                        >
+                          ✕
+                        </button>
+                      </span>
                     </div>
                   ))}
                 </div>

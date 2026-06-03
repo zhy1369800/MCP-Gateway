@@ -183,7 +183,11 @@ fn is_path_like(token: &str) -> bool {
         return false;
     }
     // rg glob patterns: !pattern, *.{ext}, **, etc.
-    if token.starts_with('!') || token.contains('*') || token.contains('?') {
+    if token.starts_with('!') || token.contains('*') || token.contains('?') || token.contains('[') || token.contains(']') {
+        return false;
+    }
+    // regex anchors: $ (end) and ^ (start) do not appear in real paths
+    if token.contains('$') || token.contains('^') {
         return false;
     }
     if token.starts_with("~/")
@@ -600,20 +604,20 @@ mod tests {
     }
 
     #[test]
-    fn tool_args_require_exec_not_legacy_cmd() {
+    fn builtin_shell_args_allow_read_skill_without_exec() {
         let args = decode_tool_args::<BuiltinShellArgs>(&json!({
             "exec": "Get-ChildItem -Name",
             "cwd": "D:/workspace"
         }))
         .expect("exec argument should decode");
-        assert_eq!(args.exec, "Get-ChildItem -Name");
+        assert_eq!(args.exec.as_deref(), Some("Get-ChildItem -Name"));
 
-        let error = decode_tool_args::<BuiltinShellArgs>(&json!({
-            "cmd": "Get-ChildItem -Name",
-            "cwd": "D:/workspace"
+        let args = decode_tool_args::<BuiltinShellArgs>(&json!({
+            "readSkill": true
         }))
-        .expect_err("legacy cmd argument should not decode");
-        assert!(error.message().contains("missing field `exec`"));
+        .expect("readSkill documentation call should not require exec");
+        assert!(args.read_skill);
+        assert!(args.exec.is_none());
     }
 
     #[test]
@@ -1152,16 +1156,17 @@ mod tests {
             .get("description")
             .and_then(Value::as_str)
             .expect("shell description");
-        assert!(shell_description.contains("builtin://shell_command/SKILL.md"));
         assert!(shell_description.contains("MANDATORY BEFORE USE"));
-        assert!(shell_description.contains("you MUST first read its full SKILL.md"));
+        assert!(shell_description.contains("through this same tool"));
+        assert!(shell_description.contains("{\"readSkill\":true}"));
         assert!(shell_description.contains("returned markdown content"));
         assert!(shell_description.contains("partial-read tricks"));
         assert!(shell_description.contains("prefer rg or rg --files"));
         assert!(shell_description.contains("node_modules"));
         assert!(!shell_description.contains("structuredContent.skillToken"));
         assert!(shell_description.contains("Front matter summary:"));
-        assert!(shell_description.contains("SKILL.md URI:"));
+        assert!(!shell_description.contains("SKILL.md URI:"));
+        assert!(!shell_description.contains("Legacy alternative"));
         assert!(!shell_description.contains("Prefer fast discovery commands"));
 
         let names: Vec<&str> = tools
@@ -1183,10 +1188,11 @@ mod tests {
 
     #[test]
     fn builtin_skill_docs_are_served_from_embedded_skill_md() {
-        let (tool, path) =
-            builtin_skill_doc_read("Get-Content -Raw builtin://shell_command/SKILL.md")
-                .expect("shell doc read");
-        let shell = builtin_skill_doc_result(tool, "doc", path, "abc123".to_string(), false);
+        let shell = builtin_skill_self_doc_result(
+            BuiltinTool::ShellCommand,
+            builtin_skill_token(BuiltinTool::ShellCommand),
+            false,
+        );
         assert!(!shell.is_error);
         assert!(shell.text.contains("# Shell Command"));
         assert!(shell
@@ -1197,7 +1203,6 @@ mod tests {
             .contains("## Project And Workflow Navigation With Ripgrep"));
         assert!(shell.text.contains("rg --files"));
         assert!(shell.text.contains("Do not use `Get-ChildItem -Recurse`"));
-        assert!(shell.text.contains("abc123"));
         assert_eq!(
             shell.structured.get("builtinSkill").and_then(Value::as_str),
             Some("shell_command")
@@ -1208,38 +1213,49 @@ mod tests {
         );
         assert!(shell.structured.get("skillToken").is_none());
 
-        let (tool, path) = builtin_skill_doc_read("cat builtin://multi_edit_file/SKILL.md")
-            .expect("multi_edit_file doc read");
-        let multi_edit = builtin_skill_doc_result(tool, "doc", path, "fed456".to_string(), false);
+        let multi_edit = builtin_skill_self_doc_result(
+            BuiltinTool::MultiEditFile,
+            builtin_skill_token(BuiltinTool::MultiEditFile),
+            false,
+        );
         assert!(!multi_edit.is_error);
         assert!(multi_edit.text.contains("# Multi Edit File"));
         assert!(multi_edit.text.contains("\"edits\""));
-        assert!(multi_edit.text.contains("fed456"));
+        assert_eq!(
+            multi_edit
+                .structured
+                .get("readSkill")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(multi_edit.structured.get("skillToken").is_none());
 
-        let (tool, path) = builtin_skill_doc_read("cat builtin://task-planning/SKILL.md")
-            .expect("task-planning doc read");
-        let planning = builtin_skill_doc_result(tool, "doc", path, "plan123".to_string(), true);
+        let planning = builtin_skill_self_doc_result(
+            BuiltinTool::TaskPlanning,
+            builtin_skill_token(BuiltinTool::TaskPlanning),
+            true,
+        );
         assert!(!planning.is_error);
         assert!(planning.text.contains("# Task Planning"));
         assert!(planning.text.contains("planningId"));
-        assert!(planning.text.contains("plan123"));
         assert!(planning.structured.get("skillToken").is_none());
 
-        let (tool, path) = builtin_skill_doc_read("cat builtin://chrome-cdp/SKILL.md")
-            .expect("chrome-cdp doc read");
-        let cdp = builtin_skill_doc_result(tool, "doc", path, "987abc".to_string(), false);
+        let cdp = builtin_skill_self_doc_result(
+            BuiltinTool::ChromeCdp,
+            builtin_skill_token(BuiltinTool::ChromeCdp),
+            false,
+        );
         assert!(!cdp.is_error);
         assert!(cdp.text.contains("# Chrome CDP"));
         assert!(cdp.text.contains("Chrome DevTools Protocol over WebSocket"));
         assert!(cdp.text.contains("netclear"));
         assert!(cdp.text.contains("CDP_PROFILE_MODE=persistent"));
 
-        let (tool, path) = builtin_skill_doc_read(
-            "Get-Content -Raw builtin://chat-plus-adapter-debugger/SKILL.md",
-        )
-        .expect("chat-plus adapter debugger doc read");
-        let adapter = builtin_skill_doc_result(tool, "doc", path, "654fed".to_string(), false);
+        let adapter = builtin_skill_self_doc_result(
+            BuiltinTool::ChatPlusAdapterDebugger,
+            builtin_skill_token(BuiltinTool::ChatPlusAdapterDebugger),
+            false,
+        );
         assert!(!adapter.is_error);
         assert!(adapter.text.contains("# Chat Plus Adapter Debugger"));
         assert!(adapter.text.contains("decorateBubbles"));
@@ -1252,6 +1268,20 @@ mod tests {
         assert!(adapter.structured.get("runtimeAssets").is_none());
         assert_eq!(
             adapter.structured.get("docSource").and_then(Value::as_str),
+            Some("embedded")
+        );
+
+        let codegraph = builtin_skill_self_doc_result(
+            BuiltinTool::CodeGraph,
+            builtin_skill_token(BuiltinTool::CodeGraph),
+            false,
+        );
+        assert!(!codegraph.is_error);
+        assert!(codegraph.text.contains("# CodeGraph"));
+        assert!(codegraph.text.contains("npx -y @colbymchenry/codegraph"));
+        assert!(codegraph.text.contains("codegraph serve --mcp"));
+        assert_eq!(
+            codegraph.structured.get("docSource").and_then(Value::as_str),
             Some("embedded")
         );
     }
@@ -1382,6 +1412,7 @@ mod tests {
             cwd: None,
             skill_token: None,
             planning_id: None,
+            read_skill: false,
             files: Vec::new(),
             operations: Vec::new(),
             edits: vec![
@@ -1440,6 +1471,7 @@ mod tests {
             cwd: None,
             skill_token: None,
             planning_id: None,
+            read_skill: false,
             files: Vec::new(),
             operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
@@ -1474,6 +1506,7 @@ mod tests {
             cwd: None,
             skill_token: None,
             planning_id: None,
+            read_skill: false,
             files: Vec::new(),
             operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
@@ -1506,6 +1539,7 @@ mod tests {
             cwd: None,
             skill_token: None,
             planning_id: None,
+            read_skill: false,
             files: Vec::new(),
             operations: Vec::new(),
             edits: vec![MultiEditFileEdit {
@@ -1758,6 +1792,7 @@ mod tests {
             chrome_cdp: true,
             chat_plus_adapter_debugger: true,
             office_cli: false,
+            code_graph: false,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };
@@ -1782,6 +1817,7 @@ mod tests {
             chrome_cdp: true,
             chat_plus_adapter_debugger: false,
             office_cli: false,
+            code_graph: false,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };
@@ -1795,11 +1831,11 @@ mod tests {
 
     #[test]
     fn disabled_tool_rejected_in_execute_builtin_tool() {
-        // officecli is gated: it stays disabled until the admin UI detects or installs the binary.
-        // Defaults therefore enable every builtin except officecli, so ALL.len() - 1 = 6.
+        // officecli and codegraph are gated: they stay disabled until explicitly enabled.
         let all_enabled = BuiltinToolsConfig::default();
-        assert_eq!(builtin_tools(&all_enabled).len(), BuiltinTool::ALL.len() - 1);
+        assert_eq!(builtin_tools(&all_enabled).len(), BuiltinTool::ALL.len() - 2);
         assert!(!all_enabled.office_cli);
+        assert!(!all_enabled.code_graph);
 
         let all_disabled = BuiltinToolsConfig {
             read_file: false,
@@ -1809,10 +1845,181 @@ mod tests {
             chrome_cdp: false,
             chat_plus_adapter_debugger: false,
             office_cli: false,
+            code_graph: false,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };
         assert_eq!(builtin_tools(&all_disabled).len(), 0);
+    }
+
+    #[test]
+    fn codegraph_default_hidden_and_enabled_definition_has_schema() {
+        let os = "Windows";
+        let now = "2024-01-01T00:00:00Z";
+        let default_tools = builtin_tool_definitions(os, now, &BuiltinToolsConfig::default());
+        assert!(!default_tools.iter().any(|tool| {
+            tool.get("name").and_then(Value::as_str) == Some(BuiltinTool::CodeGraph.name())
+        }));
+
+        let cfg = BuiltinToolsConfig {
+            code_graph: true,
+            ..Default::default()
+        };
+        let tools = builtin_tool_definitions(os, now, &cfg);
+        let codegraph = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("codegraph"))
+            .expect("codegraph tool exists when enabled");
+        let properties = codegraph
+            .get("inputSchema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .expect("schema properties");
+        assert!(properties.contains_key("exec"));
+        assert!(properties.contains_key("timeoutMs"));
+        assert!(properties.contains_key("skillToken"));
+        assert!(properties.contains_key("readSkill"));
+        assert!(codegraph
+            .get("description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("{\"readSkill\":true}")));
+    }
+
+    #[test]
+    fn officecli_enabled_definition_exposes_cwd_schema() {
+        let os = "Windows";
+        let now = "2024-01-01T00:00:00Z";
+        let cfg = BuiltinToolsConfig {
+            office_cli: true,
+            ..Default::default()
+        };
+        let tools = builtin_tool_definitions(os, now, &cfg);
+        let officecli = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("officecli"))
+            .expect("officecli tool exists when enabled");
+        let properties = officecli
+            .get("inputSchema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .expect("schema properties");
+
+        assert!(properties.contains_key("cwd"));
+        assert!(properties
+            .get("cwd")
+            .and_then(|schema| schema.get("description"))
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("allowed directory")));
+    }
+
+    #[test]
+    fn codegraph_exec_is_converted_to_npx_args() {
+        let args = codegraph_npx_args_from_exec("codegraph status").expect("parse codegraph");
+        assert_eq!(
+            args,
+            vec![
+                "-y".to_string(),
+                "@colbymchenry/codegraph".to_string(),
+                "status".to_string()
+            ]
+        );
+
+        let args = codegraph_npx_args_from_exec("codegraph query AuthService")
+            .expect("parse codegraph query");
+        assert_eq!(
+            args,
+            vec![
+                "-y".to_string(),
+                "@colbymchenry/codegraph".to_string(),
+                "query".to_string(),
+                "AuthService".to_string()
+            ]
+        );
+
+        let args = codegraph_npx_args_from_exec("codegraph callers AuthService --json")
+            .expect("parse codegraph callers");
+        assert_eq!(
+            args,
+            vec![
+                "-y".to_string(),
+                "@colbymchenry/codegraph".to_string(),
+                "callers".to_string(),
+                "AuthService".to_string(),
+                "--json".to_string()
+            ]
+        );
+
+        assert!(codegraph_npx_args_from_exec("codegraph callees AuthService").is_ok());
+        assert!(codegraph_npx_args_from_exec("codegraph impact AuthService").is_ok());
+    }
+
+    #[test]
+    fn codegraph_exec_rejects_wrong_prefix_and_blocked_subcommands() {
+        assert!(codegraph_npx_args_from_exec("npx -y @colbymchenry/codegraph status").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph serve --mcp").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph install").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph uninstall").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph uninit").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph unlock").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph unknown").is_err());
+        assert!(codegraph_npx_args_from_exec("codegraph --version").is_ok());
+    }
+
+    #[tokio::test]
+    async fn shell_command_blocks_codegraph_when_dedicated_tool_enabled() {
+        let service = SkillsService::new();
+        let sandbox = std::env::temp_dir().join(format!("gateway-codegraph-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sandbox).expect("create sandbox");
+
+        let mut config = GatewayConfig::default();
+        config.skills.builtin_tools.task_planning = false;
+        config.skills.builtin_tools.code_graph = true;
+        config.skills.policy.path_guard.enabled = true;
+        config.skills.policy.path_guard.whitelist_dirs = vec![normalize_display_path(
+            &normalize_root_path(sandbox.clone()),
+        )];
+
+        let token = builtin_skill_token(BuiltinTool::ShellCommand);
+        let direct = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::ShellCommand,
+                json!({
+                    "exec": "codegraph status",
+                    "cwd": normalize_display_path(&sandbox),
+                    "skillToken": token
+                }),
+                "scope:codegraph-shell-block",
+            )
+            .await
+            .expect("shell result");
+        assert!(direct.is_error);
+        assert_eq!(
+            direct.structured.get("redirectTo").and_then(Value::as_str),
+            Some("codegraph")
+        );
+
+        let token = builtin_skill_token(BuiltinTool::ShellCommand);
+        let npx = service
+            .execute_builtin_tool(
+                &config,
+                BuiltinTool::ShellCommand,
+                json!({
+                    "exec": "npx -y @colbymchenry/codegraph status",
+                    "cwd": normalize_display_path(&sandbox),
+                    "skillToken": token
+                }),
+                "scope:codegraph-shell-block",
+            )
+            .await
+            .expect("shell result");
+        assert!(npx.is_error);
+        assert_eq!(
+            npx.structured.get("redirectTo").and_then(Value::as_str),
+            Some("codegraph")
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     #[tokio::test]
@@ -2192,6 +2399,190 @@ mod tests {
         assert_eq!(closed.structured["reason"], "unknown planningId");
     }
 
+    #[tokio::test]
+    async fn ai_adapter_strips_skill_token_before_forwarding_tool_call() {
+        use crate::ai_adapter::session::{AiProtocol, AiToolDef};
+        use crate::ai_adapter::AiSessionManager;
+
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let ai_sessions = AiSessionManager::new();
+        let prompt = "Use the hidden token for gateway validation only.";
+        let session = ai_sessions
+            .create_session(
+                AiProtocol::OpenaiChat,
+                prompt.to_string(),
+                vec![AiToolDef {
+                    name: "search".to_string(),
+                    description: "Search".to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        },
+                        "required": ["query"]
+                    }),
+                    enabled: true,
+                }],
+                "test".to_string(),
+            )
+            .await;
+        let token = ai_adapter_system_prompt_skill_token(prompt);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": {
+                    "query": "rust",
+                    "skillToken": token,
+                    "skill_token": "also-private"
+                }
+            }
+        });
+
+        let call_task = tokio::spawn({
+            let service = service.clone();
+            let config = config.clone();
+            let ai_sessions = ai_sessions.clone();
+            let server_name = session.name.clone();
+            async move {
+                service
+                    .handle_ai_adapter_mcp_request(
+                        &config,
+                        request,
+                        None,
+                        &server_name,
+                        &ai_sessions,
+                    )
+                    .await
+            }
+        });
+
+        let pending = tokio::time::timeout(
+            Duration::from_secs(1),
+            ai_sessions.wait_for_pending_call(&session.id),
+        )
+        .await
+        .expect("pending tool call")
+        .expect("session exists");
+        assert_eq!(pending.arguments["query"], "rust");
+        assert!(pending.arguments.get("skillToken").is_none());
+        assert!(pending.arguments.get("skill_token").is_none());
+
+        ai_sessions
+            .resolve_tool_call(
+                &session.id,
+                &pending.call_id,
+                crate::ai_adapter::session::PendingToolResult {
+                    content: "ok".to_string(),
+                    is_error: false,
+                },
+            )
+            .await
+            .expect("resolve pending call");
+
+        let response = call_task.await.expect("tool call task");
+        assert_eq!(response["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn ai_adapter_tools_list_adds_gateway_only_skill_token_schema() {
+        use crate::ai_adapter::session::{AiProtocol, AiToolDef};
+        use crate::ai_adapter::AiSessionManager;
+
+        let service = SkillsService::new();
+        let config = GatewayConfig::default();
+        let ai_sessions = AiSessionManager::new();
+        let session = ai_sessions
+            .create_session(
+                AiProtocol::OpenaiChat,
+                "Gateway validation is enabled.".to_string(),
+                vec![AiToolDef {
+                    name: "search".to_string(),
+                    description: "Search".to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        },
+                        "required": ["query"]
+                    }),
+                    enabled: true,
+                }],
+                "test".to_string(),
+            )
+            .await;
+
+        let response = service
+            .handle_ai_adapter_mcp_request(
+                &config,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                }),
+                None,
+                &session.name,
+                &ai_sessions,
+            )
+            .await;
+        let tools = response["result"]["tools"]
+            .as_array()
+            .expect("tools list");
+        let search = tools
+            .iter()
+            .find(|tool| tool["name"] == "search")
+            .expect("search tool");
+
+        assert_eq!(
+            search["inputSchema"]["properties"]["skillToken"]["type"],
+            "string"
+        );
+        let required = search["inputSchema"]["required"]
+            .as_array()
+            .expect("required list");
+        assert!(required.iter().any(|value| value == "query"));
+        assert!(required.iter().any(|value| value == "skillToken"));
+
+        let stored = ai_sessions
+            .get_session(&session.id)
+            .await
+            .expect("stored session");
+        assert!(stored.tools[0].input_schema["properties"]
+            .get("skillToken")
+            .is_none());
+
+        ai_sessions
+            .toggle_system_prompt_tool(&session.id, false)
+            .await
+            .expect("disable system_prompt tool");
+        let disabled_response = service
+            .handle_ai_adapter_mcp_request(
+                &config,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list"
+                }),
+                None,
+                &session.name,
+                &ai_sessions,
+            )
+            .await;
+        let disabled_tools = disabled_response["result"]["tools"]
+            .as_array()
+            .expect("disabled tools list");
+        let disabled_search = disabled_tools
+            .iter()
+            .find(|tool| tool["name"] == "search")
+            .expect("search tool when disabled");
+        assert!(disabled_search["inputSchema"]["properties"]
+            .get("skillToken")
+            .is_none());
+    }
+
 
     #[tokio::test]
     async fn builtin_tool_all_covers_every_variant() {
@@ -2211,6 +2602,7 @@ mod tests {
             chrome_cdp: true,
             chat_plus_adapter_debugger: true,
             office_cli: true,
+            code_graph: true,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };
@@ -2229,6 +2621,7 @@ mod tests {
             chrome_cdp: false,
             chat_plus_adapter_debugger: false,
             office_cli: false,
+            code_graph: false,
             office_cli_path: None,
             shell_env: HashMap::new(),
         };

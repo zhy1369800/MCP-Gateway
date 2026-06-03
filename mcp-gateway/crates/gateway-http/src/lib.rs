@@ -1,3 +1,4 @@
+mod ai_adapter;
 mod auth;
 mod openapi;
 mod response;
@@ -12,6 +13,7 @@ use axum::Router;
 use gateway_core::GatewayConfig;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+pub use ai_adapter::AiSessionManager;
 pub use openapi::ApiDoc;
 pub use skills::{
     ActivePlanStepDto, ActivePlanSummary, ConfirmationStatus, PlanItemStatusDto, SkillConfirmation,
@@ -20,11 +22,22 @@ pub use skills::{
 pub use state::{AppState, SseHub};
 
 pub fn build_router(state: AppState, config: &GatewayConfig) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .merge(routes::gateway_router(state.clone(), config))
         .merge(routes::admin_router(state.clone(), &config.api_prefix))
-        .merge(openapi::openapi_router(&config.api_prefix))
-        .layer(build_cors_layer())
+        .merge(openapi::openapi_router(&config.api_prefix));
+
+    // AI adapter routes are gated by the per-panel toggle in the UI
+    // (`ai_adapter.enabled`). When the toggle is off the routes are not
+    // mounted so unauthorized callers get a clean 404.
+    if config.ai_adapter.enabled {
+        router = router.merge(ai_adapter::routes::router(
+            state.clone(),
+            &config.ai_adapter,
+        ));
+    }
+
+    router.layer(build_cors_layer())
 }
 
 pub fn spawn_idle_reaper(state: AppState) {
@@ -71,6 +84,12 @@ fn build_cors_layer() -> CorsLayer {
             header::HeaderName::from_static("mcp-session-id"),
             header::HeaderName::from_static("mcp-protocol-version"),
             header::HeaderName::from_static("last-event-id"),
+            header::HeaderName::from_static("x-api-key"),
+            header::HeaderName::from_static("anthropic-version"),
+            header::HeaderName::from_static("x-session-id"),
         ])
-        .expose_headers([header::HeaderName::from_static("mcp-session-id")])
+        .expose_headers([
+            header::HeaderName::from_static("mcp-session-id"),
+            header::HeaderName::from_static("x-session-id"),
+        ])
 }

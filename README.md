@@ -17,6 +17,7 @@ In practice, it turns a local machine into a controllable MCP tool hub: clients 
 - Manages multiple MCP services from one UI
 - Provides fixed MCP endpoints for external Skills and bundled Skills
 - Includes built-in tools such as file reading, command execution, multi-file editing, browser control, and adapter debugging
+- Provides an AI Adapter that ingests tool definitions from AI coding tools (OpenAI/Anthropic protocol) and publishes them as MCP tools
 - Supports path allowlists, command policies, execution limits, and manual approvals
 - Keeps Skill usage token-light: Skills are described by small `SKILL.md` documents and only expanded when a client chooses to use them
 
@@ -37,6 +38,25 @@ External Skills: /api/v2/mcp/__skills__
 Bundled Skills:  /api/v2/sse/__builtin_skills__
 Bundled Skills:  /api/v2/mcp/__builtin_skills__
 ```
+
+The AI Adapter UI copies a user-friendly OpenAI/Anthropic-compatible Base URL for BYOK-style AI coding tools:
+
+```text
+Base URL: http://<listenAddress>/api/v2/ai/v1
+```
+
+The backend canonical AI Adapter base path remains `/api/v2/ai`. Clients can call these canonical protocol endpoints:
+
+```text
+List models:  GET  /api/v2/ai/v1/models
+Chat:         POST /api/v2/ai/v1/chat/completions
+Responses:    POST /api/v2/ai/v1/responses
+Messages:     POST /api/v2/ai/v1/messages
+Token Count:  POST /api/v2/ai/v1/messages/count_tokens
+Health:       GET  /api/v2/ai/health
+```
+
+For clients that automatically append another `/v1` to the copied Base URL, the backend also accepts the compatible `/api/v2/ai/v1/v1/...` paths, including models, chat completions, responses, Anthropic messages, and token counting. Claude Code users do not need to remove `/v1` from the Base URL copied from the UI.
 
 If `MCP Token` is configured, clients should send:
 
@@ -75,12 +95,34 @@ Bundled tools currently include:
 - `chrome-cdp`
 - `chat-plus-adapter-debugger` (business-specific)
 - `officecli`
+- `codegraph`
 
 ![Built-in tools panel](./image2.png)
 
 `chat-plus-adapter-debugger` targets the Chat Plus adapter workflow; keep it off for general-purpose agents.
 
 This makes it possible to build agent-like workflows on top of normal MCP clients: inspect a project, read documentation, edit code, run commands, test behavior, and control a browser, while still routing everything through MCP.
+
+## AI Adapter (BYOK)
+
+![AI Adapter Interface](./image3.png)
+
+The AI Adapter accepts incoming connections from AI coding tools that support custom API endpoints (OpenAI or Anthropic protocol). When a tool connects, it sends its tool definitions in the request. The gateway extracts those tools, registers them as MCP tools, and exposes them through a dedicated MCP endpoint — so MCP clients can call the tools that the AI tool declared.
+
+How it works:
+
+1. Enable the AI Adapter toggle in the UI.
+2. Add one or more API keys (or leave empty to accept all connections).
+3. Copy the Base URL and configure it in your AI coding tool as the API endpoint.
+4. The tool sends a request — the gateway extracts the system prompt and tool definitions, then creates an MCP server endpoint for that session.
+5. Connect your MCP client to the session's MCP endpoint to call those tools.
+
+Key points:
+
+- The gateway does not run any AI model. It ingests tool definitions from AI tools and publishes them as MCP tools.
+- Any model name is accepted — the gateway never validates it.
+- Each connection creates a session, visible in the UI with protocol info, tool list, and real-time toggle controls.
+- Supports three protocols: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages.
 
 ## Safety
 

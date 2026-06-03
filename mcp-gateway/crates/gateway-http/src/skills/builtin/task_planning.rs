@@ -7,9 +7,9 @@ fn task_planning_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
                 "additionalProperties": false,
                 "required": [],
                 "properties": {
-                    "exec": {
-                        "type": "string",
-                        "description": "Documentation read command. First call may read the complete builtin://task-planning/SKILL.md without skillToken."
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
                     },
                     "action": {
                         "type": "string",
@@ -56,7 +56,7 @@ fn task_planning_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for action=update, action=set_status, or action=clear. First read the complete builtin://task-planning/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Documentation reads do not require it."
+                        "description": "Required for action=update, action=set_status, or action=clear. First call task-planning with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Documentation reads do not require it."
                     }
                 }
             }
@@ -69,28 +69,12 @@ impl SkillsService {
         args: TaskPlanningArgs,
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
-        if let Some(exec) = args.exec.as_deref() {
-            let command_preview = exec.trim().to_string();
-            if command_preview.is_empty() {
-                return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-            }
-
-            if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-                return Ok(builtin_skill_doc_result(
-                    tool,
-                    &command_preview,
-                    matched_path,
-                    builtin_skill_token(tool),
-                    true,
-                ));
-            }
-
-            if args.action.is_none() {
-                return Err(AppError::BadRequest(
-                    "task-planning exec is only for reading SKILL.md; use action=\"update\", action=\"set_status\", or action=\"clear\" for plan state"
-                        .to_string(),
-                ));
-            }
+        if args.read_skill {
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::TaskPlanning,
+                builtin_skill_token(BuiltinTool::TaskPlanning),
+                true,
+            ));
         }
 
         if let Some(result) = validate_skill_token_result(

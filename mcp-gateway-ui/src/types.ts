@@ -75,6 +75,7 @@ export interface BuiltinToolsConfig {
   chromeCdp: boolean;
   chatPlusAdapterDebugger: boolean;
   officeCli: boolean;
+  codeGraph: boolean;
   officeCliPath?: string;
   shellEnv?: Record<string, string>;
 }
@@ -100,6 +101,11 @@ export interface ServerConfig {
   enabled: boolean;
 }
 
+export interface DisabledToolEntry {
+  /** The tool name (e.g. "read_file", "shell_command") */
+  name: string;
+}
+
 export interface GatewayConfig {
   version: number;
   listen: string;
@@ -111,6 +117,8 @@ export interface GatewayConfig {
   defaults: DefaultsConfig;
   servers: ServerConfig[];
   skills: SkillsConfig;
+  aiAdapter: AiAdapterConfig;
+  disabledTools?: DisabledToolEntry[];
 }
 
 export interface HealthData {
@@ -257,4 +265,41 @@ export interface ActivePlan {
   plan: ActivePlanStep[];
 }
 
+export interface AiAdapterConfig {
+  enabled: boolean;
+  basePath: string;
+  apiKeys: string[];
+  autoRegisterSkills: boolean;
+  /** 是否启用系统提示词工具（暴露为 MCP 工具） */
+  systemPromptEnabled?: boolean;
+  /** 用户自定义系统提示词文本 */
+  systemPromptText?: string;
+  /** 会话名称预设列表 */
+  sessionNamePresets?: string[];
+}
 
+export interface AiToolDef {
+  name: string;
+  description: string;
+  inputSchema: JsonValue;
+  enabled?: boolean;
+}
+
+export type AiProtocol = "openai-chat" | "openai-responses" | "anthropic";
+
+export interface AiSession {
+  id: string;
+  name: string;
+  displayName: string;
+  source: string;
+  protocol: AiProtocol;
+  systemPrompt: string;
+  tools: AiToolDef[];
+  connectedAt: string;
+  toolCount: number;
+  hasSystemPrompt: boolean;
+  systemPromptToolEnabled: boolean;
+  toolPingEnabled: boolean;
+  systemPromptOverride?: string | null;
+  hasPendingCall: boolean;
+}

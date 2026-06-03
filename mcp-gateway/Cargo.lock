@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-cli"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-core"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-http"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "axum",
  "chrono",
@@ -529,11 +529,15 @@ dependencies = [
  "futures-util",
  "gateway-core",
  "http",
+ "http-body-util",
+ "percent-encoding",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "tokio",
  "tokio-stream",
+ "tower",
  "tower-http",
  "utoipa",
  "utoipa-swagger-ui",
@@ -542,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-integration-tests"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "gateway-core",
  "serde_json",

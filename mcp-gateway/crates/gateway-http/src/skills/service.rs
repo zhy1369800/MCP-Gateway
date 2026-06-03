@@ -14,6 +14,7 @@ impl SkillsService {
             return true;
         }
         // Check if server_name matches any skill group name (format: __groupName__)
+        // AI adapter sessions are handled separately in gateway.rs
         config.skills.root_groups.iter().any(|g| {
             !g.name.is_empty() && format!("__{}__", g.name) == server_name
         })
@@ -313,6 +314,214 @@ impl SkillsService {
         guards
     }
 
+    /// 处理来自 AI Adapter 会话的 MCP 请求
+    pub async fn handle_ai_adapter_mcp_request(
+        &self,
+        _config: &GatewayConfig,
+        request: Value,
+        _session_id: Option<&str>,
+        server_name: &str,
+        ai_sessions: &crate::ai_adapter::AiSessionManager,
+    ) -> Value {
+        let Some(object) = request.as_object() else {
+            return jsonrpc_error(Value::Null, -32600, "invalid request payload", None);
+        };
+
+        let id = object.get("id").cloned().unwrap_or(Value::Null);
+        let Some(method) = object.get("method").and_then(Value::as_str) else {
+            return jsonrpc_error(id, -32600, "missing jsonrpc method", None);
+        };
+
+        match method {
+            "initialize" => {
+                let session = ai_sessions.get_session_by_name(server_name).await;
+                let server_info = match &session {
+                    Some(s) => json!({
+                        "name": format!("ai-adapter-{}", s.name),
+                        "version": env!("CARGO_PKG_VERSION")
+                    }),
+                    None => json!({
+                        "name": "mcp-gateway-ai-adapter",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }),
+                };
+                jsonrpc_result(
+                    id,
+                    json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {
+                            "tools": {
+                                "listChanged": false
+                            }
+                        },
+                        "serverInfo": server_info
+                    }),
+                )
+            }
+            "ping" | "notifications/initialized" => jsonrpc_result(id, json!({"ok": true})),
+            "tools/list" => {
+                let session = ai_sessions.get_session_by_name(server_name).await;
+                let mut tools: Vec<Value> = match &session {
+                    Some(s) => s
+                        .tools
+                        .iter()
+                        .filter(|t| t.enabled)
+                        .map(|t| {
+                            let input_schema = if s.system_prompt_tool_enabled {
+                                ai_adapter_input_schema_with_skill_token(&t.input_schema)
+                            } else {
+                                t.input_schema.clone()
+                            };
+                            json!({
+                                "name": t.name,
+                                "description": t.description,
+                                "inputSchema": input_schema
+                            })
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                if session.as_ref().is_some_and(|s| s.system_prompt_tool_enabled) {
+                    let sp = json!({
+                        "name": "system_prompt",
+                        "description": "读取系统提示词和 skillToken 的值。无参数，直接返回内容。",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    });
+                    tools.push(sp);
+                }
+                jsonrpc_result(
+                    id,
+                    json!({
+                        "tools": tools
+                    }),
+                )
+            }
+            "tools/call" => {
+                let params = object.get("params").cloned().unwrap_or(Value::Null);
+                let tool_params: ToolCallParams = match serde_json::from_value(params) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return jsonrpc_error(
+                            id,
+                            -32602,
+                            "invalid tool call params",
+                            Some(json!({"detail": error.to_string()})),
+                        );
+                    }
+                };
+
+                if tool_params.name == "system_prompt" {
+                    let session_prompt = ai_sessions.get_effective_system_prompt_by_name(server_name).await;
+                    let body = session_prompt.map(|(_, t)| t).unwrap_or_default();
+                    let skill_token = ai_adapter_system_prompt_skill_token(&body);
+                    let os = std::env::consts::OS;
+                    let text = format!("[skillToken]: {skill_token}
+[os]: {os}
+
+{body}");
+                    return jsonrpc_result(id, json!({"isError": false, "content": [{"type": "text", "text": text}]}));
+                }
+
+                // skillToken validation: when system_prompt_tool_enabled is on,
+                // all tools (except system_prompt) must carry a valid skillToken.
+                let session_prompt_info = ai_sessions.get_effective_system_prompt_by_name(server_name).await;
+                let mut strip_private_arguments = false;
+                if let Some((enabled, ref prompt_body)) = session_prompt_info {
+                    if enabled {
+                        let expected_token = ai_adapter_system_prompt_skill_token(prompt_body);
+                        let provided_token = tool_params
+                            .arguments
+                            .get("skillToken")
+                            .or_else(|| tool_params.arguments.get("skill_token"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if provided_token != expected_token {
+                            return jsonrpc_result(
+                                id,
+                                json!({
+                                    "isError": true,
+                                    "content": [{
+                                        "type": "text",
+                                        "text": "skillToken validation failed: missing or invalid skillToken. Please call the `system_prompt` tool first to obtain the current skillToken, then include it as the `skillToken` argument in your tool call."
+                                    }]
+                                }),
+                            );
+                        }
+                        strip_private_arguments = true;
+                    }
+                }
+
+                let session_id_opt = ai_sessions.session_id_by_name(server_name).await;
+                let Some(ai_session_id) = session_id_opt else {
+                    return jsonrpc_error(
+                        id,
+                        -32001,
+                        "AI adapter session not found",
+                        None,
+                    );
+                };
+
+                // 将工具调用转发到 AI 会话（MCP → AI 方向）
+                let forwarded_arguments = if strip_private_arguments {
+                    strip_ai_adapter_private_arguments(&tool_params.arguments)
+                } else {
+                    tool_params.arguments.clone()
+                };
+                match ai_sessions
+                    .set_pending_tool_call(&ai_session_id, &tool_params.name, forwarded_arguments)
+                    .await
+                {
+                    Ok(pending) => {
+                        // 等待 AI 工具执行结果（最多等 60 秒）
+                        let timeout = tokio::time::Duration::from_secs(60);
+                        let result = tokio::time::timeout(timeout, pending.notify.notified()).await;
+
+                        match result {
+                            Ok(_) => {
+                                let guard = pending.result.lock().await;
+                                match guard.as_ref() {
+                                    Some(res) => jsonrpc_result(
+                                        id,
+                                        json!({
+                                            "isError": res.is_error,
+                                            "content": [
+                                                {
+                                                    "type": "text",
+                                                    "text": res.content.clone()
+                                                }
+                                            ]
+                                        }),
+                                    ),
+                                    None => jsonrpc_error(
+                                        id,
+                                        -32603,
+                                        "tool execution returned no result",
+                                        None,
+                                    ),
+                                }
+                            }
+                            Err(_elapsed) => {
+                                // 超时：清理待处理调用
+                                jsonrpc_error(
+                                    id,
+                                    -32000,
+                                    "tool call timeout: AI client did not respond in time",
+                                    None,
+                                )
+                            }
+                        }
+                    }
+                    Err(e) => jsonrpc_error(id, -32603, &e, None),
+                }
+            }
+            _ => jsonrpc_error(id, -32601, "method not found", None),
+        }
+    }
+
     async fn execute_tool_call(
         &self,
         config: &GatewayConfig,
@@ -358,4 +567,71 @@ impl SkillsService {
             .await
     }
 
+}
+
+fn ai_adapter_system_prompt_skill_token(prompt_body: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in prompt_body.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}").chars().take(6).collect::<String>()
+}
+
+fn strip_ai_adapter_private_arguments(arguments: &Value) -> Value {
+    let mut cleaned = arguments.clone();
+    if let Some(object) = cleaned.as_object_mut() {
+        object.remove("skillToken");
+        object.remove("skill_token");
+    }
+    cleaned
+}
+
+fn ai_adapter_input_schema_with_skill_token(input_schema: &Value) -> Value {
+    let mut schema = input_schema.clone();
+    if !schema.is_object() {
+        schema = json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        });
+    }
+
+    if let Some(object) = schema.as_object_mut() {
+        object.insert("type".to_string(), Value::String("object".to_string()));
+
+        let properties = object
+            .entry("properties".to_string())
+            .or_insert_with(|| json!({}));
+        if !properties.is_object() {
+            *properties = json!({});
+        }
+        if let Some(properties_object) = properties.as_object_mut() {
+            properties_object
+                .entry("skillToken".to_string())
+                .or_insert_with(|| {
+                    json!({
+                        "type": "string",
+                        "description": "Gateway-only skillToken returned by the system_prompt tool. Required for gateway validation and stripped before forwarding to the AI client."
+                    })
+                });
+        }
+
+        let required = object
+            .entry("required".to_string())
+            .or_insert_with(|| json!([]));
+        if !required.is_array() {
+            *required = json!([]);
+        }
+        if let Some(required_array) = required.as_array_mut() {
+            let has_skill_token = required_array
+                .iter()
+                .any(|value| value.as_str() == Some("skillToken"));
+            if !has_skill_token {
+                required_array.push(Value::String("skillToken".to_string()));
+            }
+        }
+    }
+
+    schema
 }

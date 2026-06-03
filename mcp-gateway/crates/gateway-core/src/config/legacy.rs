@@ -121,6 +121,8 @@ pub fn migrate_v1_to_v2_file(input: &Path, output: &Path) -> Result<GatewayConfi
             })
             .collect(),
         skills: super::model::SkillsConfig::default(),
+        ai_adapter: super::model::AiAdapterConfig::default(),
+        disabled_tools: Vec::new(),
     };
 
     normalize_config_in_place(&mut cfg);

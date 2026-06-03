@@ -22,6 +22,8 @@ const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
     include_str!("../../builtin-skills/chat-plus-adapter-debugger/SKILL.md");
 const BUILTIN_OFFICECLI_SKILL_MD: &str =
     include_str!("../../builtin-skills/officecli/SKILL.md");
+const BUILTIN_CODEGRAPH_SKILL_MD: &str =
+    include_str!("../../builtin-skills/codegraph/SKILL.md");
 const BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "windows")]
@@ -283,7 +285,7 @@ struct SkillCommandArgs {
 #[serde(rename_all = "camelCase")]
 struct ReadFileArgs {
     #[serde(alias = "filePath", alias = "file_path")]
-    path: String,
+    path: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
@@ -294,12 +296,14 @@ struct ReadFileArgs {
     skill_token: Option<String>,
     #[serde(default)]
     planning_id: Option<String>,
+    #[serde(default, alias = "read_skill")]
+    read_skill: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BuiltinShellArgs {
-    exec: String,
+    exec: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
@@ -315,6 +319,8 @@ struct BuiltinShellArgs {
     /// writes other paths in addition, only the listed paths are protected.
     #[serde(default, alias = "writesPaths", alias = "writes_paths")]
     writes: Vec<String>,
+    #[serde(default, alias = "read_skill")]
+    read_skill: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,6 +340,8 @@ struct MultiEditFileArgs {
     skill_token: Option<String>,
     #[serde(default)]
     planning_id: Option<String>,
+    #[serde(default, alias = "read_skill")]
+    read_skill: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -348,8 +356,6 @@ struct MultiEditFileSpec {
 #[serde(rename_all = "camelCase")]
 struct TaskPlanningArgs {
     #[serde(default)]
-    exec: Option<String>,
-    #[serde(default)]
     action: Option<TaskPlanningAction>,
     #[serde(default)]
     explanation: Option<String>,
@@ -363,6 +369,8 @@ struct TaskPlanningArgs {
     status: Option<PlanItemStatus>,
     #[serde(default)]
     skill_token: Option<String>,
+    #[serde(default, alias = "read_skill")]
+    read_skill: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -438,6 +446,7 @@ enum BuiltinTool {
     ChromeCdp,
     ChatPlusAdapterDebugger,
     OfficeCli,
+    CodeGraph,
 }
 
 #[derive(Debug, Clone)]
@@ -625,5 +634,3 @@ struct SkillCommandExecution {
     stderr: StreamCapturedOutput,
     timed_out: bool,
 }
-
-

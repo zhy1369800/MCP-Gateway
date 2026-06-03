@@ -1,5 +1,7 @@
 import type {
   ActivePlan,
+  AiSession,
+  AiToolDef,
   ApiEnvelope,
   ExportPayload,
   GatewayConfig,
@@ -192,6 +194,70 @@ export class ApiClient {
     await this.request<unknown>(
       "DELETE",
       `/admin/skills/plans/${encodeURIComponent(planningId)}`,
+    );
+  }
+
+  async getAiSessions(): Promise<AiSession[]> {
+    return this.request<AiSession[]>("GET", "/admin/ai-sessions");
+  }
+
+  async renameAiSession(sessionId: string, name: string): Promise<AiSession> {
+    return this.request<AiSession>(
+      "POST",
+      `/admin/ai-sessions/${encodeURIComponent(sessionId)}/rename`,
+      { name } as JsonValue,
+    );
+  }
+
+  async deleteAiSession(sessionId: string): Promise<{ sessionId: string; removed: boolean }> {
+    return this.request<{ sessionId: string; removed: boolean }>(
+      "DELETE",
+      `/admin/ai-sessions/${encodeURIComponent(sessionId)}`,
+    );
+  }
+
+  async updateSessionTool(
+    sessionId: string,
+    toolName: string,
+    enabled: boolean,
+  ): Promise<AiToolDef> {
+    return this.request<AiToolDef>(
+      "PUT",
+      `/admin/ai-sessions/${encodeURIComponent(sessionId)}/tools/${encodeURIComponent(toolName)}`,
+      { enabled } as JsonValue,
+    );
+  }
+
+  async updateSessionSystemPrompt(
+    sessionId: string,
+    text: string | null,
+  ): Promise<JsonValue> {
+    return this.request<JsonValue>(
+      "PUT",
+      `/admin/ai-sessions/${encodeURIComponent(sessionId)}/system-prompt`,
+      { text } as JsonValue,
+    );
+  }
+
+  async toggleSessionSystemPromptTool(
+    sessionId: string,
+    enabled: boolean,
+  ): Promise<JsonValue> {
+    return this.request<JsonValue>(
+      "PUT",
+      `/admin/ai-sessions/${encodeURIComponent(sessionId)}/system-prompt-tool`,
+      { enabled } as JsonValue,
+    );
+  }
+
+  async toggleSessionToolPing(
+    sessionId: string,
+    enabled: boolean,
+  ): Promise<JsonValue> {
+    return this.request<JsonValue>(
+      "PUT",
+      `/admin/ai-sessions/${encodeURIComponent(sessionId)}/tool-ping`,
+      { enabled } as JsonValue,
     );
   }
 }

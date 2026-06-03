@@ -141,6 +141,24 @@ pub async fn handle_mcp_http(
         .as_deref()
         .or(generated_session_id.as_deref());
 
+    // AI Adapter 会话检查
+    if state.ai_sessions.is_ai_adapter_server(&server_name).await {
+        let result = state
+            .skills
+            .handle_ai_adapter_mcp_request(
+                &cfg,
+                request,
+                effective_session_id,
+                &server_name,
+                &state.ai_sessions,
+            )
+            .await;
+        if is_notification {
+            return empty_response(StatusCode::ACCEPTED, effective_session_id);
+        }
+        return json_response(StatusCode::OK, result, effective_session_id);
+    }
+
     if state.skills.is_skills_server(&cfg, &server_name) {
         let result = state
             .skills
@@ -214,6 +232,31 @@ pub async fn handle_sse_post(
     let request_id = extract_request_id(&request);
     let is_notification = is_notification_message(&request);
     let session_id = session_header_value(&headers);
+
+    // AI Adapter 会话检查
+    if state.ai_sessions.is_ai_adapter_server(&server_name).await {
+        let result = state
+            .skills
+            .handle_ai_adapter_mcp_request(
+                &cfg,
+                request,
+                session_id.as_deref(),
+                &server_name,
+                &state.ai_sessions,
+            )
+            .await;
+        if is_notification {
+            return empty_response(StatusCode::ACCEPTED, session_id.as_deref());
+        }
+        if let Ok(payload) = serde_json::to_string(&result) {
+            let channel = session_id
+                .as_deref()
+                .map(|value| session_scoped_server_name(&server_name, value))
+                .unwrap_or_else(|| server_name.clone());
+            state.sse_hub.publish(&channel, payload).await;
+        }
+        return json_response(StatusCode::OK, result, session_id.as_deref());
+    }
 
     if state.skills.is_skills_server(&cfg, &server_name) {
         let result = state
@@ -303,7 +346,8 @@ pub async fn handle_sse_subscribe(
         .servers
         .iter()
         .any(|item| item.name == server_name && item.enabled)
-        || state.skills.is_skills_server(&cfg, &server_name);
+        || state.skills.is_skills_server(&cfg, &server_name)
+        || state.ai_sessions.is_ai_adapter_server(&server_name).await;
     if !server_exists {
         return Err(response::err_response(AppError::NotFound(
             "server not found or disabled".to_string(),
