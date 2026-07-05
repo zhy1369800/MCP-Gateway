@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
-use axum::extract::{Multipart, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
@@ -76,7 +76,7 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
         )
         .route(
             &format!("{}/admin/skills/upload", prefix),
-            post(upload_skill_root),
+            post(upload_skill_root).layer(DefaultBodyLimit::disable()),
         )
         .route(
             &format!("{}/admin/skills/confirmations", prefix),
