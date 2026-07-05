@@ -606,17 +606,21 @@ pub async fn delete_skill_directory(
 
     let target_path = PathBuf::from(path_str);
     let canonical = target_path.canonicalize().unwrap_or_else(|_| target_path.clone());
-    let safe_root = Path::new("/data/skills");
+    
+    let safe_root_str = std::env::var("MCP_SKILLS_ROOT").unwrap_or_else(|_| "/data/skills".to_string());
+    let safe_root = Path::new(&safe_root_str);
 
     if !canonical.starts_with(safe_root) {
-        return Err(response::err_response(AppError::BadRequest(
-            "安全校验失败：只允许删除技能根目录(/data/skills)之下的子文件夹".to_string(),
-        )));
+        return Err(response::err_response(AppError::BadRequest(format!(
+            "安全校验失败：只允许删除技能根目录({})之下的子文件夹",
+            safe_root.display()
+        ))));
     }
     if canonical == safe_root {
-        return Err(response::err_response(AppError::BadRequest(
-            "安全校验失败：禁止删除技能根目录自身".to_string(),
-        )));
+        return Err(response::err_response(AppError::BadRequest(format!(
+            "安全校验失败：禁止删除技能根目录自身({})",
+            safe_root.display()
+        ))));
     }
 
     if canonical.exists() {
