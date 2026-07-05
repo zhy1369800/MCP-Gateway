@@ -515,6 +515,7 @@ pub struct SkillEventsQuery {
 }
 
 
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillDirectoryValidation {
     exists: bool,

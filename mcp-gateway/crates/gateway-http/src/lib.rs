@@ -9,10 +9,10 @@ mod terminal;
 
 use std::time::Duration;
 
-use axum::http::{header, HeaderValue, Method};
+use axum::http::{header, Method};
 use axum::Router;
 use gateway_core::GatewayConfig;
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 pub use ai_adapter::AiSessionManager;
 pub use openapi::ApiDoc;
