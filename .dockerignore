@@ -5,3 +5,4 @@ image*.png
 *.md
 LICENSE
 set-version.mjs
+**/gateway-http/src/skills.rs
