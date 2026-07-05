@@ -1250,10 +1250,13 @@ function App() {
     let isComponentMounted = true;
     let ws: WebSocket | null = null;
     let term: any = null;
+    let fitAddon: any = null;
+    let resizeObserver: ResizeObserver | null = null;
 
     const initTerminal = async () => {
       try {
         const { Terminal } = await import("@xterm/xterm");
+        const { FitAddon } = await import("@xterm/addon-fit");
         await import("@xterm/xterm/css/xterm.css");
 
         if (!isComponentMounted || !terminalContainerRef.current) {
@@ -1262,6 +1265,7 @@ function App() {
 
         term = new Terminal({
           cursorBlink: true,
+          scrollback: 5000,
           theme: {
             background: "#0b0f19",
             foreground: "#34d399",
@@ -1270,12 +1274,25 @@ function App() {
           },
           fontFamily: "'SF Mono', 'Courier New', 'Consolas', monospace",
           fontSize: 13,
-          rows: 24,
-          cols: 80,
         });
+
+        fitAddon = new FitAddon();
+        term.loadAddon(fitAddon);
 
         terminalInstanceRef.current = term;
         term.open(terminalContainerRef.current);
+
+        // 等一帧让容器渲染完毕后再 fit
+        requestAnimationFrame(() => {
+          if (fitAddon) fitAddon.fit();
+        });
+
+        // 监听容器大小变化，自动调整终端行列
+        resizeObserver = new ResizeObserver(() => {
+          if (fitAddon) fitAddon.fit();
+        });
+        resizeObserver.observe(terminalContainerRef.current);
+
         term.write("Connecting to remote PTY server...\r\n");
 
         let base = apiClient.getBaseUrl();
@@ -1292,6 +1309,8 @@ function App() {
         ws.onopen = () => {
           if (!isComponentMounted) return;
           term.write("\r\x1b[K\x1b[32mPTY Connection Established!\x1b[0m\r\n\r\n");
+          // fit 后再发实际尺寸
+          if (fitAddon) fitAddon.fit();
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
           }
@@ -1342,12 +1361,9 @@ function App() {
 
     return () => {
       isComponentMounted = false;
-      if (ws) {
-        ws.close();
-      }
-      if (term) {
-        term.dispose();
-      }
+      if (resizeObserver) resizeObserver.disconnect();
+      if (ws) ws.close();
+      if (term) term.dispose();
       terminalInstanceRef.current = null;
       terminalWsRef.current = null;
     };
@@ -3245,113 +3261,89 @@ function App() {
         )}
 
         {activeSection === "terminal" && (
-          <div className="terminal-panel-layout">
-            <div className="terminal-main-area" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-              {/* 终端顶部状态栏 */}
-              <div className="terminal-status-header">
-                <div className="terminal-status-left">
-                  <span className="section-heading" style={{ margin: 0, padding: 0, border: 'none' }}>{t("terminalTitle")}</span>
-                  <span className="terminal-active-task-id">
-                    Interactive PTY Shell
-                  </span>
-                </div>
-                <div className="terminal-status-right">
-                  <span className="terminal-status-badge running">
-                    Active Session
-                  </span>
-                </div>
-              </div>
+          <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            {/* 紧凑工具栏 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingBottom: 8, flexShrink: 0, flexWrap: 'wrap' }}>
+              <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>{t("terminalTitle")}</span>
 
-              {/* 终端控制输入域 */}
-              <div className="gateway-fields" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12, marginBottom: 12 }}>
-                <div className="gw-field">
-                  <label className="field-label">{t("terminalCwd")}</label>
-                  <input
-                    className="form-input"
-                    value={terminalCwd}
-                    onChange={(e) => setTerminalCwd(e.target.value)}
-                    placeholder="/app"
-                  />
-                  <div className="cwd-reset-container">
-                    <button type="button" className="cwd-reset-btn" onClick={() => setTerminalCwd("/app")}>
-                      {t("terminalCwdResetApp")}
-                    </button>
-                    <button type="button" className="cwd-reset-btn" onClick={() => setTerminalCwd("/data/skills")}>
-                      {t("terminalCwdResetData")}
-                    </button>
-                  </div>
-                </div>
+              <input
+                className="form-input"
+                value={terminalCwd}
+                onChange={(e) => setTerminalCwd(e.target.value)}
+                placeholder="/app"
+                title={t("terminalCwd")}
+                style={{ width: 160, flexShrink: 0, fontSize: 12, padding: '4px 8px' }}
+              />
+              <button type="button" className="cwd-reset-btn" onClick={() => setTerminalCwd("/app")} style={{ flexShrink: 0 }}>
+                {t("terminalCwdResetApp")}
+              </button>
+              <button type="button" className="cwd-reset-btn" onClick={() => setTerminalCwd("/data/skills")} style={{ flexShrink: 0 }}>
+                {t("terminalCwdResetData")}
+              </button>
 
-                <div className="gw-field">
-                  <label className="field-label">{t("terminalPresetSelect")}</label>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <select
-                      className="form-select terminal-preset-select"
-                      value=""
-                      onChange={(e) => {
-                        const cmd = e.target.value;
-                        if (cmd && terminalWsRef.current && terminalWsRef.current.readyState === WebSocket.OPEN) {
-                          terminalWsRef.current.send(cmd + "\r");
-                          e.target.value = "";
-                        }
-                      }}
-                      style={{ flex: 1, maxWidth: '100%' }}
-                    >
-                      <option value="" disabled>{t("terminalPresetSelect")}</option>
-                      <option value="pip install --upgrade pip">upgrade pip</option>
-                      <option value="pip list">pip list</option>
-                      <option value="npm install">npm install</option>
-                      <option value="npm run build">npm build</option>
-                      <option value="git status">git status</option>
-                      <option value="git pull">git pull</option>
-                      <option value="python --version">python version</option>
-                      <option value="node -v">node version</option>
-                    </select>
+              <select
+                className="form-select"
+                value=""
+                title={t("terminalPresetSelect")}
+                onChange={(e) => {
+                  const cmd = e.target.value;
+                  if (cmd && terminalWsRef.current && terminalWsRef.current.readyState === WebSocket.OPEN) {
+                    terminalWsRef.current.send(cmd + "\r");
+                    e.target.value = "";
+                  }
+                }}
+                style={{ width: 170, flexShrink: 0, fontSize: 12, padding: '4px 8px' }}
+              >
+                <option value="" disabled>{t("terminalPresetSelect")}</option>
+                <option value="claude">▶ claude (Claude Code)</option>
+                <option value="pip install --upgrade pip">upgrade pip</option>
+                <option value="pip list">pip list</option>
+                <option value="npm install">npm install</option>
+                <option value="npm run build">npm build</option>
+                <option value="git status">git status</option>
+                <option value="git pull">git pull</option>
+                <option value="python --version">python version</option>
+                <option value="node -v">node version</option>
+              </select>
 
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => {
-                        const term = terminalInstanceRef.current;
-                        if (term) {
-                          let content = "";
-                          const buf = term.buffer.active;
-                          for (let i = 0; i < buf.length; i++) {
-                            const line = buf.getLine(i);
-                            if (line) {
-                              content += line.translateToString().trimEnd() + "\n";
-                            }
-                          }
-                          navigator.clipboard.writeText(content).catch(() => {});
-                        }
-                      }}
-                      title={t("terminalCopy")}
-                    >
-                      <Copy size={14} />
-                      {t("terminalCopy")}
-                    </button>
+              <div style={{ flex: 1 }} />
 
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => setReconnectTrigger((t) => t + 1)}
-                      title="Reset Terminal Session"
-                    >
-                      <RotateCcw size={14} />
-                      Reset Shell
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  const term = terminalInstanceRef.current;
+                  if (term) {
+                    let content = "";
+                    const buf = term.buffer.active;
+                    for (let i = 0; i < buf.length; i++) {
+                      const line = buf.getLine(i);
+                      if (line) content += line.translateToString().trimEnd() + "\n";
+                    }
+                    navigator.clipboard.writeText(content).catch(() => {});
+                  }
+                }}
+                title={t("terminalCopy")}
+                style={{ flexShrink: 0 }}
+              >
+                <Copy size={13} />
+              </button>
 
-              {/* Xterm 终端渲染容器 */}
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                <label className="field-label">{t("terminalOutput")}</label>
-                <div
-                  ref={terminalContainerRef}
-                  className="terminal-viewport"
-                  style={{ flex: 1, padding: 0 }}
-                />
-              </div>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => setReconnectTrigger((t) => t + 1)}
+                title="Reset Shell"
+                style={{ flexShrink: 0 }}
+              >
+                <RotateCcw size={13} />
+                Reset
+              </button>
             </div>
+
+            {/* Xterm 终端容器 — 撑满剩余高度 */}
+            <div
+              ref={terminalContainerRef}
+              style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}
+            />
           </div>
         )}
       {/* ── AI 外接面板 ── */}
