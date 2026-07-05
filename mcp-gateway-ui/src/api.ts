@@ -193,9 +193,25 @@ export class ApiClient {
         signal: controller.signal,
       });
       const text = await response.text();
+      let errorMessage = `HTTP ${response.status} ${response.statusText}`;
+      try {
+        const payload = JSON.parse(text) as ApiEnvelope<SkillUploadResult>;
+        if (payload.error?.message) {
+          errorMessage = payload.error.message;
+        }
+      } catch {
+        // If JSON parsing fails (e.g. 413 plain HTML or Nginx error)
+      }
+
+      if (!response.ok) {
+        if (response.status === 413 || errorMessage.toLowerCase().includes("too large") || errorMessage.toLowerCase().includes("limit")) {
+          throw new Error("上传的技能文件夹总大小超过了 5MB 的限制，请删除无用文件（如 node_modules、.git 等目录）后重试。");
+        }
+        throw new Error(errorMessage);
+      }
       const payload = JSON.parse(text) as ApiEnvelope<SkillUploadResult>;
-      if (!response.ok || payload.ok === false || !payload.data) {
-        throw new Error(payload.error?.message || `HTTP ${response.status} ${response.statusText}`);
+      if (payload.ok === false || !payload.data) {
+        throw new Error(payload.error?.message || "上传失败");
       }
       return payload.data;
     } catch (error) {

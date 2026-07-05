@@ -76,7 +76,7 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
         )
         .route(
             &format!("{}/admin/skills/upload", prefix),
-            post(upload_skill_root).layer(DefaultBodyLimit::disable()),
+            post(upload_skill_root).layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
         )
         .route(
             &format!("{}/admin/skills/confirmations", prefix),
@@ -591,7 +591,15 @@ pub async fn upload_skill_root(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|err| response::err_response(AppError::BadRequest(format!("invalid multipart body: {err}"))))?
+        .map_err(|err| {
+            let err_str = err.to_string();
+            let friendly_msg = if err_str.contains("limit") || err_str.contains("large") || err_str.contains("multipart") {
+                "上传的技能文件夹总大小超过了 5MB 的限制，请删除无用文件（如 node_modules、.git 等目录）后重试。".to_string()
+            } else {
+                format!("解析上传数据失败：{}", err_str)
+            };
+            response::err_response(AppError::BadRequest(friendly_msg))
+        })?
     {
         let Some(name) = field.name().map(str::to_string) else {
             continue;
@@ -658,7 +666,15 @@ pub async fn upload_skill_root(
         let bytes = field
             .bytes()
             .await
-            .map_err(|err| response::err_response(AppError::BadRequest(format!("failed to read uploaded file: {err}"))))?;
+            .map_err(|err| {
+                let err_str = err.to_string();
+                let friendly_msg = if err_str.contains("limit") || err_str.contains("large") || err_str.contains("multipart") {
+                    "上传的技能文件夹总大小超过了 5MB 的限制，请删除无用文件（如 node_modules、.git 等目录）后重试。".to_string()
+                } else {
+                    format!("读取上传文件失败：{}", err_str)
+                };
+                response::err_response(AppError::BadRequest(friendly_msg))
+            })?;
         tokio::fs::write(&target_path, bytes)
             .await
             .map_err(|err| response::err_response(AppError::Internal(format!("failed to write uploaded file: {err}"))))?;
