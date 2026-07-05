@@ -798,24 +798,24 @@ function App() {
             return;
           }
           const localSummary: LocalRuntimeSummary = {
-            system: summary.system,
-            python: summary.python,
-            node: summary.node,
-            uv: summary.uv,
+            system: summary?.system || { os: "unknown", arch: "", family: "" },
+            python: summary?.python || { installed: false, version: null },
+            node: summary?.node || { installed: false, version: null },
+            uv: summary?.uv || { installed: false, version: null },
             terminal: {
               shell: "",
               detected: true,
-              isUtf8: summary.terminal.utf8Forced || summary.terminal.activeCodePage === 65001,
-              codePage: summary.terminal.activeCodePage ? Number(summary.terminal.activeCodePage) : null,
+              isUtf8: summary?.terminal?.utf8Forced || summary?.terminal?.activeCodePage === 65001 || false,
+              codePage: summary?.terminal?.activeCodePage ? Number(summary.terminal.activeCodePage) : null,
               inputCodePage: null,
               outputCodePage: null,
               autoFixOnLaunch: false,
             },
-            configPath: summary.configPath,
+            configPath: summary?.configPath,
           };
           setLocalRuntimeSummary(localSummary);
           setLocalRuntimeDetectFailed(false);
-          if (summary.configPath) {
+          if (summary?.configPath) {
             setConfigPath(summary.configPath);
           }
         })
@@ -824,6 +824,7 @@ function App() {
             return;
           }
           console.error("Failed to detect remote runtimes:", err);
+          setError(`Failed to detect remote runtimes: ${err instanceof Error ? err.message : String(err)}`);
           setLocalRuntimeDetectFailed(true);
         });
       return () => {
