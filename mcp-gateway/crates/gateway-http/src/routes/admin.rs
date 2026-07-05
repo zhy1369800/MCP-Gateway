@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize};
 
 use crate::ai_adapter::session::AiToolDef;
 
@@ -380,7 +380,7 @@ async fn handle_terminal_socket(
     use std::io::Read;
 
     let pty_system = NativePtySystem::default();
-    let pty_pair = match pty_system.open_pty(PtySize {
+    let pty_pair = match pty_system.openpty(PtySize {
         rows: 24,
         cols: 80,
         pixel_width: 0,
