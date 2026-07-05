@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::process::Command;
 
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::routing::{delete, get, post, put};
@@ -612,7 +613,7 @@ pub async fn delete_skill_directory(
     let canonical = target_path.canonicalize().unwrap_or_else(|_| target_path.clone());
     
     let safe_root_str = std::env::var("MCP_SKILLS_ROOT").unwrap_or_else(|_| "/data/skills".to_string());
-    let safe_root = Path::new(&safe_root_str);
+    let safe_root = std::path::Path::new(&safe_root_str);
 
     if !canonical.starts_with(safe_root) {
         return Err(response::err_response(AppError::BadRequest(format!(
@@ -1173,6 +1174,7 @@ pub async fn get_server_runtimes(State(state): State<AppState>) -> ApiResult<Rem
         version: uv_version,
     };
 
+    #[allow(unused_mut)]
     let mut active_code_page = None;
     #[cfg(target_os = "windows")]
     {
