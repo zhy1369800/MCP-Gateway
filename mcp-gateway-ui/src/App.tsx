@@ -992,18 +992,23 @@ function App() {
 
     try {
       if (isRemoteMode) {
-        await apiClient.testServerByName(server.name);
+        const result = await apiClient.testServerByName(server.name) as unknown as ServerConnectivityTestResult;
+        const nextStatus: ServerTestStatus = result.ok
+          ? "success"
+          : authStateTone(result.auth) === "auth_required"
+            ? "auth_required"
+            : "failed";
         setServerTestStates((prev) => ({
           ...prev,
           [key]: {
-            status: "success",
-            message: "",
-            testedAt: new Date().toISOString(),
+            status: nextStatus,
+            message: typeof result.message === "string" ? result.message : "",
+            testedAt: typeof result.testedAt === "string" ? result.testedAt : new Date().toISOString(),
           },
         }));
         setServerAuthStates((prev) => ({
           ...prev,
-          [key]: createEmptyAuthState(),
+          [key]: result.auth ?? createEmptyAuthState(),
         }));
         return;
       }
@@ -1494,7 +1499,10 @@ function App() {
         ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, status: "checking" as const } : i) }
         : g
     ));
-    validateSkillDirectory(normalized).then((result) => {
+    const validatePromise = isRemoteMode
+      ? apiClient.validateSkillDirectory(normalized)
+      : validateSkillDirectory(normalized);
+    validatePromise.then((result) => {
       const status = skillDirectoryStatusFromResult(result);
       setSkillGroups((prev) => {
         const next = prev.map((g) =>
