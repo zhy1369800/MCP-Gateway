@@ -797,7 +797,23 @@ function App() {
           if (cancelled) {
             return;
           }
-          setLocalRuntimeSummary(summary);
+          const localSummary: LocalRuntimeSummary = {
+            system: summary.system,
+            python: summary.python,
+            node: summary.node,
+            uv: summary.uv,
+            terminal: {
+              shell: "",
+              detected: true,
+              isUtf8: summary.terminal.utf8Forced || summary.terminal.activeCodePage === 65001,
+              codePage: summary.terminal.activeCodePage ? Number(summary.terminal.activeCodePage) : null,
+              inputCodePage: null,
+              outputCodePage: null,
+              autoFixOnLaunch: false,
+            },
+            configPath: summary.configPath,
+          };
+          setLocalRuntimeSummary(localSummary);
           setLocalRuntimeDetectFailed(false);
           if (summary.configPath) {
             setConfigPath(summary.configPath);

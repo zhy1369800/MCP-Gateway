@@ -255,6 +255,23 @@ export interface LocalRuntimeSummary {
   configPath?: string;
 }
 
+// 远程模式 /admin/runtimes 接口返回的结构（与后端 RemoteRuntimeSummary 对应）
+export interface RemoteRuntimeSummary {
+  system: {
+    os: string;
+    arch: string;
+    family: string;
+  };
+  python: { installed: boolean; version: string | null };
+  node: { installed: boolean; version: string | null };
+  uv: { installed: boolean; version: string | null };
+  terminal: {
+    activeCodePage: number | null;
+    utf8Forced: boolean;
+  };
+  configPath: string;
+}
+
 export type TerminalTaskStatus = "running" | "completed" | "failed" | "killed" | "timeout";
 
 export interface TerminalTaskSnapshot {

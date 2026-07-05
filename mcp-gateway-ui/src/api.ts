@@ -13,7 +13,7 @@ import type {
   SkillUploadResult,
   ServerConfig,
   ToolListResult,
-  LocalRuntimeSummary,
+  RemoteRuntimeSummary,
 } from "./types";
 
 export function normalizeBaseUrl(baseUrl: string): string {
@@ -240,8 +240,8 @@ export class ApiClient {
     );
   }
 
-  async detectRuntimes(): Promise<LocalRuntimeSummary> {
-    return this.request<LocalRuntimeSummary>("GET", "/admin/runtimes");
+  async detectRuntimes(): Promise<RemoteRuntimeSummary> {
+    return this.request<RemoteRuntimeSummary>("GET", "/admin/runtimes");
   }
 
   async listSkillConfirmations(): Promise<SkillConfirmation[]> {
