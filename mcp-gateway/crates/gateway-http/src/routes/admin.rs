@@ -79,6 +79,10 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
             post(upload_skill_root).layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
         )
         .route(
+            &format!("{}/admin/skills/directory", prefix),
+            delete(delete_skill_directory),
+        )
+        .route(
             &format!("{}/admin/skills/confirmations", prefix),
             get(get_pending_skill_confirmations),
         )
@@ -572,6 +576,65 @@ pub async fn validate_skill_root(
         is_dir,
         has_skill_md,
     }))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSkillDirectoryRequest {
+    pub path: String,
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v2/admin/skills/directory",
+    request_body = DeleteSkillDirectoryRequest,
+    responses(
+        (status = 200, description = "Skill directory deleted"),
+        (status = 400, description = "Invalid path or permission denied")
+    )
+)]
+pub async fn delete_skill_directory(
+    State(_state): State<AppState>,
+    Json(payload): Json<DeleteSkillDirectoryRequest>,
+) -> ApiResult<Value> {
+    let path_str = payload.path.trim();
+    if path_str.is_empty() {
+        return Err(response::err_response(AppError::BadRequest(
+            "path is required".to_string(),
+        )));
+    }
+
+    let target_path = PathBuf::from(path_str);
+    let canonical = target_path.canonicalize().unwrap_or_else(|_| target_path.clone());
+    let safe_root = Path::new("/data/skills");
+
+    if !canonical.starts_with(safe_root) {
+        return Err(response::err_response(AppError::BadRequest(
+            "安全校验失败：只允许删除技能根目录(/data/skills)之下的子文件夹".to_string(),
+        )));
+    }
+    if canonical == safe_root {
+        return Err(response::err_response(AppError::BadRequest(
+            "安全校验失败：禁止删除技能根目录自身".to_string(),
+        )));
+    }
+
+    if canonical.exists() {
+        if canonical.is_dir() {
+            tokio::fs::remove_dir_all(&canonical)
+                .await
+                .map_err(|err| response::err_response(AppError::Internal(format!("删除技能目录失败：{}", err))))?;
+        } else {
+            tokio::fs::remove_file(&canonical)
+                .await
+                .map_err(|err| response::err_response(AppError::Internal(format!("删除技能文件失败：{}", err))))?;
+        }
+    }
+
+    Ok(response::ok(json!({
+        "path": path_str,
+        "deleted": true
+    })))
 }
 
 #[utoipa::path(

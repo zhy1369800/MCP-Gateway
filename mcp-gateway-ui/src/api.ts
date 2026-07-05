@@ -224,6 +224,14 @@ export class ApiClient {
     }
   }
 
+  async deleteSkillDirectory(path: string): Promise<{ path: string; deleted: boolean }> {
+    return this.request<{ path: string; deleted: boolean }>(
+      "DELETE",
+      "/admin/skills/directory",
+      toJsonValue({ path })
+    );
+  }
+
   async listSkillConfirmations(): Promise<SkillConfirmation[]> {
     return this.request<SkillConfirmation[]>("GET", "/admin/skills/confirmations");
   }

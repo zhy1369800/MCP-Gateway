@@ -1477,6 +1477,16 @@ function App() {
   };
 
   const removeGroupItem = (groupId: string, itemId: string) => {
+    if (isRemoteMode) {
+      const group = skillGroups.find((g) => g.id === groupId);
+      const item = group?.items.find((i) => i.id === itemId);
+      if (item && item.path.trim()) {
+        apiClient.deleteSkillDirectory(item.path.trim()).catch((err) => {
+          console.error("Failed to delete remote skill directory:", err);
+        });
+      }
+    }
+
     setGroupsAndSync(skillGroups.map((g) =>
       g.id === groupId ? { ...g, items: g.items.filter((i) => i.id !== itemId) } : g
     ));
