@@ -13,7 +13,6 @@ use gateway_core::{
 };
 use gateway_http::{
     build_router, spawn_idle_reaper, AiSessionManager, AppState, SkillsService, SseHub,
-    TerminalService,
 };
 
 #[tokio::main]
@@ -116,7 +115,6 @@ async fn main() -> Result<()> {
                 started_at: chrono::Utc::now(),
                 sse_hub: SseHub::new(),
                 skills: SkillsService::new(),
-                terminal: TerminalService::new(),
                 ai_sessions: AiSessionManager::new(),
             };
 

@@ -6,7 +6,7 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
-axum = { workspace = true, features = ["multipart"] }
+axum = { workspace = true, features = ["multipart", "ws"] }
 chrono.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
@@ -22,6 +22,7 @@ multer = "3"
 utoipa-swagger-ui.workspace = true
 uuid.workspace = true
 percent-encoding = "2"
+portable-pty = "0.8"
 
 gateway-core = { path = "../gateway-core" }
 

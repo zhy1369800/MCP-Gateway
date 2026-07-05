@@ -13,7 +13,6 @@ import type {
   SkillUploadResult,
   ServerConfig,
   ToolListResult,
-  TerminalTaskSnapshot,
   LocalRuntimeSummary,
 } from "./types";
 
@@ -49,6 +48,14 @@ export class ApiClient {
 
   getAdminToken(): string {
     return this.adminToken;
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  getApiPrefix(): string {
+    return this.apiPrefix;
   }
 
   private async request<T>(method: string, path: string, body?: JsonValue): Promise<T> {
@@ -264,17 +271,6 @@ export class ApiClient {
     return this.request<{ ok: boolean; error?: string }>("POST", "/admin/skills/officecli/install");
   }
 
-  async executeTerminalCommand(command: string, cwd: string): Promise<TerminalTaskSnapshot> {
-    return this.request<TerminalTaskSnapshot>("POST", "/admin/terminal/execute", toJsonValue({ command, cwd }));
-  }
-
-  async getTerminalTask(taskId: string): Promise<TerminalTaskSnapshot> {
-    return this.request<TerminalTaskSnapshot>("GET", `/admin/terminal/tasks/${encodeURIComponent(taskId)}`);
-  }
-
-  async killTerminalTask(taskId: string): Promise<TerminalTaskSnapshot> {
-    return this.request<TerminalTaskSnapshot>("POST", `/admin/terminal/tasks/${encodeURIComponent(taskId)}/kill`);
-  }
 
   async fetchActivePlans(): Promise<ActivePlan[]> {
     return this.request<ActivePlan[]>("GET", "/admin/skills/plans");

@@ -1,5 +1,5 @@
 use axum::extract::State;
-use axum::http::{header, HeaderMap, Request};
+use axum::http::{header, Request};
 use axum::middleware::Next;
 use axum::response::Response;
 use gateway_core::AppError;
@@ -13,8 +13,9 @@ pub async fn require_admin_auth(
     next: Next,
 ) -> Response {
     let cfg = state.config_service.get_config().await;
-    if let Err(error) = enforce_bearer(
-        request.headers(),
+    let token = extract_token(&request);
+    if let Err(error) = enforce_bearer_token(
+        token,
         cfg.security.admin.enabled,
         &cfg.security.admin.token,
     ) {
@@ -29,8 +30,9 @@ pub async fn require_mcp_auth(
     next: Next,
 ) -> Response {
     let cfg = state.config_service.get_config().await;
-    if let Err(error) = enforce_bearer(
-        request.headers(),
+    let token = extract_token(&request);
+    if let Err(error) = enforce_bearer_token(
+        token,
         cfg.security.mcp.enabled,
         &cfg.security.mcp.token,
     ) {
@@ -39,8 +41,29 @@ pub async fn require_mcp_auth(
     next.run(request).await
 }
 
-fn enforce_bearer(
-    headers: &HeaderMap,
+fn extract_token(request: &Request<axum::body::Body>) -> Option<String> {
+    if let Some(raw) = request.headers().get(header::AUTHORIZATION) {
+        if let Ok(value) = raw.to_str() {
+            if let Some(token) = value.strip_prefix("Bearer ") {
+                return Some(token.to_string());
+            }
+        }
+    }
+    if let Some(query) = request.uri().query() {
+        if let Some(token_part) = query.split('&')
+            .find(|p| p.starts_with("token="))
+            .map(|p| p.strip_prefix("token=").unwrap_or(""))
+        {
+            if let Ok(decoded) = percent_encoding::percent_decode_str(token_part).decode_utf8() {
+                return Some(decoded.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn enforce_bearer_token(
+    token: Option<String>,
     enabled: bool,
     expected_token: &str,
 ) -> Result<(), AppError> {
@@ -48,19 +71,11 @@ fn enforce_bearer(
         return Ok(());
     }
 
-    let Some(raw) = headers.get(header::AUTHORIZATION) else {
+    let Some(t) = token else {
         return Err(AppError::Unauthorized("missing bearer token".to_string()));
     };
-    let Ok(value) = raw.to_str() else {
-        return Err(AppError::Unauthorized(
-            "invalid authorization header".to_string(),
-        ));
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return Err(AppError::Unauthorized("invalid bearer format".to_string()));
-    };
 
-    if token == expected_token {
+    if t == expected_token {
         Ok(())
     } else {
         Err(AppError::Unauthorized("token mismatch".to_string()))

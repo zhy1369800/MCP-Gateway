@@ -78,7 +78,6 @@ import type {
   SkillsConfig,
   SkillGroupEntry,
   BuiltinToolsConfig,
-  TerminalTaskSnapshot,
 } from "./types";
 import { useT, type Lang, type TKey } from "./i18n";
 import JsonEditor from "./components/JsonEditor";
@@ -314,27 +313,11 @@ function App() {
   const [status, setStatus] = useState<GatewayProcessStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [terminalCommand, setTerminalCommand] = useState("");
   const [terminalCwd, setTerminalCwd] = useState("/app");
-  const [terminalTask, setTerminalTask] = useState<TerminalTaskSnapshot | null>(null);
-  const [terminalBusy, setTerminalBusy] = useState(false);
-  const [selectedHistoryTask, setSelectedHistoryTask] = useState<TerminalTaskSnapshot | null>(null);
-  const [recentTasks, setRecentTasks] = useState<TerminalTaskSnapshot[]>(() => {
-    try {
-      const saved = localStorage.getItem("mcp_gateway_terminal_history");
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem("mcp_gateway_terminal_history", JSON.stringify(recentTasks));
-    } catch (e) {
-      console.error("Failed to save terminal history:", e);
-    }
-  }, [recentTasks]);
+  const [reconnectTrigger, setReconnectTrigger] = useState(0);
+  const terminalContainerRef = useRef<HTMLDivElement | null>(null);
+  const terminalInstanceRef = useRef<any>(null);
+  const terminalWsRef = useRef<WebSocket | null>(null);
   const skillUploadInputRef = useRef<HTMLInputElement | null>(null);
   const pendingSkillUploadItemIdRef = useRef<string | null>(null);
   const pendingSkillUploadGroupIdRef = useRef<string | null>(null);
@@ -1260,77 +1243,115 @@ function App() {
   );
 
   useEffect(() => {
-    if (!terminalTask || terminalTask.status !== "running") {
+    if (activeSection !== "terminal") {
       return;
     }
 
-    let cancelled = false;
-    const timer = window.setInterval(async () => {
+    let isComponentMounted = true;
+    let ws: WebSocket | null = null;
+    let term: any = null;
+
+    const initTerminal = async () => {
       try {
-        const next = await apiClient.getTerminalTask(terminalTask.taskId);
-        if (!cancelled) {
-          setTerminalTask(next);
-          setRecentTasks((prev) =>
-            prev.map((t) => (t.taskId === next.taskId ? next : t))
-          );
-          setSelectedHistoryTask((prev) => (prev?.taskId === next.taskId ? next : prev));
-          if (next.status !== "running") {
-            setTerminalBusy(false);
+        const { Terminal } = await import("@xterm/xterm");
+        await import("@xterm/xterm/css/xterm.css");
+
+        if (!isComponentMounted || !terminalContainerRef.current) {
+          return;
+        }
+
+        term = new Terminal({
+          cursorBlink: true,
+          theme: {
+            background: "#0b0f19",
+            foreground: "#34d399",
+            cursor: "#34d399",
+            selectionBackground: "rgba(52, 211, 153, 0.3)",
+          },
+          fontFamily: "'SF Mono', 'Courier New', 'Consolas', monospace",
+          fontSize: 13,
+          rows: 24,
+          cols: 80,
+        });
+
+        terminalInstanceRef.current = term;
+        term.open(terminalContainerRef.current);
+        term.write("Connecting to remote PTY server...\r\n");
+
+        let base = apiClient.getBaseUrl();
+        if (!base || base === "/") {
+          base = window.location.origin;
+        }
+        const wsProto = base.startsWith("https") ? "wss" : "ws";
+        const cleanBase = base.replace(/^https?:\/\//, "");
+        const wsUrl = `${wsProto}://${cleanBase}${apiClient.getApiPrefix()}/admin/terminal/ws?token=${encodeURIComponent(apiClient.getAdminToken())}&cwd=${encodeURIComponent(terminalCwd)}`;
+
+        ws = new WebSocket(wsUrl);
+        terminalWsRef.current = ws;
+
+        ws.onopen = () => {
+          if (!isComponentMounted) return;
+          term.write("\r\x1b[K\x1b[32mPTY Connection Established!\x1b[0m\r\n\r\n");
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
           }
-        }
+        };
+
+        ws.onmessage = (event) => {
+          if (!isComponentMounted) return;
+          if (event.data instanceof Blob) {
+            const reader = new FileReader();
+            reader.onload = () => {
+              term.write(new Uint8Array(reader.result as ArrayBuffer));
+            };
+            reader.readAsArrayBuffer(event.data);
+          } else {
+            term.write(event.data);
+          }
+        };
+
+        ws.onerror = (e) => {
+          if (!isComponentMounted) return;
+          console.error("WebSocket Terminal Error:", e);
+          term.write("\r\n\x1b[31mConnection Error.\x1b[0m\r\n");
+        };
+
+        ws.onclose = () => {
+          if (!isComponentMounted) return;
+          term.write("\r\n\x1b[31mPTY Connection Closed.\x1b[0m\r\n");
+        };
+
+        term.onData((data: string) => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(data);
+          }
+        });
+
+        term.onResize((size: { cols: number; rows: number }) => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+          }
+        });
+
       } catch (err) {
-        if (!cancelled) {
-          setError(asErrorMessage(err));
-          setTerminalBusy(false);
-        }
+        console.error("Xterm initialization failed:", err);
       }
-    }, 1500);
+    };
+
+    void initTerminal();
 
     return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [apiClient, terminalTask]);
-
-  const runTerminalCommand = useCallback(async () => {
-    if (!terminalCommand.trim()) {
-      return;
-    }
-    setError(null);
-    setTerminalBusy(true);
-    setSelectedHistoryTask(null);
-    try {
-      const task = await apiClient.executeTerminalCommand(terminalCommand, terminalCwd);
-      setTerminalTask(task);
-      setRecentTasks((prev) => {
-        if (prev.some((t) => t.taskId === task.taskId)) return prev;
-        return [task, ...prev].slice(0, 30);
-      });
-      setTerminalCommand("");
-      if (task.status !== "running") {
-        setTerminalBusy(false);
+      isComponentMounted = false;
+      if (ws) {
+        ws.close();
       }
-    } catch (err) {
-      setError(asErrorMessage(err));
-      setTerminalBusy(false);
-    }
-  }, [apiClient, terminalCommand, terminalCwd]);
-
-  const stopTerminalCommand = useCallback(async () => {
-    if (!terminalTask) return;
-    try {
-      const next = await apiClient.killTerminalTask(terminalTask.taskId);
-      setTerminalTask(next);
-      setRecentTasks((prev) =>
-        prev.map((t) => (t.taskId === next.taskId ? next : t))
-      );
-      setSelectedHistoryTask((prev) => (prev?.taskId === next.taskId ? next : prev));
-    } catch (err) {
-      setError(asErrorMessage(err));
-    } finally {
-      setTerminalBusy(false);
-    }
-  }, [apiClient, terminalTask]);
+      if (term) {
+        term.dispose();
+      }
+      terminalInstanceRef.current = null;
+      terminalWsRef.current = null;
+    };
+  }, [activeSection, apiClient, terminalCwd, reconnectTrigger]);
 
   const onRulesDraftChange = (value: string) => {
     setSkillsRulesDraft(value);
@@ -3225,43 +3246,32 @@ function App() {
 
         {activeSection === "terminal" && (
           <div className="terminal-panel-layout">
-            {/* 左侧：主执行终端区域 */}
-            <div className="terminal-main-area">
+            <div className="terminal-main-area" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
               {/* 终端顶部状态栏 */}
               <div className="terminal-status-header">
                 <div className="terminal-status-left">
                   <span className="section-heading" style={{ margin: 0, padding: 0, border: 'none' }}>{t("terminalTitle")}</span>
-                  {selectedHistoryTask ? (
-                    <span className="terminal-active-task-id">
-                      {t("terminalHistory")}: {selectedHistoryTask.taskId.slice(0, 8)}...
-                    </span>
-                  ) : (
-                    terminalTask && (
-                      <span className="terminal-active-task-id">
-                        Task: {terminalTask.taskId.slice(0, 8)}...
-                      </span>
-                    )
-                  )}
+                  <span className="terminal-active-task-id">
+                    Interactive PTY Shell
+                  </span>
                 </div>
-                {/* 状态胶囊 */}
                 <div className="terminal-status-right">
-                  {selectedHistoryTask ? (
-                    <span className={`terminal-status-badge ${selectedHistoryTask.status}`}>
-                      {t(`planStatus_${selectedHistoryTask.status}` as TKey) || selectedHistoryTask.status}
-                    </span>
-                  ) : (
-                    <span className={`terminal-status-badge ${terminalTask ? terminalTask.status : "idle"}`}>
-                      {terminalTask ? (t(`planStatus_${terminalTask.status}` as TKey) || terminalTask.status) : "idle"}
-                    </span>
-                  )}
+                  <span className="terminal-status-badge running">
+                    Active Session
+                  </span>
                 </div>
               </div>
 
               {/* 终端控制输入域 */}
-              <div className="gateway-fields" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12 }}>
+              <div className="gateway-fields" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12, marginBottom: 12 }}>
                 <div className="gw-field">
                   <label className="field-label">{t("terminalCwd")}</label>
-                  <input className="form-input" value={terminalCwd} onChange={(e) => setTerminalCwd(e.target.value)} />
+                  <input
+                    className="form-input"
+                    value={terminalCwd}
+                    onChange={(e) => setTerminalCwd(e.target.value)}
+                    placeholder="/app"
+                  />
                   <div className="cwd-reset-container">
                     <button type="button" className="cwd-reset-btn" onClick={() => setTerminalCwd("/app")}>
                       {t("terminalCwdResetApp")}
@@ -3273,30 +3283,19 @@ function App() {
                 </div>
 
                 <div className="gw-field">
-                  <label className="field-label">{t("terminalCommand")}</label>
+                  <label className="field-label">{t("terminalPresetSelect")}</label>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <input
-                      className="form-input"
-                      value={terminalCommand}
-                      onChange={(e) => setTerminalCommand(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !terminalBusy) {
-                          void runTerminalCommand();
-                        }
-                      }}
-                      placeholder="pip install yt-dlp"
-                      style={{ flex: 1 }}
-                    />
-                    {/* 常用命令插入面板 */}
                     <select
                       className="form-select terminal-preset-select"
                       value=""
                       onChange={(e) => {
-                        if (e.target.value) {
-                          setTerminalCommand(e.target.value);
+                        const cmd = e.target.value;
+                        if (cmd && terminalWsRef.current && terminalWsRef.current.readyState === WebSocket.OPEN) {
+                          terminalWsRef.current.send(cmd + "\r");
                           e.target.value = "";
                         }
                       }}
+                      style={{ flex: 1, maxWidth: '100%' }}
                     >
                       <option value="" disabled>{t("terminalPresetSelect")}</option>
                       <option value="pip install --upgrade pip">upgrade pip</option>
@@ -3308,128 +3307,49 @@ function App() {
                       <option value="python --version">python version</option>
                       <option value="node -v">node version</option>
                     </select>
+
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => {
+                        const term = terminalInstanceRef.current;
+                        if (term) {
+                          let content = "";
+                          const buf = term.buffer.active;
+                          for (let i = 0; i < buf.length; i++) {
+                            const line = buf.getLine(i);
+                            if (line) {
+                              content += line.translateToString().trimEnd() + "\n";
+                            }
+                          }
+                          navigator.clipboard.writeText(content).catch(() => {});
+                        }
+                      }}
+                      title={t("terminalCopy")}
+                    >
+                      <Copy size={14} />
+                      {t("terminalCopy")}
+                    </button>
+
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setReconnectTrigger((t) => t + 1)}
+                      title="Reset Terminal Session"
+                    >
+                      <RotateCcw size={14} />
+                      Reset Shell
+                    </button>
                   </div>
                 </div>
               </div>
 
-              {/* 动作按钮条 */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, marginBottom: 12 }}>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="btn btn-start" onClick={() => { void runTerminalCommand(); }} disabled={terminalBusy || !terminalCommand.trim()}>
-                    <Play size={14} />
-                    {t("terminalRun")}
-                  </button>
-                  <button className="btn btn-stop" onClick={() => { void stopTerminalCommand(); }} disabled={!terminalTask || terminalTask.status !== "running"}>
-                    <Square size={14} />
-                    {t("terminalStop")}
-                  </button>
-                </div>
-
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => {
-                      const active = selectedHistoryTask || terminalTask;
-                      if (active) {
-                        const content = `$ ${active.command}\n\n${active.stdout}\n${active.stderr || ""}`;
-                        navigator.clipboard.writeText(content).catch(() => {});
-                      }
-                    }}
-                    disabled={!selectedHistoryTask && !terminalTask}
-                    title={t("terminalCopy")}
-                  >
-                    <Copy size={14} />
-                    {t("terminalCopy")}
-                  </button>
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => {
-                      setTerminalTask(null);
-                      setSelectedHistoryTask(null);
-                    }}
-                    title={t("terminalClear")}
-                  >
-                    <Trash2 size={14} />
-                    {t("terminalClear")}
-                  </button>
-                </div>
-              </div>
-
-              {/* 大屏终端视窗 */}
+              {/* Xterm 终端渲染容器 */}
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                 <label className="field-label">{t("terminalOutput")}</label>
-                <div className="terminal-viewport">
-                  {(() => {
-                    const active = selectedHistoryTask || terminalTask;
-                    if (!active) {
-                      return <span className="terminal-system-text">{t("terminalIdle")}</span>;
-                    }
-                    return (
-                      <>
-                        <span className="terminal-system-text">
-                          [admin@mcp-gateway {active.cwd}]$ {active.command}
-                        </span>
-                        {"\n\n"}
-                        <span className="terminal-stdout-text">{active.stdout}</span>
-                        {active.stderr && (
-                          <>
-                            {"\n"}
-                            <span className="terminal-stderr-text">{active.stderr}</span>
-                          </>
-                        )}
-                        {"\n\n"}
-                        <span className="terminal-system-text">
-                          --- Task finished with status={active.status}
-                          {active.exitCode !== null ? ` exit=${active.exitCode}` : ""} ---
-                        </span>
-                      </>
-                    );
-                  })()}
-                </div>
-              </div>
-            </div>
-
-            {/* 右侧：历史命令抽屉栏 */}
-            <div className="terminal-history-panel">
-              <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <ListChecks size={16} />
-                {t("terminalHistory")}
-              </div>
-              <div className="terminal-history-list">
-                {selectedHistoryTask && (
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    style={{ width: '100%', marginBottom: 8 }}
-                    onClick={() => setSelectedHistoryTask(null)}
-                  >
-                    回到活跃任务
-                  </button>
-                )}
-                {recentTasks.length === 0 ? (
-                  <div className="terminal-history-empty">{t("terminalHistoryEmpty")}</div>
-                ) : (
-                  recentTasks.map((task) => (
-                    <div
-                      key={task.taskId}
-                      className={`terminal-history-item ${(selectedHistoryTask?.taskId === task.taskId || (!selectedHistoryTask && terminalTask?.taskId === task.taskId)) ? "active" : ""}`}
-                      onClick={() => setSelectedHistoryTask(task)}
-                    >
-                      <div className="terminal-history-item-header">
-                        <span className={`status-dot ${task.status === "running" ? "connecting" : task.status === "completed" ? "running" : "stopped"}`} />
-                        <span className="terminal-history-time">
-                          {new Date(task.startedAt).toLocaleTimeString()}
-                        </span>
-                      </div>
-                      <div className="terminal-history-cmd" title={task.command}>
-                        {task.command}
-                      </div>
-                      <div className="terminal-history-cwd" title={task.cwd}>
-                        {task.cwd}
-                      </div>
-                    </div>
-                  ))
-                )}
+                <div
+                  ref={terminalContainerRef}
+                  className="terminal-viewport"
+                  style={{ flex: 1, padding: 0 }}
+                />
               </div>
             </div>
           </div>

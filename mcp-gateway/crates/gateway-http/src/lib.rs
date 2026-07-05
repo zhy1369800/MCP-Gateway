@@ -5,7 +5,6 @@ mod response;
 mod routes;
 mod skills;
 mod state;
-mod terminal;
 
 use std::time::Duration;
 
@@ -21,7 +20,6 @@ pub use skills::{
     SkillSummary, SkillsService,
 };
 pub use state::{AppState, SseHub};
-pub use terminal::{TerminalService, TerminalTaskSnapshot, TerminalTaskStatus};
 
 pub fn build_router(state: AppState, config: &GatewayConfig) -> Router {
     let mut router = Router::new()

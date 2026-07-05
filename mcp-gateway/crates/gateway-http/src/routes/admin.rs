@@ -2,7 +2,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::Command;
 
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State, WebSocketUpgrade};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
@@ -47,16 +47,8 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
             get(export_mcp_servers_payload),
         )
         .route(
-            &format!("{}/admin/terminal/execute", prefix),
-            post(execute_terminal_command),
-        )
-        .route(
-            &format!("{}/admin/terminal/tasks/:task_id", prefix),
-            get(get_terminal_task),
-        )
-        .route(
-            &format!("{}/admin/terminal/tasks/:task_id/kill", prefix),
-            post(kill_terminal_task),
+            &format!("{}/admin/terminal/ws", prefix),
+            get(ws_terminal_handler),
         )
         .route(
             &format!("{}/admin/runtimes", prefix),
@@ -369,65 +361,151 @@ pub async fn get_server_tools(
     Ok(response::ok(json!({"refresh": refresh, "result": result})))
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecuteTerminalRequest {
-    command: String,
-    cwd: String,
+pub async fn ws_terminal_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
+    let cwd = params.get("cwd").cloned();
+    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, cwd))
 }
 
-#[utoipa::path(
-    post,
-    path = "/api/v2/admin/terminal/execute",
-    request_body = ExecuteTerminalRequest,
-    responses((status = 200, description = "Execute terminal command", body = TerminalTaskSnapshot))
-)]
-pub async fn execute_terminal_command(
-    State(state): State<AppState>,
-    Json(payload): Json<ExecuteTerminalRequest>,
-) -> ApiResult<TerminalTaskSnapshot> {
-    let snapshot = state
-        .terminal
-        .execute(payload.command, payload.cwd)
-        .await
-        .map_err(response::err_response)?;
-    Ok(response::ok(snapshot))
-}
+async fn handle_terminal_socket(
+    socket: WebSocket,
+    _state: AppState,
+    cwd: Option<String>,
+) {
+    use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+    use futures_util::{SinkExt, StreamExt};
+    use std::io::Read;
 
-#[utoipa::path(
-    get,
-    path = "/api/v2/admin/terminal/tasks/{task_id}",
-    params(("task_id" = String, Path, description = "Terminal task id")),
-    responses((status = 200, description = "Terminal task snapshot", body = TerminalTaskSnapshot))
-)]
-pub async fn get_terminal_task(
-    State(state): State<AppState>,
-    Path(task_id): Path<String>,
-) -> ApiResult<TerminalTaskSnapshot> {
-    let snapshot = state
-        .terminal
-        .get(&task_id)
-        .await
-        .map_err(response::err_response)?;
-    Ok(response::ok(snapshot))
-}
+    let pty_system = NativePtySystem::default();
+    let pty_pair = match pty_system.open_pty(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("Failed to open PTY: {:?}", e);
+            return;
+        }
+    };
 
-#[utoipa::path(
-    post,
-    path = "/api/v2/admin/terminal/tasks/{task_id}/kill",
-    params(("task_id" = String, Path, description = "Terminal task id")),
-    responses((status = 200, description = "Killed terminal task", body = TerminalTaskSnapshot))
-)]
-pub async fn kill_terminal_task(
-    State(state): State<AppState>,
-    Path(task_id): Path<String>,
-) -> ApiResult<TerminalTaskSnapshot> {
-    let snapshot = state
-        .terminal
-        .kill(&task_id)
-        .await
-        .map_err(response::err_response)?;
-    Ok(response::ok(snapshot))
+    #[cfg(target_os = "windows")]
+    let shell = "powershell.exe";
+    #[cfg(not(target_os = "windows"))]
+    let shell = "/bin/sh";
+
+    let mut cmd = CommandBuilder::new(shell);
+    if let Some(c) = cwd {
+        cmd.cwd(c);
+    }
+
+    let _child = match pty_pair.slave.spawn_command(cmd) {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("Failed to spawn shell command in PTY: {:?}", e);
+            return;
+        }
+    };
+
+    let mut reader = match pty_pair.master.try_clone_reader() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to clone PTY reader: {:?}", e);
+            return;
+        }
+    };
+    let mut writer = pty_pair.master.take_writer();
+    let master = pty_pair.master;
+
+    let (pty_tx, mut pty_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+    let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+
+    // 启动 PTY 同步阻塞读取线程
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    if pty_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+
+    // 启动 PTY 同步阻塞写入线程
+    std::thread::spawn(move || {
+        use std::io::Write;
+        while let Some(data) = ws_rx.blocking_recv() {
+            if writer.write_all(&data).is_err() {
+                break;
+            }
+            if writer.flush().is_err() {
+                break;
+            }
+        }
+    });
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // 异步任务一：读取 pty_rx，通过 websocket 发送给前端
+    let mut read_task = tokio::spawn(async move {
+        while let Some(bytes) = pty_rx.recv().await {
+            if ws_sender.send(Message::Binary(bytes.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // 异步任务二：从 websocket 读前端的发送包，送入 ws_tx 或者控制 PTY 尺寸
+    let ws_tx_clone = ws_tx.clone();
+    let mut write_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_receiver.next().await {
+            match msg {
+                Message::Text(text) => {
+                    if text.starts_with('{') {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if val["type"] == "resize" {
+                                if let (Some(cols), Some(rows)) = (val["cols"].as_u64(), val["rows"].as_u64()) {
+                                    let _ = master.resize(PtySize {
+                                        rows: rows as u16,
+                                        cols: cols as u16,
+                                        pixel_width: 0,
+                                        pixel_height: 0,
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if ws_tx_clone.send(text.into_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+                Message::Binary(bin) => {
+                    if ws_tx_clone.send(bin.to_vec()).await.is_err() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = &mut read_task => {
+            write_task.abort();
+        }
+        _ = &mut write_task => {
+            read_task.abort();
+        }
+    }
 }
 
 #[utoipa::path(
