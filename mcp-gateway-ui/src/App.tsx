@@ -3114,45 +3114,7 @@ function App() {
               </div>
             </section>
 
-            <section className="config-section skills-redesign-section">
-              <div className="section-heading">{t("skillsPathGuard")}</div>
 
-              <div className="skills-redesign skills-path-guard-panel">
-                <div className="skills-violation-panel">
-                  <label className="field-label" htmlFor="skills-violation-action">{t("skillsViolationAction")}</label>
-                  <select
-                    id="skills-violation-action"
-                    className="form-input skills-action-select"
-                    value={skills.policy.pathGuard.onViolation}
-                    onChange={(e) =>
-                      setSkills((prev) => ({
-                        ...prev,
-                        policy: {
-                          ...prev.policy,
-                          pathGuard: { ...prev.policy.pathGuard, onViolation: e.target.value as SkillPolicyAction },
-                        },
-                      }))
-                    }
-                  >
-                    <option value="allow">{t("policyAllow")}</option>
-                    <option value="confirm">{t("policyConfirm")}</option>
-                    <option value="deny">{t("policyDeny")}</option>
-                  </select>
-                </div>
-
-                <SkillDirectoryListEditor
-                  title={t("skillsWhitelistDirs")}
-                  hint={t("skillsWhitelistHint")}
-                  items={skillWhitelistItems}
-                  onAdd={addWhitelistItem}
-                  onRemove={requestRemoveWhitelistItem}
-                  onPathChange={updateWhitelistItemPath}
-                  onBrowse={browseWhitelistItem}
-                  showValidation={false}
-                  t={t}
-                />
-              </div>
-            </section>
 
             {/* ── 策略规则 ── */}
             <section className="config-section">
