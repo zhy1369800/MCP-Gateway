@@ -103,11 +103,6 @@ pub fn validate_config(cfg: &GatewayConfig) -> Result<(), AppError> {
                 "skills.policy.pathGuard.whitelistDirs must be absolute paths: {dir}"
             )));
         }
-        if !path.exists() || !path.is_dir() {
-            return Err(AppError::Validation(format!(
-                "skills.policy.pathGuard.whitelistDirs must be existing directories: {dir}"
-            )));
-        }
     }
 
     let mut rule_ids = HashSet::new();
