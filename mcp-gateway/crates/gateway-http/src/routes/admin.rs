@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize};
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
 use crate::ai_adapter::session::AiToolDef;
 
