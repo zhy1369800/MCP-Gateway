@@ -33,6 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy uv binaries
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
@@ -57,7 +60,7 @@ ENV XDG_CONFIG_HOME=/app
 ENV MCP_GATEWAY_CONFIG=/data/config/config.json
 ENV MCP_SKILLS_ROOT=/data/skills
 
-#╧рть/dada
+#О©╫О©╫О©╫О©╫/dada
 # Start the server
 # Use 'server' subcommand from gateway-cli
 CMD ["sh", "-c", "mkdir -p /data/config /data/skills && if [ ! -f \"$MCP_GATEWAY_CONFIG\" ]; then cp /opt/bootstrap/default-config.json \"$MCP_GATEWAY_CONFIG\"; fi && exec mcp-gateway run --config \"$MCP_GATEWAY_CONFIG\""]
