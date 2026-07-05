@@ -803,10 +803,11 @@ function App() {
             setConfigPath(summary.configPath);
           }
         })
-        .catch(() => {
+        .catch((err) => {
           if (cancelled) {
             return;
           }
+          console.error("Failed to detect remote runtimes:", err);
           setLocalRuntimeDetectFailed(true);
         });
       return () => {
