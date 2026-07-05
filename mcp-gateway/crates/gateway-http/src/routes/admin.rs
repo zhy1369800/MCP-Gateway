@@ -418,7 +418,13 @@ async fn handle_terminal_socket(
             return;
         }
     };
-    let mut writer = pty_pair.master.take_writer();
+    let mut writer = match pty_pair.master.take_writer() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("Failed to get PTY writer: {:?}", e);
+            return;
+        }
+    };
     let master = pty_pair.master;
 
     let (pty_tx, mut pty_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
