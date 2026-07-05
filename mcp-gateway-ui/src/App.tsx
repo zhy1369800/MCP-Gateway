@@ -13,6 +13,7 @@ import {
   ListChecks,
   Chrome,
   Bug,
+  Eye,
   List,
   Languages,
   Save,
@@ -29,6 +30,9 @@ import {
   FolderOpen,
   Plus,
   Trash2,
+  X,
+  ChevronDown,
+  Network,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { getGatewayStatus, startGateway, stopGateway, type GatewayProcessStatus } from "./gatewayRuntime";
@@ -36,6 +40,7 @@ import {
   clearServerAuthLocal,
   detectLocalRuntimes,
   setMainWindowTitle,
+  applyTrayLabels,
   getServerAuthStateLocal,
   loadLocalConfig,
   openConfigFileLocal,
@@ -60,15 +65,18 @@ import {
 } from "./tauri/officecli";
 import { usePolling, type PollOutcome } from "./hooks/usePolling";
 import type {
+  AiSession,
   GatewayConfig,
   LocalRuntimeSummary,
   ServerConfig,
   ServerAuthState,
   SkillCommandRule,
   SkillPolicyAction,
+  ActivePlan,
   SkillConfirmation,
   ServerConnectivityTestResult,
   SkillsConfig,
+  SkillGroupEntry,
   BuiltinToolsConfig,
   TerminalTaskSnapshot,
 } from "./types";
@@ -76,21 +84,25 @@ import { useT, type Lang, type TKey } from "./i18n";
 import JsonEditor from "./components/JsonEditor";
 import { useUpdateCheck } from "./hooks/useUpdateCheck";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { formatTime } from "./utils/display";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { SkillConfirmations, SkillConfirmationPopup } from "./components/SkillConfirmations";
+import { SessionToolsModal } from "./components/SessionToolsModal";
+import { SystemPromptModal } from "./components/SystemPromptModal";
 import { SkillDirectoryListEditor } from "./components/SkillDirectoryListEditor";
+import { SkillGroupsEditor } from "./components/SkillGroupsEditor";
 import { SkillPolicyRulesEditor } from "./components/SkillPolicyRulesEditor";
 import { ServerRow } from "./components/ServerRow";
 import { jsonToServers } from "./utils/serverConfig";
 import {
   buildServersJson,
   createEditableConfigFingerprint,
-  createEditableConfigSnapshot,
   createMcpClientEntryJson,
   moveArrayItem,
   stripIndexKeyedEntries,
   type EndpointTransportType,
   type ServerDragTarget,
+  type EditableConfigSnapshot,
 } from "./utils/configSnapshot";
 import { runtimeDisplayValue, terminalEncodingDisplayValue } from "./utils/display";
 import {
@@ -98,7 +110,6 @@ import {
   createSkillRuleId,
   BUILTIN_SKILL_SERVER_NAME,
   ensureSkillsConfig,
-  EXTERNAL_SKILL_SERVER_NAME,
   formToRule,
   isSkillRuleFormValid,
   normalizeSkillsForSubmit,
@@ -109,10 +120,11 @@ import {
 import { isConfirmationAlreadyResolvedError } from "./features/skills/confirmations";
 import {
   createSkillDirectoryItem,
+  createSkillGroup,
   skillDirectoryStatusFromResult,
   type SkillDirKind,
-  type SkillDirStatus,
   type SkillDirectoryItem,
+  type SkillGroup,
 } from "./features/skills/directories";
 import {
   asErrorMessage,
@@ -154,22 +166,6 @@ function QqLogoIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-function stableSortValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => stableSortValue(item));
-  }
-  if (value && typeof value === "object") {
-    const sorted: Record<string, unknown> = {};
-    Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .forEach(([key, nested]) => {
-        sorted[key] = stableSortValue(nested);
-      });
-    return sorted;
-  }
-  return value;
-}
-
 function createEditableConfigSnapshot(input: {
   servers: ServerConfig[];
   listen: string;
@@ -179,6 +175,9 @@ function createEditableConfigSnapshot(input: {
   adminToken: string;
   mcpToken: string;
   skills: SkillsConfig;
+  aiAdapterEnabled: boolean;
+  aiAdapterKeys: string[];
+  sessionNamePresets: string[];
 }): EditableConfigSnapshot {
   return {
     servers: input.servers,
@@ -193,47 +192,10 @@ function createEditableConfigSnapshot(input: {
       mcp: { enabled: input.mcpToken !== "", token: input.mcpToken },
     },
     skills: input.skills,
+    aiAdapterEnabled: input.aiAdapterEnabled,
+    aiAdapterKeys: input.aiAdapterKeys.filter(k => k.trim().length > 0),
+    sessionNamePresets: input.sessionNamePresets.filter(p => p.trim().length > 0),
   };
-}
-
-function createEditableConfigFingerprint(snapshot: EditableConfigSnapshot): string {
-  return JSON.stringify(stableSortValue(snapshot));
-}
-
-function buildServersJson(servers: ServerConfig[]): string {
-  return JSON.stringify(serversToJson(servers), null, 2);
-}
-
-function moveArrayItem<T>(
-  items: T[],
-  sourceIndex: number,
-  targetIndex: number,
-  position: ServerDropPosition,
-): T[] {
-  if (sourceIndex === targetIndex) {
-    return items;
-  }
-
-  const next = [...items];
-  const [movedItem] = next.splice(sourceIndex, 1);
-  let insertIndex = targetIndex;
-
-  if (sourceIndex < targetIndex) {
-    insertIndex -= 1;
-  }
-  if (position === "after") {
-    insertIndex += 1;
-  }
-
-  insertIndex = Math.max(0, Math.min(insertIndex, next.length));
-  next.splice(insertIndex, 0, movedItem);
-  return next;
-}
-
-function stripIndexKeyedEntries<T>(entries: Record<string, T>): Record<string, T> {
-  return Object.fromEntries(
-    Object.entries(entries).filter(([key]) => !key.startsWith("idx:")),
-  ) as Record<string, T>;
 }
 
 function createGatewayDisplayBaseUrl(listen: string, remoteUrl: string, isRemoteMode: boolean): string {
@@ -243,135 +205,9 @@ function createGatewayDisplayBaseUrl(listen: string, remoteUrl: string, isRemote
   return listen.startsWith("http") ? listen : `http://${listen}`;
 }
 
-function createMcpClientEntryJson(
-  name: string,
-  type: EndpointTransportType,
-  url: string,
-  authorizationToken?: string,
-): string {
-  const trimmedToken = authorizationToken?.trim() ?? "";
-  const entry: Record<string, unknown> = {
-    type,
-    url,
-  };
-
-  if (trimmedToken) {
-    entry.headers = {
-      Authorization: `Bearer ${trimmedToken}`,
-    };
-  }
-
-  return JSON.stringify({
-    [name]: entry,
-  }, null, 2)
-    .split("\n")
-    .slice(1, -1)
-    .join("\n");
-}
-
-type SkillDirStatus = "idle" | "checking" | "valid" | "invalid" | "error";
-type SkillDirKind = "roots" | "whitelist";
-type ServerTestStatus = "idle" | "testing" | "success" | "failed" | "auth_required";
-type AuthChipTone = "idle" | "testing" | "success" | "failed" | "auth_required";
-
-interface ServerTestState {
-  status: ServerTestStatus;
-  message: string;
-  testedAt?: string;
-}
-
-function createEmptyAuthState(): ServerAuthState {
-  return {
-    status: "idle",
-    browserOpened: false,
-    sessionKey: "",
-  };
-}
-
-function authStateTone(state: ServerAuthState): AuthChipTone {
-  if (state.status === "starting") return "testing";
-  if (state.status === "connected" || state.status === "authorized") return "success";
-  if (
-    state.status === "auth_pending"
-    || state.status === "browser_opened"
-    || state.status === "waiting_callback"
-  ) {
-    return "auth_required";
-  }
-  if (
-    state.status === "auth_timeout"
-    || state.status === "auth_failed"
-    || state.status === "launch_failed"
-    || state.status === "init_failed"
-  ) {
-    return "failed";
-  }
-  return "idle";
-}
-
-function authStateText(state: ServerAuthState, t: ReturnType<typeof useT>): string {
-  if (state.status === "starting") return t("serverAuthStarting");
-  if (state.status === "auth_pending") return t("serverAuthPending");
-  if (state.status === "browser_opened") return t("serverAuthBrowserOpened");
-  if (state.status === "waiting_callback") return t("serverAuthWaiting");
-  if (state.status === "authorized") return t("serverAuthAuthorized");
-  if (state.status === "connected") return t("serverAuthConnected");
-  if (state.status === "auth_timeout") return t("serverAuthTimeout");
-  if (
-    state.status === "auth_failed"
-    || state.status === "launch_failed"
-    || state.status === "init_failed"
-  ) {
-    return t("serverAuthFailed");
-  }
-  return t("serverAuthIdle");
-}
-
-function serverTestKey(index: number, server?: Pick<ServerConfig, "name">): string {
-  const normalizedName = server?.name?.trim().toLowerCase();
-  if (normalizedName) {
-    return `name:${normalizedName}`;
-  }
-  return `idx:${index}`;
-}
-
-function asErrorMessage(error: unknown): string {
-  return String(error ?? "").replace(/^Error:\s*/, "").trim() || "Unknown error";
-}
-
-interface SkillDirectoryItem {
-  id: string;
-  path: string;
-  status: SkillDirStatus;
-  enabled: boolean;
-}
-
-function createSkillDirectoryItem(path = "", enabled = false): SkillDirectoryItem {
-  return {
-    id: `dir-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    path,
-    status: "idle",
-    enabled,
-  };
-}
-
-function skillDirectoryStatusFromResult(result: SkillDirectoryValidation): SkillDirStatus {
-  if (result.hasSkillMd) {
-    return "valid";
-  }
-  return "invalid";
-}
 
 // ── 删除确认弹窗组件 ──────────────────────────────────────────────
-function ConfirmDialog({ open, title, message, onCancel, onConfirm, t }: {
-  open: boolean;
-  title: string;
-  message: string;
-  onCancel: () => void;
-  onConfirm: () => void;
-  t: ReturnType<typeof useT>;
-}) {
-  if (!open) return null;
+function BilibiliLogoIcon({ size = 15 }: { size?: number }) {
   return (
     <svg
       width={size}
@@ -430,462 +266,7 @@ function renderTextWithLinks(text: string, onLinkClick: (url: string) => void) {
   );
 }
 
-function SkillConfirmations({ pending, busyIds, onApprove, onReject, t }: {
-  pending: SkillConfirmation[];
-  busyIds: Set<string>;
-  onApprove: (id: string) => void;
-  onReject: (id: string) => void;
-  t: ReturnType<typeof useT>;
-}) {
-  if (pending.length === 0) {
-    return <div className="empty-hint">{t("noSkillPending")}</div>;
-  }
 
-  return (
-    <div className="skill-confirm-list">
-      {pending.map((item) => {
-        const busy = busyIds.has(item.id);
-        const displayName = item.displayName.trim();
-        const showDisplayName = displayName.length > 0 && displayName !== item.skill;
-        return (
-          <div className="skill-confirm-item" key={item.id}>
-            <div className="skill-confirm-head">
-              <div className="skill-confirm-meta">
-                <span className="skill-chip">{item.skill}</span>
-                {showDisplayName && <span className="skill-script">{displayName}</span>}
-              </div>
-              <div className="skill-confirm-actions">
-                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => onReject(item.id)}>
-                  {t("reject")}
-                </button>
-                <button className="btn btn-start btn-sm" disabled={busy} onClick={() => onApprove(item.id)}>
-                  {t("approve")}
-                </button>
-              </div>
-            </div>
-            <div className="skill-confirm-row">
-              <span className="field-label">{t("commandPreview")}</span>
-              <code className="skill-command">{item.rawCommand}</code>
-            </div>
-            <div className="skill-confirm-row">
-              <span className="field-label">{t("confirmReason")}</span>
-              <span>{item.reason}</span>
-            </div>
-            <div className="skill-confirm-row">
-              <span className="field-label">{t("createdAt")}</span>
-              <span>{formatTime(item.createdAt)}</span>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function SkillConfirmationPopup({
-  open,
-  item,
-  busy,
-  onApprove,
-  onReject,
-  onLater,
-  t,
-}: {
-  open: boolean;
-  item: SkillConfirmation | null;
-  busy: boolean;
-  onApprove: (id: string) => void;
-  onReject: (id: string) => void;
-  onLater: (id: string) => void;
-  t: ReturnType<typeof useT>;
-}) {
-  if (!open || !item) return null;
-  const displayName = item.displayName.trim();
-  const showDisplayName = displayName.length > 0 && displayName !== item.skill;
-  return (
-    <div className="modal-overlay" onClick={() => onLater(item.id)}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">{t("skillsConfirmPopupTitle")}</div>
-        <div className="modal-body">
-          <div>{t("skillsConfirmPopupMsg")}</div>
-          <div className="json-hint" style={{ marginTop: 8 }}>{t("skillsConfirmTimeoutHint")}</div>
-          <div className="skill-confirm-meta" style={{ marginTop: 10 }}>
-            <span className="skill-chip">{item.skill}</span>
-            {showDisplayName && <span className="skill-script">{displayName}</span>}
-          </div>
-          <div className="skill-confirm-row" style={{ marginTop: 10 }}>
-            <span className="field-label">{t("commandPreview")}</span>
-            <code className="skill-command">{item.rawCommand}</code>
-          </div>
-          <div className="skill-confirm-row">
-            <span className="field-label">{t("confirmReason")}</span>
-            <span>{item.reason}</span>
-          </div>
-          <div className="skill-confirm-row">
-            <span className="field-label">{t("createdAt")}</span>
-            <span>{formatTime(item.createdAt)}</span>
-          </div>
-        </div>
-        <div className="modal-footer">
-          <button className="btn btn-secondary" disabled={busy} onClick={() => onLater(item.id)}>
-            {t("decideLater")}
-          </button>
-          <button className="btn btn-secondary" disabled={busy} onClick={() => onReject(item.id)}>
-            {t("reject")}
-          </button>
-          <button className="btn btn-start" disabled={busy} onClick={() => onApprove(item.id)}>
-            {t("approve")}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SkillDirectoryListEditor({
-  title,
-  hint,
-  items,
-  onAdd,
-  onRemove,
-  onPathChange,
-  onValidate,
-  onBrowse,
-  browseLabel,
-  onToggleEnabled,
-  enableToggle = false,
-  showValidation = true,
-  t,
-}: {
-  title: string;
-  hint: string;
-  items: SkillDirectoryItem[];
-  onAdd: () => void;
-  onRemove: (id: string) => void;
-  onPathChange: (id: string, value: string) => void;
-  onValidate?: (id: string) => void;
-  onBrowse: (id: string) => void;
-  browseLabel?: string;
-  onToggleEnabled?: (id: string) => void;
-  enableToggle?: boolean;
-  showValidation?: boolean;
-  t: ReturnType<typeof useT>;
-}) {
-  const statusLabel = (status: SkillDirStatus): string => {
-    if (status === "checking") return t("skillDirChecking");
-    if (status === "valid") return t("skillDirValid");
-    if (status === "invalid") return t("skillDirInvalid");
-    if (status === "error") return t("skillDirError");
-    return t("skillDirIdle");
-  };
-
-  return (
-    <div className="skills-dir-panel">
-      <div className="skills-dir-panel-head">
-        <label className="field-label">{title}</label>
-        <button className="btn-add-dir" title={t("addFolderPath")} onClick={onAdd}>+</button>
-      </div>
-      <div className="skills-dir-list">
-        {items.map((item) => (
-          <div className={`skills-dir-row ${showValidation ? "" : "no-validation"} ${enableToggle ? "with-toggle" : ""}`} key={item.id}>
-            {enableToggle && (
-              <button
-                className={`toggle-btn skills-dir-toggle ${item.enabled ? "toggle-on" : "toggle-off"}`}
-                disabled={item.status !== "valid"}
-                onClick={() => onToggleEnabled?.(item.id)}
-                title={item.status === "valid"
-                  ? (item.enabled ? t("enabledClick") : t("disabledClick"))
-                  : t("skillRootEnableBlocked")}
-                aria-label={item.enabled ? t("enabledClick") : t("disabledClick")}
-              />
-            )}
-            <input
-              className="form-input skills-dir-input"
-              value={item.path}
-              placeholder={t("folderPathPlaceholder")}
-              onChange={(e) => onPathChange(item.id, e.target.value)}
-              onBlur={() => {
-                if (showValidation && onValidate) {
-                  onValidate(item.id);
-                }
-              }}
-            />
-            <button className="btn btn-secondary btn-sm skills-dir-browse" onClick={() => onBrowse(item.id)}>
-              <FolderOpen size={13} />
-              {browseLabel ?? t("browseFolder")}
-            </button>
-            {showValidation && (
-              <>
-                <span className={`skills-dir-dot ${item.status}`} aria-hidden />
-                <span className={`skills-dir-status ${item.status}`}>{statusLabel(item.status)}</span>
-              </>
-            )}
-            <button className="btn-icon btn-danger-icon skills-dir-remove" title={t("remove")} onClick={() => onRemove(item.id)}>
-              ✕
-            </button>
-          </div>
-        ))}
-      </div>
-      <span className="json-hint">{hint}</span>
-    </div>
-  );
-}
-
-// ── 单条 Server 可视化编辑行 ──────────────────────────────────────
-function ServerRow({
-  server,
-  onChange,
-  onDelete,
-  running,
-  baseUrl,
-  ssePath,
-  httpPath,
-  copied,
-  onCopy,
-  testState,
-  authState,
-  onTest,
-  onReauthorize,
-  onClearAuth,
-  t,
-}: {
-  server: ServerConfig;
-  onChange: (u: ServerConfig) => void;
-  onDelete: () => void;
-  running: boolean;
-  baseUrl: string;
-  ssePath: string;
-  httpPath: string;
-  copied: string | null;
-  onCopy: (name: string, type: EndpointTransportType, url: string, key: string) => void;
-  testState: ServerTestState;
-  authState: ServerAuthState;
-  onTest: () => void;
-  onReauthorize: () => void;
-  onClearAuth: () => void;
-  t: ReturnType<typeof useT>;
-}) {
-  const sseUrl  = `${baseUrl}${ssePath}/${server.name}`;
-  const httpUrl = `${baseUrl}${httpPath}/${server.name}`;
-  const showLinks = running && server.enabled && server.name.trim();
-  const isTesting = testState.status === "testing";
-  const statusText = testState.status === "testing"
-    ? t("serverTestTesting")
-    : testState.status === "success"
-      ? t("serverTestSuccess")
-      : testState.status === "auth_required"
-        ? t("serverTestAuthRequired")
-      : testState.status === "failed"
-        ? t("serverTestFailed")
-        : t("serverTestIdle");
-  const statusTitle = testState.testedAt
-    ? `${statusText} · ${formatTime(testState.testedAt)}${testState.message ? `\n${testState.message}` : ""}`
-    : (testState.message || statusText);
-  const authText = authStateText(authState, t);
-  const authTitleParts = [authText];
-  if (authState.lastSuccessAt) {
-    authTitleParts.push(`${t("serverAuthLastSuccess")} ${formatTime(authState.lastSuccessAt)}`);
-  }
-  if (authState.lastError) {
-    authTitleParts.push(authState.lastError);
-  }
-  if (authState.authorizeUrl) {
-    authTitleParts.push(authState.authorizeUrl);
-  }
-  const authTitle = authTitleParts.join("\n");
-  const showAuthActions = !!authState.adapterKind || authState.status !== "idle" || !!authState.lastSuccessAt;
-
-  // 环境变量数组形式（方便渲染）
-  const envEntries = Object.entries(server.env);
-  const [visibleEnvValues, setVisibleEnvValues] = useState<Record<string, boolean>>({});
-  // 保留编辑中的原始文本，避免每次按键都把空格/引号格式化掉。
-  const [argsDraft, setArgsDraft] = useState(() => argsToStr(server.args));
-  const [isEditingArgs, setIsEditingArgs] = useState(false);
-
-  useEffect(() => {
-    if (!isEditingArgs) {
-      setArgsDraft(argsToStr(server.args));
-    }
-  }, [isEditingArgs, server.args]);
-
-  const toggleEnvValueVisibility = (rowId: string) => {
-    setVisibleEnvValues((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
-  };
-
-  const updateArgsDraft = (nextDraft: string) => {
-    setIsEditingArgs(true);
-    setArgsDraft(nextDraft);
-    onChange({ ...server, args: strToArgs(nextDraft) });
-  };
-
-  const commitArgsDraft = () => {
-    const parsedArgs = strToArgs(argsDraft);
-    setIsEditingArgs(false);
-    setArgsDraft(argsToStr(parsedArgs));
-    if (!sameArgs(server.args, parsedArgs)) {
-      onChange({ ...server, args: parsedArgs });
-    }
-  };
-
-  // 添加新的环境变量 KV 对
-  const addEnvVar = () => {
-    onChange({ ...server, env: { ...server.env, "": "" } });
-  };
-
-  // 更新环境变量
-  const updateEnvVar = (oldKey: string, newKey: string, newValue: string) => {
-    const newEnv: Record<string, string> = {};
-    Object.entries(server.env).forEach(([k, v]) => {
-      if (k === oldKey) {
-        if (newKey.trim()) {
-          newEnv[newKey] = newValue;
-        }
-      } else {
-        newEnv[k] = v;
-      }
-    });
-    // 如果是新添加的空键
-    if (oldKey === "" && newKey.trim()) {
-      newEnv[newKey] = newValue;
-    } else if (oldKey === "" && !newKey.trim()) {
-      newEnv[""] = newValue;
-    }
-    onChange({ ...server, env: newEnv });
-  };
-
-  // 删除环境变量
-  const removeEnvVar = (key: string) => {
-    const newEnv = { ...server.env };
-    delete newEnv[key];
-    onChange({ ...server, env: newEnv });
-  };
-
-  return (
-    <div className="server-row-wrap">
-      {/* ── 服务器基本信息行 ── */}
-      <div className={`server-row ${!server.enabled ? "server-row-disabled" : ""}`}>
-        {/* ── 修复后的纯 CSS 滑动开关，无文字内容 ── */}
-        <button
-          className={`toggle-btn ${server.enabled ? "toggle-on" : "toggle-off"}`}
-          title={server.enabled ? t("enabledClick") : t("disabledClick")}
-          onClick={() => onChange({ ...server, enabled: !server.enabled })}
-          aria-label={server.enabled ? t("enabledClick") : t("disabledClick")}
-        />
-        <div className="server-row-fields">
-          <input className="form-input" placeholder={t("name")}
-            value={server.name}
-            onChange={(e) => onChange({ ...server, name: e.target.value })} />
-          <input className="form-input" placeholder="npx"
-            value={server.command}
-            onChange={(e) => onChange({ ...server, command: e.target.value })} />
-          <input className="form-input" placeholder="-y @modelcontextprotocol/server-filesystem /path"
-            value={argsDraft}
-            onFocus={() => setIsEditingArgs(true)}
-            onChange={(e) => updateArgsDraft(e.target.value)}
-            onBlur={commitArgsDraft}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.currentTarget.blur();
-              }
-            }} />
-        </div>
-        <span className={`server-test-chip ${testState.status}`} title={statusTitle}>{statusText}</span>
-        <span className={`server-test-chip ${authStateTone(authState)}`} title={authTitle}>{authText}</span>
-        <button
-          className="btn btn-secondary btn-sm btn-test-server"
-          title={t("testServerHint")}
-          disabled={isTesting}
-          onClick={onTest}
-        >
-          {isTesting ? t("serverTestTesting") : t("testServer")}
-        </button>
-        {showAuthActions && (
-          <>
-            <button className="btn btn-secondary btn-sm btn-auth-action" title={t("reauthorizeServer")} onClick={onReauthorize}>
-              {t("reauthorizeServer")}
-            </button>
-            <button className="btn btn-secondary btn-sm btn-auth-action" title={t("clearServerAuth")} onClick={onClearAuth}>
-              {t("clearServerAuth")}
-            </button>
-          </>
-        )}
-        {/* ── 添加环境变量的加号按钮 ── */}
-        <button className="btn-icon btn-add-env" title={t("addEnvVar")} onClick={addEnvVar}>+</button>
-        <button className="btn-icon btn-danger-icon" title={t("remove")} onClick={onDelete}>✕</button>
-      </div>
-
-      {/* ── 环境变量 KV 对列表（仅当有环境变量时显示）── */}
-      {envEntries.length > 0 && (
-        <div className={`server-env-row ${!server.enabled ? "server-row-disabled" : ""}`}>
-          <span className="env-label">{t("envVars")}</span>
-          <div className="env-kv-list">
-            {envEntries.map(([key, value], idx) => {
-              const rowId = `${idx}:${key}`;
-              const isVisible = visibleEnvValues[rowId] === true;
-              return (
-                <div className="env-kv-item" key={idx}>
-                  <input
-                    className="form-input env-key-input"
-                    placeholder="KEY"
-                    value={key}
-                    onChange={(e) => updateEnvVar(key, e.target.value, value)}
-                  />
-                  <span className="env-kv-sep">=</span>
-                  <div className="env-value-wrap">
-                    <input
-                      className="form-input env-value-input"
-                      type={isVisible ? "text" : "password"}
-                      autoComplete="off"
-                      placeholder="VALUE"
-                      value={value}
-                      onChange={(e) => updateEnvVar(key, key, e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="btn-icon btn-env-visibility"
-                      title={isVisible ? t("hideEnvValue") : t("showEnvValue")}
-                      aria-label={isVisible ? t("hideEnvValue") : t("showEnvValue")}
-                      onClick={() => toggleEnvValueVisibility(rowId)}
-                    >
-                      {isVisible ? <EyeOff size={12} /> : <Eye size={12} />}
-                    </button>
-                  </div>
-                  <button className="btn-icon btn-danger-icon btn-remove-env" title={t("removeEnvVar")} onClick={() => removeEnvVar(key)}>✕</button>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* ── 运行时端点链接（直接放在 server-row 内部底部）── */}
-      {showLinks && (
-        <div className={`server-row-endpoints ${!server.enabled ? "server-row-disabled" : ""}`}>
-          <div className="endpoint-item">
-            <span className="endpoint-label">{t("endpointSSE")}</span>
-            <code className="endpoint-url">{sseUrl}</code>
-            <button className="btn-icon" title={t("copySSE")}
-              onClick={() => onCopy(server.name, "sse", sseUrl, `${server.name}-sse`)}>
-              {copied === `${server.name}-sse`
-                ? <Check size={12} color="var(--accent-green)" />
-                : <Copy size={12} />}
-            </button>
-          </div>
-          <div className="endpoint-item">
-            <span className="endpoint-label">{t("endpointHTTP")}</span>
-            <code className="endpoint-url">{httpUrl}</code>
-            <button className="btn-icon" title={t("copyHTTP")}
-              onClick={() => onCopy(server.name, "streamable-http", httpUrl, `${server.name}-http`)}>
-              {copied === `${server.name}-http`
-                ? <Check size={12} color="var(--accent-green)" />
-                : <Copy size={12} />}
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ── 主 App ────────────────────────────────────────────────────────
 function App() {
@@ -907,7 +288,7 @@ function App() {
   };
 
   // ── 导航状态 ──
-  const [activeSection, setActiveSection] = useState<"info" | "settings" | "builtin" | "externalMcp" | "externalSkill">("info");
+  const [activeSection, setActiveSection] = useState<"info" | "settings" | "builtin" | "externalMcp" | "externalSkill" | "aiAdapter" | "terminal">("info");
 
 
   const [servers, setServers] = useState<ServerConfig[]>([]);
@@ -919,7 +300,7 @@ function App() {
   const [mcpToken, setMcpToken] = useState("");
   const [defaultSkillRules, setDefaultSkillRules] = useState<SkillCommandRule[]>([]);
   const [skills, setSkills] = useState<SkillsConfig>(() => ensureSkillsConfig(undefined, []));
-  const [skillRootItems, setSkillRootItems] = useState<SkillDirectoryItem[]>([]);
+  const [skillGroups, setSkillGroups] = useState<SkillGroup[]>([]);
   const [skillWhitelistItems, setSkillWhitelistItems] = useState<SkillDirectoryItem[]>([]);
   const [skillsRulesDraft, setSkillsRulesDraft] = useState("[]");
   const [skillsRulesError, setSkillsRulesError] = useState<string | null>(null);
@@ -939,6 +320,7 @@ function App() {
   const [terminalBusy, setTerminalBusy] = useState(false);
   const skillUploadInputRef = useRef<HTMLInputElement | null>(null);
   const pendingSkillUploadItemIdRef = useRef<string | null>(null);
+  const pendingSkillUploadGroupIdRef = useRef<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [autoTestingServers, setAutoTestingServers] = useState(false);
   const [serverTestStates, setServerTestStates] = useState<Record<string, ServerTestState>>({});
@@ -959,6 +341,20 @@ function App() {
   const [draggedServerOffsetY, setDraggedServerOffsetY] = useState(0);
   const [draggedServerHeight, setDraggedServerHeight] = useState(0);
   // 删除确认弹窗状态
+  const [aiSessions, setAiSessions] = useState<AiSession[]>([]);
+
+  const [aiAdapterKeys, setAiAdapterKeys] = useState<string[]>([""]);
+  const [aiAdapterEnabled, setAiAdapterEnabled] = useState<boolean>(true);
+  const [sessionNamePresets, setSessionNamePresets] = useState<string[]>([]);
+  const [presetAddModalOpen, setPresetAddModalOpen] = useState(false);
+  const [presetAddName, setPresetAddName] = useState("");
+  const [presetDeleteTarget, setPresetDeleteTarget] = useState<string | null>(null);
+  const [presetDropdownOpen, setPresetDropdownOpen] = useState(false);
+  const [systemPromptModalOpen, setSystemPromptModalOpen] = useState(false);
+  const [editingPromptText, setEditingPromptText] = useState("");
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
+  const [renameSessionName, setRenameSessionName] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; index: number; name: string }>({
     open: false, index: -1, name: ""
   });
@@ -971,6 +367,11 @@ function App() {
   }>({
     open: false, kind: "roots", id: ""
   });
+  const [skillGroupDeleteConfirm, setSkillGroupDeleteConfirm] = useState<{
+    open: boolean;
+    groupId: string;
+    groupName: string;
+  }>({ open: false, groupId: "", groupName: "" });
 
   const [officeCliState, setOfficeCliState] = useState<{
     installed: boolean;
@@ -989,6 +390,36 @@ function App() {
   const [showShellEnvPopover, setShowShellEnvPopover] = useState(false);
   const [shellEnvDraftKey, setShellEnvDraftKey] = useState("");
   const [shellEnvDraftValue, setShellEnvDraftValue] = useState("");
+  const [showPlansModal, setShowPlansModal] = useState(false);
+  const [activePlans, setActivePlans] = useState<ActivePlan[]>([]);
+  const [plansLoading, setPlansLoading] = useState(false);
+  const [deletingPlanId, setDeletingPlanId] = useState<string | null>(null);
+  const [planDeleteConfirmId, setPlanDeleteConfirmId] = useState<string | null>(null);
+  const [planDeleteError, setPlanDeleteError] = useState<string | null>(null);
+  const [toolsModalSessionId, setToolsModalSessionId] = useState<string | null>(null);
+  const [sessionToolStates, setSessionToolStates] = useState<Record<string, Set<string>>>({});
+
+  const openToolsModal = useCallback((session: AiSession) => {
+    // Only tools where enabled !== false are considered enabled
+    const currentEnabled = new Set(session.tools.filter(t => t.enabled !== false).map(t => t.name));
+    setSessionToolStates(prev => ({ ...prev, [session.id]: currentEnabled }));
+    setToolsModalSessionId(session.id);
+  }, []);
+
+  const closeToolsModal = useCallback(() => {
+    setToolsModalSessionId(null);
+  }, []);
+
+  const activeToolsModal = useMemo(() => {
+    if (!toolsModalSessionId) return null;
+    const session = aiSessions.find(s => s.id === toolsModalSessionId);
+    if (!session) return null;
+    return {
+      session,
+      enabledTools: sessionToolStates[toolsModalSessionId] ?? new Set(session.tools.filter(t => t.enabled !== false).map(t => t.name)),
+    };
+  }, [toolsModalSessionId, aiSessions, sessionToolStates]);
+
   /** 安装成功后跳过 useEffect 重复 check 的标记 */
   const skipNextOfficeCliCheckRef = useRef(false);
 
@@ -1002,7 +433,6 @@ function App() {
   const latestPointerClientYRef = useRef<number | null>(null);
   const serverBlockRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const serverDropTargetRef = useRef<ServerDragTarget | null>(null);
-
   const [remoteUrl, setRemoteUrl] = useState(localStorage.getItem("mcp_remote_url") || "");
   const [isRemoteMode, setIsRemoteMode] = useState(localStorage.getItem("mcp_remote_mode") === "true");
 
@@ -1016,6 +446,140 @@ function App() {
     localStorage.setItem("mcp_remote_mode", String(isRemoteMode));
   }, [remoteUrl, isRemoteMode]);
 
+  const toggleSessionTool = useCallback(async (sessionId: string, toolName: string) => {
+    // Optimistic update: toggle in local state first
+    let newEnabled = false;
+    const session = aiSessions.find(s => s.id === sessionId);
+    setSessionToolStates(prev => {
+      const current = new Set(prev[sessionId] ?? []);
+      if (current.has(toolName)) {
+        current.delete(toolName);
+        newEnabled = false;
+      } else {
+        current.add(toolName);
+        newEnabled = true;
+      }
+      return { ...prev, [sessionId]: current };
+    });
+    // Persist to backend
+    try {
+      if (apiClient) {
+        await apiClient.updateSessionTool(sessionId, toolName, newEnabled);
+        // Sync aiSessions so toolCount / enabled count updates immediately
+        setAiSessions(prev => prev.map(s => {
+          if (s.id !== sessionId) return s;
+          const updatedTools = s.tools.map(t => t.name === toolName ? { ...t, enabled: newEnabled } : t);
+          return { ...s, tools: updatedTools, toolCount: updatedTools.length };
+        }));
+        // Sync disabled_tools in local config: add name when disabling, remove when enabling
+        if (!newEnabled && session) {
+          const toolDef = session.tools.find(t => t.name === toolName);
+          if (toolDef) {
+            const cfg = await loadLocalConfig();
+            const existing = cfg.disabledTools ?? [];
+            if (!existing.some(dt => dt.name === toolDef.name)) {
+              cfg.disabledTools = [...existing, { name: toolDef.name }];
+              await saveLocalConfig(cfg);
+            }
+          }
+        } else if (newEnabled && session) {
+          const toolDef = session.tools.find(t => t.name === toolName);
+          if (toolDef) {
+            const cfg = await loadLocalConfig();
+            const existing = cfg.disabledTools ?? [];
+            cfg.disabledTools = existing.filter(dt => dt.name !== toolDef.name);
+            await saveLocalConfig(cfg);
+          }
+        }
+      }
+    } catch (err) {
+      // Rollback on failure
+      setSessionToolStates(prev => {
+        const current = new Set(prev[sessionId] ?? []);
+        if (newEnabled) {
+          current.delete(toolName);
+        } else {
+          current.add(toolName);
+        }
+        return { ...prev, [sessionId]: current };
+      });
+      console.error("Failed to toggle session tool:", err);
+    }
+  }, [apiClient, aiSessions]);
+
+  const fetchPlans = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (!apiClient) return;
+      if (!silent) setPlansLoading(true);
+      try {
+        const plans = await apiClient.fetchActivePlans();
+        setActivePlans(plans);
+      } catch {
+        if (!silent) setActivePlans([]);
+      } finally {
+        if (!silent) setPlansLoading(false);
+      }
+    },
+    [apiClient],
+  );
+
+  const handleOpenPlans = useCallback(() => {
+    setShowPlansModal(true);
+    setPlanDeleteConfirmId(null);
+    setPlanDeleteError(null);
+    fetchPlans();
+  }, [fetchPlans]);
+
+  const handleRefreshPlans = useCallback(() => {
+    fetchPlans({ silent: true });
+  }, [fetchPlans]);
+
+  const togglePlanDeleteConfirm = useCallback((planningId: string) => {
+    setPlanDeleteError(null);
+    setPlanDeleteConfirmId((prev) => (prev === planningId ? null : planningId));
+  }, []);
+
+  const cancelPlanDeleteConfirm = useCallback(() => {
+    setPlanDeleteError(null);
+    setPlanDeleteConfirmId(null);
+  }, []);
+
+  const handleConfirmDeletePlan = useCallback(
+    async (planningId: string) => {
+      if (!apiClient) return;
+      if (deletingPlanId) return;
+      setPlanDeleteError(null);
+      setDeletingPlanId(planningId);
+      try {
+        await apiClient.deleteActivePlan(planningId);
+        setActivePlans((prev) => prev.filter((p) => p.planningId !== planningId));
+        setPlanDeleteConfirmId(null);
+        fetchPlans({ silent: true });
+      } catch (error) {
+        setPlanDeleteError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setDeletingPlanId(null);
+      }
+    },
+    [apiClient, deletingPlanId, fetchPlans],
+  );
+
+  useEffect(() => {
+    if (!showPlansModal) return;
+    const interval = window.setInterval(() => {
+      fetchPlans({ silent: true });
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [showPlansModal, fetchPlans]);
+
+  useEffect(() => {
+    if (!showPlansModal) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowPlansModal(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showPlansModal]);
   const createServerUiId = useCallback(() => `server-ui-${serverUiIdSeqRef.current++}`, []);
   const createServerUiIds = useCallback(
     (count: number) => Array.from({ length: count }, () => createServerUiId()),
@@ -1063,33 +627,8 @@ function App() {
     { key: "taskPlanning", name: "task-planning", icon: <ListChecks size={15} />, descKey: "builtInTaskPlanningDesc", requiresWhitelist: false },
     { key: "chromeCdp", name: "chrome-cdp", icon: <Chrome size={15} />, descKey: "builtInChromeCdpDesc", requiresWhitelist: false },
     { key: "chatPlusAdapterDebugger", name: "chat-plus-adapter-debugger", icon: <Bug size={15} />, descKey: "builtInChatPlusAdapterDesc", requiresWhitelist: false },
+    { key: "codeGraph", name: "codegraph", icon: <Network size={15} />, descKey: "builtInCodeGraphDesc", requiresWhitelist: true },
   ];
-
-  const syncSkillRootsToConfig = useCallback((nextItems: SkillDirectoryItem[]) => {
-    const normalizedEntries = nextItems
-      .map((item) => ({
-        path: item.path.trim(),
-        enabled: item.enabled,
-        status: item.status,
-      }))
-      .filter((item) => item.path.length > 0);
-
-    setSkills((prev) => ({
-      ...prev,
-      roots: normalizedEntries
-        .filter((item) => item.enabled && item.status === "valid")
-        .map((item) => item.path),
-      rootEntries: normalizedEntries.map((item) => ({
-        path: item.path,
-        enabled: item.enabled,
-      })),
-    }));
-  }, []);
-
-  const setRootItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {
-    setSkillRootItems(nextItems);
-    syncSkillRootsToConfig(nextItems);
-  }, [syncSkillRootsToConfig]);
 
   const setWhitelistItemsAndSync = useCallback((nextItems: SkillDirectoryItem[]) => {
     setSkillWhitelistItems(nextItems);
@@ -1112,60 +651,15 @@ function App() {
     }));
   }, []);
 
-  const updateItemStatus = useCallback((kind: "roots" | "whitelist", id: string, pathSnapshot: string, status: SkillDirStatus) => {
-    if (kind === "roots") {
-      setSkillRootItems((prev) => {
-        const next = prev.map((item) => {
-          if (item.id !== id) return item;
-          if (item.path.trim() !== pathSnapshot) return item;
-          return {
-            ...item,
-            status,
-            enabled: status === "valid" || status === "checking" ? item.enabled : false,
-          };
-        });
-        syncSkillRootsToConfig(next);
-        return next;
-      });
-      return;
-    }
-
-    setSkillWhitelistItems((prev) => prev.map((item) => {
-      if (item.id !== id) return item;
-      if (item.path.trim() !== pathSnapshot) return item;
-      return { ...item, status };
-    }));
-  }, [syncSkillRootsToConfig]);
-
-  const runItemValidation = useCallback(async (kind: "roots" | "whitelist", id: string, path: string) => {
-    const normalized = path.trim();
-    if (normalized.length === 0) {
-      updateItemStatus(kind, id, normalized, "idle");
-      return;
-    }
-
-    try {
-      const result = isRemoteMode
-        ? await apiClient.validateSkillDirectory(normalized)
-        : await validateSkillDirectory(normalized);
-      updateItemStatus(kind, id, normalized, skillDirectoryStatusFromResult(result));
-    } catch {
-      updateItemStatus(kind, id, normalized, "error");
-    }
-  }, [apiClient, isRemoteMode, updateItemStatus]);
-
-  const triggerItemValidation = useCallback((kind: "roots" | "whitelist", id: string, path: string) => {
-    const normalized = path.trim();
-    if (normalized.length === 0) {
-      updateItemStatus(kind, id, normalized, "idle");
-      return;
-    }
-    updateItemStatus(kind, id, normalized, "checking");
-    void runItemValidation(kind, id, normalized);
-  }, [runItemValidation, updateItemStatus]);
 
   const reloadLocalConfig = useCallback(async () => {
-    const [cfg, builtinRules] = await Promise.all([loadLocalConfig(), getDefaultSkillRules().catch(() => [])]);
+    const builtinRules = await getDefaultSkillRules().catch(() => []);
+    let cfg: GatewayConfig;
+    if (isRemoteMode && remoteUrl.trim()) {
+      cfg = await apiClient.getConfig();
+    } else {
+      cfg = await loadLocalConfig();
+    }
     setDefaultSkillRules(builtinRules);
     const nextServers = cfg.servers ?? [];
     const nextListen = cfg.listen || "127.0.0.1:8765";
@@ -1186,16 +680,13 @@ function App() {
     setHttpPath(nextHttpPath);
     setAdminToken(nextAdminToken);
     setMcpToken(nextMcpToken);
+    const nextAiApiKeys = cfg.aiAdapter?.apiKeys ?? [];
+    setAiAdapterKeys(nextAiApiKeys.length > 0 ? nextAiApiKeys : [""]);
+    setAiAdapterEnabled(cfg.aiAdapter?.enabled ?? true);
+    setSessionNamePresets(cfg.aiAdapter?.sessionNamePresets ?? []);
     const nextSkills = ensureSkillsConfig(cfg.skills, builtinRules);
     setSkills(nextSkills);
     if (nextSkills.builtinTools.officeCliPath) { setOfficeCliCustomPath(nextSkills.builtinTools.officeCliPath); } else { getOfficeCliDefaultPath().then((p) => { setOfficeCliCustomPath(p); setSkills((prev) => ({ ...prev, builtinTools: { ...prev.builtinTools, officeCliPath: p } })); }).catch(() => {}); }
-    const rootEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
-      ? nextSkills.rootEntries
-      : nextSkills.roots.map((path) => ({ path, enabled: true }));
-    const nextRootItems = (rootEntries.length > 0 ? rootEntries : [{ path: "", enabled: false }]).map((entry) => ({
-      ...createSkillDirectoryItem(entry.path, entry.enabled),
-      status: entry.path.trim().length > 0 ? "checking" as const : "idle" as const,
-    }));
     const nextWhitelistItems = (nextSkills.policy.pathGuard.whitelistDirs.length > 0
       ? nextSkills.policy.pathGuard.whitelistDirs
       : [""]
@@ -1203,13 +694,60 @@ function App() {
       ...createSkillDirectoryItem(path, true),
       status: "idle" as const,
     }));
-    setSkillRootItems(nextRootItems);
     setSkillWhitelistItems(nextWhitelistItems);
-    nextRootItems.forEach((item) => {
-      if (item.path.trim().length > 0) {
-        void runItemValidation("roots", item.id, item.path);
+    // Load skill groups from config, migrating legacy rootEntries into a default group
+    let loadedGroups: SkillGroup[];
+    if (Array.isArray(nextSkills.rootGroups) && nextSkills.rootGroups.length > 0) {
+      loadedGroups = nextSkills.rootGroups.map((g) => {
+        const entries = Array.isArray(g.rootEntries) && g.rootEntries.length > 0
+          ? g.rootEntries
+          : (g.roots ?? []).map((p) => ({ path: p, enabled: true }));
+        return createSkillGroup(g.name, entries.map((e) => ({
+          ...createSkillDirectoryItem(e.path, e.enabled),
+          status: e.path.trim().length > 0 ? "checking" as const : "idle" as const,
+        })));
+      });
+    } else {
+      // Migrate: old config has rootEntries/roots but no rootGroups -> create default group
+      const legacyEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
+        ? nextSkills.rootEntries
+        : nextSkills.roots.map((p) => ({ path: p, enabled: true }));
+      const hasLegacyItems = legacyEntries.some((e) => e.path.trim().length > 0);
+      if (hasLegacyItems) {
+        loadedGroups = [createSkillGroup("skills", legacyEntries.map((e) => ({
+          ...createSkillDirectoryItem(e.path, e.enabled),
+          status: e.path.trim().length > 0 ? "checking" as const : "idle" as const,
+        })))];
+      } else {
+        loadedGroups = [];
       }
+    }
+    setSkillGroups(loadedGroups);
+    // Validate group items
+    loadedGroups.forEach((group) => {
+      group.items.forEach((item) => {
+        if (item.path.trim().length > 0) {
+          const validatePromise = isRemoteMode
+            ? apiClient.validateSkillDirectory(item.path.trim())
+            : validateSkillDirectory(item.path.trim());
+          validatePromise.then((result) => {
+            const status = skillDirectoryStatusFromResult(result);
+            setSkillGroups((prev) => prev.map((g) =>
+              g.id === group.id
+                ? { ...g, items: g.items.map((i) => i.id === item.id ? { ...i, status, enabled: status === "valid" ? i.enabled : false } : i) }
+                : g
+            ));
+          }).catch(() => {
+            setSkillGroups((prev) => prev.map((g) =>
+              g.id === group.id
+                ? { ...g, items: g.items.map((i) => i.id === item.id ? { ...i, status: "error" as const, enabled: false } : i) }
+                : g
+            ));
+          });
+        }
+      });
     });
+
     setSkillsRulesDraft(JSON.stringify(nextSkills.policy.rules, null, 2));
     setSkillsRulesError(null);
     setSkillsRulesAdvancedOpen(false);
@@ -1219,7 +757,10 @@ function App() {
     setJsonText(buildServersJson(nextServers));
     setJsonError(null);
     setServersMode("visual");
-    const { officeCliPath: _ocpSaved, ...savedBuiltinTools } = nextSkills.builtinTools;
+    // Normalize through the same path the live fingerprint uses so a
+    // freshly-loaded config does not look "dirty" the moment we render.
+    const skillsForSavedFingerprint = normalizeSkillsForSubmit(nextSkills, builtinRules);
+    const { officeCliPath: _ocpSaved, ...savedBuiltinTools } = skillsForSavedFingerprint.builtinTools;
     setSavedConfigFingerprint(createEditableConfigFingerprint(createEditableConfigSnapshot({
       servers: nextServers,
       listen: nextListen,
@@ -1228,94 +769,24 @@ function App() {
       httpPath: nextHttpPath,
       adminToken: nextAdminToken,
       mcpToken: nextMcpToken,
-      skills: { ...nextSkills, builtinTools: savedBuiltinTools as typeof nextSkills.builtinTools },
+      skills: { ...skillsForSavedFingerprint, builtinTools: savedBuiltinTools as typeof skillsForSavedFingerprint.builtinTools },
+      aiAdapterEnabled: cfg.aiAdapter?.enabled ?? true,
+      aiAdapterKeys: nextAiApiKeys.length > 0 ? nextAiApiKeys : [""],
+      sessionNamePresets: cfg.aiAdapter?.sessionNamePresets ?? [],
     })));
     setConfigLoaded(true);
-  }, [createServerUiIds, runItemValidation]);
+  }, [createServerUiIds, isRemoteMode, remoteUrl, apiClient]);
 
   // ── 初始加载配置 ──
   useEffect(() => {
     reloadLocalConfig().catch((e) => setError(String(e)));
-    const applyConfig = (cfg: GatewayConfig, builtinRules: SkillCommandRule[]) => {
-    getConfigPath().then(setConfigPath).catch(() => {});
-  }, [reloadLocalConfig]);
-      setDefaultSkillRules(builtinRules);
-      const nextServers = cfg.servers ?? [];
-      const nextListen = cfg.listen || "127.0.0.1:8765";
-      const nextApiPrefix = cfg.apiPrefix || "/api/v2";
-      const nextSsePath = cfg.transport?.sse?.basePath || "/api/v2/sse";
-      const nextHttpPath = cfg.transport?.streamableHttp?.basePath || "/api/v2/mcp";
-      const nextAdminToken = cfg.security?.admin?.token ?? "";
-      const nextMcpToken = cfg.security?.mcp?.token ?? "";
+    if (!isRemoteMode) {
+      getConfigPath().then(setConfigPath).catch(() => {});
+    }
+  }, [reloadLocalConfig, isRemoteMode]);
 
-      setServers(nextServers);
-      setServerUiIds(createServerUiIds(nextServers.length));
-      setServerTestStates({});
-      setServerAuthStates({});
-      setAutoTestingServers(false);
-      setListen(nextListen);
-      setApiPrefix(nextApiPrefix);
-      setSsePath(nextSsePath);
-      setHttpPath(nextHttpPath);
-      setAdminToken(nextAdminToken);
-      setMcpToken(nextMcpToken);
-      const nextSkills = ensureSkillsConfig(cfg.skills, builtinRules);
-      setSkills(nextSkills);
-      const rootEntries = Array.isArray(nextSkills.rootEntries) && nextSkills.rootEntries.length > 0
-        ? nextSkills.rootEntries
-        : nextSkills.roots.map((path) => ({ path, enabled: true }));
-      const nextRootItems = (rootEntries.length > 0 ? rootEntries : [{ path: "", enabled: false }]).map((entry) => ({
-        ...createSkillDirectoryItem(entry.path, entry.enabled),
-        status: entry.path.trim().length > 0 ? "checking" as const : "idle" as const,
-      }));
-      const nextWhitelistItems = (nextSkills.policy.pathGuard.whitelistDirs.length > 0
-        ? nextSkills.policy.pathGuard.whitelistDirs
-        : [""]
-      ).map((path) => ({
-        ...createSkillDirectoryItem(path, true),
-        status: "idle" as const,
-      }));
-      setSkillRootItems(nextRootItems);
-      setSkillWhitelistItems(nextWhitelistItems);
-      nextRootItems.forEach((item) => {
-        if (item.path.trim().length > 0) {
-          void runItemValidation("roots", item.id, item.path);
-        }
-      });
-      setSkillsRulesDraft(JSON.stringify(nextSkills.policy.rules, null, 2));
-      setSkillsRulesError(null);
-      setJsonText(buildServersJson(nextServers));
-      setSavedConfigFingerprint(createEditableConfigFingerprint(createEditableConfigSnapshot({
-        servers: nextServers,
-        listen: nextListen,
-        apiPrefix: nextApiPrefix,
-        ssePath: nextSsePath,
-        httpPath: nextHttpPath,
-        adminToken: nextAdminToken,
-        mcpToken: nextMcpToken,
-        skills: nextSkills,
-      })));
-      setConfigLoaded(true);
-    };
-
-    const init = async () => {
-      try {
-        const builtinRules = await getDefaultSkillRules().catch(() => []);
-        if (isRemoteMode && remoteUrl.trim()) {
-          const cfg = await apiClient.getConfig();
-          applyConfig(cfg, builtinRules);
-        } else {
-          const cfg = await loadLocalConfig();
-          applyConfig(cfg, builtinRules);
-          getConfigPath().then(setConfigPath).catch(() => {});
-        }
-      } catch (e) {
-        setError(String(e));
-      }
-    };
-
-    void init();
-  }, [apiClient, createServerUiIds, isRemoteMode, remoteUrl, runItemValidation]);
+  // ── AI Adapter 数据（在 running 声明之后初始化）──
+  // fetchAiSessions 在 running 声明后的 useEffect 中内联定义
 
   useEffect(() => {
     let cancelled = false;
@@ -1356,6 +827,10 @@ function App() {
     document.title = nextTitle;
     setMainWindowTitle(nextTitle).catch(() => {});
   }, [hasAvailableUpdate, lang, t, updateInfo?.latestVersion]);
+
+  useEffect(() => {
+    applyTrayLabels(t("trayMenuShow"), t("trayMenuQuit"), t("trayTooltip")).catch(() => {});
+  }, [lang, t]);
 
   const parsedJsonServers = useMemo(() => {
     if (serversMode !== "json") {
@@ -1432,6 +907,29 @@ function App() {
     () => createGatewayDisplayBaseUrl(listen, remoteUrl, isRemoteMode),
     [listen, remoteUrl, isRemoteMode],
   );
+
+  // ── AI Adapter 数据 ──
+  const fetchAiSessions = useCallback(async () => {
+    if (!running || !apiClient) return;
+    try {
+      const sessions = await apiClient.getAiSessions();
+      setAiSessions(sessions);
+    } catch {
+      // 静默失败
+    }
+  }, [apiClient, running]);
+
+  useEffect(() => {
+    fetchAiSessions();
+  }, [fetchAiSessions]);
+
+  useEffect(() => {
+    if (!running) return;
+    const interval = window.setInterval(() => {
+      fetchAiSessions();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [running, fetchAiSessions]);
 
   const refreshServerAuthStates = useCallback(async (): Promise<PollOutcome> => {
     if (servers.length === 0) {
@@ -1879,52 +1377,13 @@ function App() {
     }
   }, [defaultSkillRules]);
 
-  const addRootItem = () => {
-    setRootItemsAndSync([createSkillDirectoryItem("", false), ...skillRootItems]);
-  };
-
-  const importRootItems = async () => {
-    try {
-      const selected = await pickFolderDialog();
-      if (!selected) return;
-      const discovered = await scanSkillDirectories(selected);
-      if (discovered.length === 0) {
-        setError(t("noSkillRootsFound"));
-        return;
-      }
-
-      const importedPaths = new Set(discovered.map((item) => item.path.trim().toLowerCase()));
-      const importedItems = discovered.map((item) => ({
-        ...createSkillDirectoryItem(item.path, true),
-        status: "valid" as const,
-      }));
-      const existingItems = skillRootItems.filter((item) => {
-        const normalized = item.path.trim().toLowerCase();
-        return normalized.length > 0 && !importedPaths.has(normalized);
-      });
-      setRootItemsAndSync([...importedItems, ...existingItems]);
-      setError(null);
-    } catch (error) {
-      setError(asErrorMessage(error));
-    }
-  };
-
   const addWhitelistItem = () => {
     setWhitelistItemsAndSync([...skillWhitelistItems, createSkillDirectoryItem("", true)]);
-  };
-
-  const removeRootItem = (id: string) => {
-    const next = skillRootItems.filter((item) => item.id !== id);
-    setRootItemsAndSync(next.length > 0 ? next : [createSkillDirectoryItem("", false)]);
   };
 
   const removeWhitelistItem = (id: string) => {
     const next = skillWhitelistItems.filter((item) => item.id !== id);
     setWhitelistItemsAndSync(next.length > 0 ? next : [createSkillDirectoryItem("", true)]);
-  };
-
-  const requestRemoveRootItem = (id: string) => {
-    setSkillDirDeleteConfirm({ open: true, kind: "roots", id });
   };
 
   const requestRemoveWhitelistItem = (id: string) => {
@@ -1938,9 +1397,7 @@ function App() {
       return;
     }
 
-    if (kind === "roots") {
-      removeRootItem(id);
-    } else {
+    if (kind === "whitelist") {
       removeWhitelistItem(id);
     }
     setSkillDirDeleteConfirm({ open: false, kind: "roots", id: "" });
@@ -1950,52 +1407,192 @@ function App() {
     setSkillDirDeleteConfirm({ open: false, kind: "roots", id: "" });
   };
 
-  const updateRootItemPath = (id: string, path: string) => {
-    setRootItemsAndSync(skillRootItems.map((item) =>
-      item.id === id ? { ...item, path, status: "idle", enabled: false } : item
-    ));
-  };
-
   const updateWhitelistItemPath = (id: string, path: string) => {
     setWhitelistItemsAndSync(skillWhitelistItems.map((item) =>
       item.id === id ? { ...item, path, status: "idle" } : item
     ));
   };
 
-  const validateRootItem = (id: string) => {
-    const target = skillRootItems.find((item) => item.id === id);
-    if (!target) return;
-    triggerItemValidation("roots", target.id, target.path);
+
+  // ── Skill Group handlers ──
+  const syncSkillGroupsToConfig = useCallback((groups: SkillGroup[]) => {
+    const rootGroups: SkillGroupEntry[] = groups.map((group) => {
+      const entries = group.items
+        .map((item) => ({ path: item.path.trim(), enabled: item.enabled }))
+        .filter((e) => e.path.length > 0);
+      return {
+        name: group.name,
+        roots: entries.filter((e) => e.enabled).map((e) => e.path),
+        rootEntries: entries,
+      };
+    });
+    // Also flatten all group roots into the top-level roots/rootEntries for backend compatibility
+    const allEntries = rootGroups.flatMap((g) => g.rootEntries ?? []);
+    const allRoots = rootGroups.flatMap((g) => g.roots);
+    setSkills((prev) => ({ ...prev, roots: allRoots, rootEntries: allEntries, rootGroups }));
+  }, []);
+
+  const setGroupsAndSync = useCallback((nextGroups: SkillGroup[]) => {
+    setSkillGroups(nextGroups);
+    syncSkillGroupsToConfig(nextGroups);
+  }, [syncSkillGroupsToConfig]);
+
+  const addSkillGroup = () => {
+    const index = skillGroups.length + 1;
+    const name = `skills${index > 1 ? index : ""}`;
+    setGroupsAndSync([...skillGroups, createSkillGroup(name, [])]);
   };
 
-  const browseRootItem = async (id: string) => {
-    const target = skillRootItems.find((item) => item.id === id);
-    if (!target) return;
+  const removeSkillGroup = (groupId: string) => {
+    const group = skillGroups.find((g) => g.id === groupId);
+    if (!group) return;
+    setSkillGroupDeleteConfirm({ open: true, groupId, groupName: group.name });
+  };
+
+  const confirmSkillGroupDelete = () => {
+    const { groupId } = skillGroupDeleteConfirm;
+    setGroupsAndSync(skillGroups.filter((g) => g.id !== groupId));
+    setSkillGroupDeleteConfirm({ open: false, groupId: "", groupName: "" });
+  };
+
+  const cancelSkillGroupDelete = () => {
+    setSkillGroupDeleteConfirm({ open: false, groupId: "", groupName: "" });
+  };
+
+  const renameSkillGroup = (groupId: string, name: string) => {
+    // Don't allow empty group names - keep the old name if empty
+    if (!name.trim()) return;
+    setGroupsAndSync(skillGroups.map((g) => g.id === groupId ? { ...g, name: name.trim() } : g));
+  };
+
+  const addGroupItem = (groupId: string) => {
+    setGroupsAndSync(skillGroups.map((g) =>
+      g.id === groupId ? { ...g, items: [createSkillDirectoryItem("", false), ...g.items] } : g
+    ));
+  };
+
+  const removeGroupItem = (groupId: string, itemId: string) => {
+    setGroupsAndSync(skillGroups.map((g) =>
+      g.id === groupId ? { ...g, items: g.items.filter((i) => i.id !== itemId) } : g
+    ));
+  };
+
+  const updateGroupItemPath = (groupId: string, itemId: string, path: string) => {
+    setGroupsAndSync(skillGroups.map((g) =>
+      g.id === groupId
+        ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, path, status: "idle" as const, enabled: false } : i) }
+        : g
+    ));
+  };
+
+  // Helper: validate a group item path and update its status
+  const runGroupItemValidation = (groupId: string, itemId: string, path: string) => {
+    const normalized = path.trim();
+    if (!normalized) return;
+    setSkillGroups((prev) => prev.map((g) =>
+      g.id === groupId
+        ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, status: "checking" as const } : i) }
+        : g
+    ));
+    validateSkillDirectory(normalized).then((result) => {
+      const status = skillDirectoryStatusFromResult(result);
+      setSkillGroups((prev) => {
+        const next = prev.map((g) =>
+          g.id === groupId
+            ? { ...g, items: g.items.map((i) => {
+                if (i.id !== itemId || i.path.trim() !== normalized) return i;
+                return { ...i, status, enabled: status === "valid" ? i.enabled : false };
+              }) }
+            : g
+        );
+        syncSkillGroupsToConfig(next);
+        return next;
+      });
+    }).catch(() => {
+      setSkillGroups((prev) => {
+        const next = prev.map((g) =>
+          g.id === groupId
+            ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, status: "error" as const, enabled: false } : i) }
+            : g
+        );
+        syncSkillGroupsToConfig(next);
+        return next;
+      });
+    });
+  };
+
+  const validateGroupItem = (groupId: string, itemId: string) => {
+    const group = skillGroups.find((g) => g.id === groupId);
+    const item = group?.items.find((i) => i.id === itemId);
+    if (!item) return;
+    runGroupItemValidation(groupId, itemId, item.path);
+  };
+
+  const browseGroupItem = async (groupId: string, itemId: string) => {
+    const group = skillGroups.find((g) => g.id === groupId);
+    const item = group?.items.find((i) => i.id === itemId);
+    if (!item) return;
 
     if (isRemoteMode) {
-      pendingSkillUploadItemIdRef.current = id;
+      pendingSkillUploadGroupIdRef.current = groupId;
+      pendingSkillUploadItemIdRef.current = itemId;
       skillUploadInputRef.current?.click();
       return;
     }
 
     try {
-      const selected = await pickFolderDialog(target.path.trim() || undefined);
+      const selected = await pickFolderDialog(item.path.trim() || undefined);
       if (!selected) return;
-      setRootItemsAndSync(skillRootItems.map((item) =>
-        item.id === id ? { ...item, path: selected, status: "checking", enabled: false } : item
-      ));
-      void runItemValidation("roots", id, selected);
+      setSkillGroups((prev) => {
+        const next = prev.map((g) =>
+          g.id === groupId
+            ? { ...g, items: g.items.map((i) => i.id === itemId ? { ...i, path: selected, status: "checking" as const, enabled: false } : i) }
+            : g
+        );
+        syncSkillGroupsToConfig(next);
+        return next;
+      });
+      runGroupItemValidation(groupId, itemId, selected);
     } catch (error) {
       setError(String(error));
     }
   };
 
-  const toggleRootItemEnabled = (id: string) => {
-    setRootItemsAndSync(skillRootItems.map((item) => {
-      if (item.id !== id) return item;
-      if (item.status !== "valid") return { ...item, enabled: false };
-      return { ...item, enabled: !item.enabled };
-    }));
+  const toggleGroupItemEnabled = (groupId: string, itemId: string) => {
+    setGroupsAndSync(skillGroups.map((g) =>
+      g.id === groupId
+        ? { ...g, items: g.items.map((i) => {
+            if (i.id !== itemId) return i;
+            if (i.status !== "valid") return { ...i, enabled: false };
+            return { ...i, enabled: !i.enabled };
+          }) }
+        : g
+    ));
+  };
+
+  const importToGroup = async (groupId: string) => {
+    try {
+      const selected = await pickFolderDialog();
+      if (!selected) return;
+      const discovered = await scanSkillDirectories(selected);
+      if (discovered.length === 0) {
+        setError(t("noSkillRootsFound"));
+        return;
+      }
+      const importedItems = discovered.map((item) => ({
+        ...createSkillDirectoryItem(item.path, true),
+        status: "valid" as const,
+      }));
+      setGroupsAndSync(skillGroups.map((g) => {
+        if (g.id !== groupId) return g;
+        const existingPaths = new Set(g.items.map((i) => i.path.trim().toLowerCase()));
+        const newItems = importedItems.filter((i) => !existingPaths.has(i.path.trim().toLowerCase()));
+        return { ...g, items: [...newItems, ...g.items] };
+      }));
+      setError(null);
+    } catch (error) {
+      setError(asErrorMessage(error));
+    }
   };
 
   const browseWhitelistItem = async (id: string) => {
@@ -2020,7 +1617,9 @@ function App() {
 
   const handleRemoteSkillUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.target;
+    const targetGroupId = pendingSkillUploadGroupIdRef.current;
     const targetId = pendingSkillUploadItemIdRef.current;
+    pendingSkillUploadGroupIdRef.current = null;
     pendingSkillUploadItemIdRef.current = null;
     const fileList = input.files;
     if (!targetId || !fileList || fileList.length === 0) {
@@ -2030,27 +1629,49 @@ function App() {
 
     const files = Array.from(fileList);
     setError(null);
-    setRootItemsAndSync(skillRootItems.map((item) =>
-      item.id === targetId ? { ...item, status: "checking", enabled: false } : item
-    ));
+
+    if (targetGroupId) {
+      setSkillGroups((prev) => prev.map((g) =>
+        g.id === targetGroupId
+          ? { ...g, items: g.items.map((i) => i.id === targetId ? { ...i, status: "checking" as const } : i) }
+          : g
+      ));
+    }
 
     try {
       const result = await apiClient.uploadSkillDirectory(files, "/data/skills");
-      setRootItemsAndSync(skillRootItems.map((item) =>
-        item.id === targetId
-          ? {
-              ...item,
-              path: result.path,
-              status: skillDirectoryStatusFromResult(result),
-              enabled: false,
-            }
-          : item
-      ));
+      const status = skillDirectoryStatusFromResult(result);
+      if (targetGroupId) {
+        setSkillGroups((prev) => {
+          const next = prev.map((g) =>
+            g.id === targetGroupId
+              ? {
+                  ...g,
+                  items: g.items.map((i) =>
+                    i.id === targetId
+                      ? { ...i, path: result.path, status, enabled: false }
+                      : i
+                  ),
+                }
+              : g
+          );
+          syncSkillGroupsToConfig(next);
+          return next;
+        });
+      }
     } catch (error) {
-      setError(asErrorMessage(error));
-      setRootItemsAndSync(skillRootItems.map((item) =>
-        item.id === targetId ? { ...item, status: "error", enabled: false } : item
-      ));
+      setError(String(error));
+      if (targetGroupId) {
+        setSkillGroups((prev) => {
+          const next = prev.map((g) =>
+            g.id === targetGroupId
+              ? { ...g, items: g.items.map((i) => i.id === targetId ? { ...i, status: "error" as const, enabled: false } : i) }
+              : g
+          );
+          syncSkillGroupsToConfig(next);
+          return next;
+        });
+      }
     } finally {
       input.value = "";
     }
@@ -2093,8 +1714,11 @@ function App() {
       adminToken,
       mcpToken,
       skills: { ...skillsForFingerprint, builtinTools: builtinToolsForFp as typeof skillsForFingerprint.builtinTools },
+      aiAdapterEnabled,
+      aiAdapterKeys,
+      sessionNamePresets,
     }));
-  }, [servers, serversMode, parsedJsonServers, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills, defaultSkillRules]);
+  }, [servers, serversMode, parsedJsonServers, listen, apiPrefix, ssePath, httpPath, adminToken, mcpToken, skills, defaultSkillRules, aiAdapterEnabled, aiAdapterKeys, sessionNamePresets]);
 
   const isConfigDirty = configLoaded
     && (currentConfigFingerprint === null || currentConfigFingerprint !== savedConfigFingerprint);
@@ -2110,6 +1734,9 @@ function App() {
       adminToken,
       mcpToken,
       skills: normalizeSkillsForSubmit(skills, defaultSkillRules),
+      aiAdapterEnabled,
+      aiAdapterKeys,
+      sessionNamePresets,
     });
 
     if (isRemoteMode) {
@@ -2120,6 +1747,12 @@ function App() {
       cfg.transport = snapshot.transport;
       cfg.security = snapshot.security;
       cfg.skills = snapshot.skills;
+      cfg.aiAdapter = {
+        ...cfg.aiAdapter,
+        enabled: snapshot.aiAdapterEnabled,
+        apiKeys: snapshot.aiAdapterKeys,
+        sessionNamePresets: snapshot.sessionNamePresets,
+      };
       await apiClient.updateConfig(cfg);
       return createEditableConfigFingerprint(snapshot);
     }
@@ -2131,6 +1764,12 @@ function App() {
     cfg.transport = snapshot.transport;
     cfg.security = snapshot.security;
     cfg.skills = snapshot.skills;
+    cfg.aiAdapter = {
+      ...cfg.aiAdapter,
+      enabled: snapshot.aiAdapterEnabled,
+      apiKeys: snapshot.aiAdapterKeys,
+      sessionNamePresets: snapshot.sessionNamePresets,
+    };
     await saveLocalConfig(cfg);
     // Exclude officeCliPath from fingerprint (auto-persisted separately)
     const { officeCliPath: _ocpPersist, ...persistBuiltinTools } = snapshot.skills.builtinTools;
@@ -2378,8 +2017,6 @@ function App() {
   }, [draggedServerIndex, findServerDropTarget, resetServerDragState, serverUiIds, servers, updateDraggedServerPreview]);
 
   const baseUrl = listen.startsWith("http") ? listen : `http://${listen}`;
-  const skillHttpUrl = `${baseUrl}${httpPath}/${EXTERNAL_SKILL_SERVER_NAME}`;
-  const skillSseUrl = `${baseUrl}${ssePath}/${EXTERNAL_SKILL_SERVER_NAME}`;
   const builtinSkillHttpUrl = `${baseUrl}${httpPath}/${BUILTIN_SKILL_SERVER_NAME}`;
   const builtinSkillSseUrl = `${baseUrl}${ssePath}/${BUILTIN_SKILL_SERVER_NAME}`;
   const hasValidWhitelistDir = skills.policy.pathGuard.whitelistDirs.some((d) => d.trim().length > 0);
@@ -2723,6 +2360,15 @@ function App() {
               <BookOpenText size={16} />
               <span>{t("navExternalSkill")}</span>
             </button>
+            <button
+              type="button"
+              className={`sidebar-nav-item ${activeSection === "aiAdapter" ? "active" : ""}`}
+              onClick={() => setActiveSection("aiAdapter")}
+            >
+              <Send size={16} />
+              <span>{t("navAiAdapter")}</span>
+              {aiSessions.length > 0 && <span className="sidebar-badge">{aiSessions.length}</span>}
+            </button>
           </nav>
 
           <div className="sidebar-status">
@@ -2778,29 +2424,13 @@ function App() {
             </div>
           </div>
 
-          {/* ── 错误提示 ── */}
-          {error && (
-            <div className="alert alert-error app-alert">
-              {error}
-              <button className="alert-close" onClick={() => setError(null)}>x</button>
-            </div>
-          )}
-        </button>
-        <button
-          className={`tab-button ${activeTab === "terminal" ? "active" : ""}`}
-          onClick={() => setActiveTab("terminal")}
-        >
-          {t("tabTerminal")}
-        </button>
-      </div>
-
           <div className="main-scroll">
       <input
         ref={skillUploadInputRef}
         type="file"
         style={{ display: "none" }}
         multiple
-        webkitdirectory=""
+        {...({ webkitdirectory: "" } as any)}
         onChange={handleRemoteSkillUpload}
       />
 
@@ -3095,6 +2725,17 @@ function App() {
                           <div className="built-in-tool-body">
                             <div className="built-in-tool-name">
                               {tool.name}
+                              {tool.key === "taskPlanning" && (
+                                <span className="shell-env-wrap">
+                                  <button
+                                    className={`btn-icon shell-env-btn${showPlansModal ? " active" : ""}`}
+                                    title={t("planViewBtn")}
+                                    onClick={handleOpenPlans}
+                                  >
+                                    <Eye size={13} />
+                                  </button>
+                                </span>
+                              )}
                               {tool.key === "shellCommand" && (
                                 <span className="shell-env-wrap">
                                   <button
@@ -3234,8 +2875,8 @@ function App() {
                                 <span className="officecli-reinstall-popover">
                                   <span className="officecli-reinstall-popover-text">{t("builtInOfficeCliReinstallConfirm")}</span>
                                   <span className="officecli-reinstall-popover-actions">
-                                    <button className="btn btn-secondary btn-sm" onClick={handleReinstallOfficeCli}>{t("confirm")}</button>
                                     <button className="btn btn-secondary btn-sm" onClick={() => setShowReinstallConfirm(false)}>{t("cancel")}</button>
+                                    <button className="btn-primary-sm" onClick={handleReinstallOfficeCli}>{t("confirm")}</button>
                                   </span>
                                 </span>
                               )}
@@ -3320,48 +2961,31 @@ function App() {
                   <div className="section-description">{t("skillsRootsHint")}</div>
                 </div>
                 <div className="section-heading-actions">
-                  <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={addRootItem}>
-                    {t("addSkillRootPath")}
-                  </button>
-                  <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={() => { void importRootItems(); }}>
-                    {t("importSkillRoots")}
+                  <button className="btn btn-secondary btn-sm btn-add-server-heading" onClick={addSkillGroup}>
+                    {t("skillGroupAdd")}
                   </button>
                 </div>
               </div>
 
-              {running && (
-                <div className="skills-endpoints">
-                  <div className="endpoint-item">
-                    <span className="endpoint-label">{t("skillSseEndpoint")}</span>
-                    <code className="endpoint-url">{skillSseUrl}</code>
-                    <button className="btn-icon" title={t("copySkillSse")} onClick={() => handleCopy(EXTERNAL_SKILL_SERVER_NAME, "sse", skillSseUrl, "skills-sse")}>
-                      {copied === "skills-sse" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
-                    </button>
-                  </div>
-                  <div className="endpoint-item">
-                    <span className="endpoint-label">{t("skillHttpEndpoint")}</span>
-                    <code className="endpoint-url">{skillHttpUrl}</code>
-                    <button className="btn-icon" title={t("copySkillHttp")} onClick={() => handleCopy(EXTERNAL_SKILL_SERVER_NAME, "streamable-http", skillHttpUrl, "skills-http")}>
-                      {copied === "skills-http" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
-                    </button>
-                  </div>
-                </div>
-              )}
-
               <div className="skills-redesign">
-                <SkillDirectoryListEditor
-                  title=""
-                  hint=""
-                  items={skillRootItems}
-                  onAdd={addRootItem}
-                  onRemove={requestRemoveRootItem}
-                  onPathChange={updateRootItemPath}
-                  onValidate={validateRootItem}
-                  onBrowse={browseRootItem}
+                <SkillGroupsEditor
+                  groups={skillGroups}
+                  onRemoveGroup={removeSkillGroup}
+                  onRenameGroup={renameSkillGroup}
+                  onAddItem={addGroupItem}
+                  onRemoveItem={removeGroupItem}
+                  onPathChange={updateGroupItemPath}
+                  onValidate={validateGroupItem}
+                  onBrowse={browseGroupItem}
                   browseLabel={isRemoteMode ? t("uploadFolder") : t("browseFolder")}
-                  onToggleEnabled={toggleRootItemEnabled}
-                  enableToggle
-                  showAddButton={false}
+                  onToggleEnabled={toggleGroupItemEnabled}
+                  onImportToGroup={(gid) => { void importToGroup(gid); }}
+                  onCopy={handleCopy}
+                  copied={copied}
+                  running={running}
+                  baseUrl={baseUrl}
+                  ssePath={ssePath}
+                  httpPath={httpPath}
                   t={t}
                 />
               </div>
@@ -3425,7 +3049,6 @@ function App() {
                   onRemove={requestRemoveWhitelistItem}
                   onPathChange={updateWhitelistItemPath}
                   onBrowse={browseWhitelistItem}
-                  browseLabel={t("browseFolder")}
                   showValidation={false}
                   t={t}
                 />
@@ -3564,7 +3187,7 @@ function App() {
           </>
         )}
 
-        {activeTab === "terminal" && (
+        {activeSection === "terminal" && (
           <section className="config-section">
             <div className="section-heading">{t("terminalTitle")}</div>
             <div className="gateway-fields">
@@ -3603,7 +3226,316 @@ function App() {
             </div>
           </section>
         )}
+      {/* ── AI 外接面板 ── */}
+      {activeSection === "aiAdapter" && (
+        <>
+          {/* Base URL */}
+          <section className="config-section skills-redesign-section">
+            <div className="section-heading-row built-in-tools-heading-row">
+              <div className="section-heading-block">
+                <div className="section-heading">{t("aiAdapterBaseUrl")}</div>
+                <div className="section-description">{t("aiAdapterConfigHint")}</div>
+              </div>
+            </div>
 
+            <div className="ai-adapter-url-row">
+              <button
+                type="button"
+                className={`toggle-btn ai-adapter-toggle ${aiAdapterEnabled ? "toggle-on" : "toggle-off"}`}
+                onClick={() => setAiAdapterEnabled((prev) => !prev)}
+                title={aiAdapterEnabled ? t("enabledClick") : t("disabledClick")}
+                aria-label={`${aiAdapterEnabled ? t("enabledClick") : t("disabledClick")} OpenAI / Anthropic`}
+                aria-pressed={aiAdapterEnabled}
+              />
+              <div className="ai-adapter-url-group">
+                <div className="ai-adapter-provider">
+                  <span className="endpoint-label">OpenAI / Anthropic</span>
+                </div>
+                <div className="ai-adapter-url-box">
+                  <code className="endpoint-url">{baseUrl}/api/v2/ai/v1</code>
+                  <button className="btn-icon" title={t("copyBuiltinSkillHttp")} onClick={() => { navigator.clipboard.writeText(`${baseUrl}/api/v2/ai/v1`); setCopied("ai-adapter-base-url"); setTimeout(() => setCopied(null), 2000); }}>
+                    {copied === "ai-adapter-base-url" ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+
+          </section>
+
+          {/* API Keys */}
+          <section className="config-section skills-redesign-section ai-api-keys-section">
+            <div className="section-heading-row built-in-tools-heading-row">
+              <div className="section-heading-block">
+                <div className="section-heading">{t("aiAdapterApiKey")}</div>
+                <div className="section-description">{t("aiAdapterApiKeyPlaceholder")}</div>
+              </div>
+              <div className="section-heading-actions">
+                <button
+                  className="btn-add-dir"
+                  title={t("aiAdapterRandomKey")}
+                  onClick={() => {
+                    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                    let key = "sk-";
+                    for (let i = 0; i < 10; i++) key += chars[Math.floor(Math.random() * chars.length)];
+                    setAiAdapterKeys([...aiAdapterKeys, key]);
+                  }}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+            <div className="skills-redesign">
+              <div className="skills-dir-list">
+                {aiAdapterKeys.map((keyVal, idx) => (
+                  <div className="skills-dir-row no-validation" key={idx}>
+                    <input
+                      className="form-input skills-dir-input"
+                      type="text"
+                      value={keyVal}
+                      placeholder="sk-..."
+                      onChange={(e) => {
+                        const updated = [...aiAdapterKeys];
+                        updated[idx] = e.target.value;
+                        setAiAdapterKeys(updated);
+                      }}
+                    />
+                    <button
+                      className="btn-icon btn-danger-icon skills-dir-remove"
+                      title={t("remove")}
+                      onClick={() => {
+                        const updated = aiAdapterKeys.filter((_, i) => i !== idx);
+                        setAiAdapterKeys(updated.length > 0 ? updated : [""]);
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* 活跃会话 */}
+          <section className="config-section skills-redesign-section ai-sessions-section">
+            <div className="section-heading-row built-in-tools-heading-row">
+              <div className="section-heading-block">
+                <div className="section-heading">{t("aiAdapterSessions")} ({aiSessions.length})</div>
+                <div className="section-description">{aiSessions.length === 0 ? t("aiAdapterNoSessions") : ""}</div>
+              </div>
+            </div>
+
+            {aiSessions.length > 0 && (
+              <div className="skills-redesign">
+                <div className="ai-session-card-list">
+                  {aiSessions.map((session) => (
+                    <div key={session.id} className="ai-session-card" style={renameSessionId === session.id ? { overflow: "visible" } : undefined}>
+                      {renameSessionId === session.id ? (
+                        <div className="ai-session-card-rename">
+                          <input
+                            type="text"
+                            value={renameSessionName}
+                            onChange={(e) => setRenameSessionName(e.target.value)}
+                            className="form-input form-input-sm"
+                            autoFocus
+                            style={{ flex: 1, minWidth: 120 }}
+                          />
+                          <div className="ai-session-preset-dropdown">
+                            <button
+                              className="form-input form-input-sm ai-session-preset-trigger"
+                              onClick={(e) => { e.preventDefault(); setPresetDropdownOpen(!presetDropdownOpen); }}
+                            >
+                              <span>{t("sessionPresetPlaceholder")}</span>
+                              <ChevronDown size={12} />
+                            </button>
+                            {presetDropdownOpen && (
+                              <>
+                                <div className="ai-session-preset-backdrop" onClick={() => setPresetDropdownOpen(false)} />
+                                <div className="ai-session-preset-menu">
+                                  {sessionNamePresets.filter(p => p.trim().length > 0).map((preset, i) => (
+                                    <div key={i} className="ai-session-preset-item">
+                                      <span
+                                        className="ai-session-preset-item-name"
+                                        onClick={() => {
+                                          setRenameSessionName(preset);
+                                          setPresetDropdownOpen(false);
+                                        }}
+                                      >
+                                        {preset}
+                                      </span>
+                                      <button
+                                        className="ai-session-preset-item-del"
+                                        title={t("sessionPresetDelete")}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setPresetDeleteTarget(preset);
+                                          setPresetDropdownOpen(false);
+                                        }}
+                                      >
+                                        <X size={11} />
+                                      </button>
+                                    </div>
+                                  ))}
+                                  <div
+                                    className="ai-session-preset-item ai-session-preset-item-add"
+                                    onClick={() => {
+                                      setPresetAddName("");
+                                      setPresetAddModalOpen(true);
+                                      setPresetDropdownOpen(false);
+                                    }}
+                                  >
+                                    <Plus size={12} />
+                                    <span>{t("sessionPresetAdd")}</span>
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          <button className="btn btn-secondary btn-sm" onClick={async () => {
+                            if (renameSessionName.trim()) {
+                              try {
+                                await apiClient.renameAiSession(session.id, renameSessionName.trim());
+                                fetchAiSessions();
+                              } catch (e) { setError(String(e)); }
+                            }
+                            setRenameSessionId(null);
+                          }}>
+                            {t("saveConfig")}
+                          </button>
+                          <button className="btn btn-secondary btn-sm" onClick={() => setRenameSessionId(null)}>
+                            {t("cancel")}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="ai-session-card-main">
+                          <div className="ai-session-card-header">
+                            <div className="ai-session-card-info">
+                              <div className="ai-session-card-title">
+                                <span className="ai-session-card-name">{session.displayName}</span>
+                                <button
+                                  className="ai-session-rename-action"
+                                  onClick={() => { setRenameSessionId(session.id); setRenameSessionName(session.displayName); }}
+                                  title={t("sessionRename")}
+                                  aria-label={t("sessionRename")}
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                              </div>
+                              <span className={`ai-session-card-protocol protocol-${session.protocol}`} title={t("aiAdapterProtocol")}>
+                                {session.protocol === "openai-chat"
+                                  ? t("aiAdapterProtocolOpenaiChat")
+                                  : session.protocol === "openai-responses"
+                                  ? t("aiAdapterProtocolOpenaiResponses")
+                                  : t("aiAdapterProtocolAnthropic")}
+                              </span>
+                              <button
+                                className="ai-session-card-tools ai-session-card-tools-clickable"
+                                onClick={() => openToolsModal(session)}
+                                title={t("sessionToolsBtnTitle")}
+                              >
+                                <Wrench size={12} />
+                                {session.tools.filter(t => t.enabled !== false).length}/{session.toolCount} tools
+                              </button>
+                            </div>
+                            <div className="ai-session-card-actions">
+                              <button
+                                className="runtime-line-action runtime-line-danger-action"
+                                onClick={async () => {
+                                  try {
+                                    await apiClient.deleteAiSession(session.id);
+                                    fetchAiSessions();
+                                  } catch (e) { setError(String(e)); }
+                                }}
+                                title={t("sessionDelete")}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </div>
+                          <div className="ai-session-card-details">
+                            <div className="ai-session-card-detail-row">
+                              <span className="ai-session-card-detail-label">{t("aiAdapterSessionId")}</span>
+                              <span className="ai-session-card-detail-value">{session.id}</span>
+                            </div>
+                            <div className="ai-session-card-detail-row">
+                              <span className="ai-session-card-detail-label">{t("aiAdapterConnected")}</span>
+                              <span className="ai-session-card-detail-value">{formatTime(session.connectedAt)}</span>
+                            </div>
+                            <div className="ai-session-card-detail-row ai-session-card-toggle-row">
+                              <span className="ai-session-card-detail-label">{t("sessionToolPing")}</span>
+                              <span className="ai-session-card-toggle-description">{t("sessionToolPingDesc")}</span>
+                              <button
+                                className={`toggle-btn ${session.toolPingEnabled !== false ? "toggle-on" : "toggle-off"}`}
+                                onClick={async () => {
+                                  const next = !(session.toolPingEnabled !== false);
+                                  try {
+                                    await apiClient.toggleSessionToolPing(session.id, next);
+                                    setAiSessions((prev) => prev.map((s) => s.id === session.id ? { ...s, toolPingEnabled: next } : s));
+                                  } catch (e) {
+                                    setError(String(e));
+                                  }
+                                }}
+                                title={t("sessionToolPingTitle")}
+                                aria-label={t("sessionToolPingEnableLabel")}
+                                aria-pressed={session.toolPingEnabled !== false}
+                              />
+                            </div>
+                            {session.hasSystemPrompt && (
+                              <div className="ai-session-card-detail-row" style={{ alignItems: "center" }}>
+                                <span className="ai-session-card-detail-label">{t("aiAdapterSystemPrompt")}</span>
+                                <span className="ai-session-card-detail-value ai-session-card-detail-truncate">
+                                  {(session.systemPromptOverride ?? session.systemPrompt).substring(0, 80)}{(session.systemPromptOverride ?? session.systemPrompt).length > 80 ? "..." : ""}
+                                </span>
+                                <button
+                                  className="btn-icon"
+                                  style={{ marginLeft: "4px", flexShrink: 0 }}
+                                  onClick={() => {
+                                    setEditingPromptText(session.systemPromptOverride ?? session.systemPrompt);
+                                    setEditingSessionId(session.id);
+                                    setSystemPromptModalOpen(true);
+                                  }}
+                                  title={t("systemPromptEditBtn")}
+                                  aria-label={t("systemPromptEditBtn")}
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                                <button
+                                  className={`toggle-btn ${session.systemPromptToolEnabled ? "toggle-on" : "toggle-off"}`}
+                                  style={{ marginLeft: "6px", flexShrink: 0, alignSelf: "center" }}
+                                  onClick={async () => { const next = !session.systemPromptToolEnabled; try { await apiClient.toggleSessionSystemPromptTool(session.id, next); setAiSessions((prev) => prev.map((s) => s.id === session.id ? { ...s, systemPromptToolEnabled: next } : s)); } catch (e) { setError(String(e)); } }}
+                                  title={session.systemPromptToolEnabled ? t("enabledClick") : t("disabledClick")}
+                                  aria-label={t("systemPromptEnableLabel")}
+                                  aria-pressed={session.systemPromptToolEnabled}
+                                />
+                              </div>
+                            )}
+                            <div className="ai-session-card-endpoints">
+                              <div className="endpoint-item">
+                                <span className="endpoint-label">SSE</span>
+                                <code className="endpoint-url">{baseUrl}{ssePath}/{encodeURIComponent(session.name)}</code>
+                                <button className="btn-icon" title={t("copyBuiltinSkillSse")} onClick={() => handleCopy(session.name, "sse", `${baseUrl}${ssePath}/${encodeURIComponent(session.name)}`, `session-${session.id}-sse`)}>
+                                  {copied === `session-${session.id}-sse` ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                                </button>
+                              </div>
+                              <div className="endpoint-item">
+                                <span className="endpoint-label">HTTP</span>
+                                <code className="endpoint-url">{baseUrl}{httpPath}/{encodeURIComponent(session.name)}</code>
+                                <button className="btn-icon" title={t("copyBuiltinSkillHttp")} onClick={() => handleCopy(session.name, "streamable-http", `${baseUrl}${httpPath}/${encodeURIComponent(session.name)}`, `session-${session.id}-http`)}>
+                                  {copied === `session-${session.id}-http` ? <Check size={12} color="var(--accent-green)" /> : <Copy size={12} />}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        </>
+      )}
       </div>
 
       {/* ── 底部通知条：快捷入口 ── */}
@@ -3717,6 +3649,89 @@ function App() {
         t={t}
       />
 
+      <SessionToolsModal
+        open={!!activeToolsModal}
+        sessionName={activeToolsModal?.session.displayName ?? ""}
+        tools={activeToolsModal?.session.tools ?? []}
+        enabledTools={activeToolsModal?.enabledTools ?? new Set()}
+        onToggle={(toolName) => {
+          if (activeToolsModal) {
+            toggleSessionTool(activeToolsModal.session.id, toolName);
+          }
+        }}
+        onClose={closeToolsModal}
+        t={t}
+      />
+
+      <SystemPromptModal
+        open={systemPromptModalOpen}
+        initialText={editingPromptText}
+        onSave={async (text) => {
+          if (editingSessionId) {
+            try {
+              await apiClient.updateSessionSystemPrompt(editingSessionId, text || null);
+              setAiSessions((prev) => prev.map((s) =>
+                s.id === editingSessionId ? { ...s, systemPromptOverride: text || null } : s
+              ));
+            } catch (e) { setError(String(e)); }
+          }
+          setSystemPromptModalOpen(false);
+        }}
+        onClose={() => setSystemPromptModalOpen(false)}
+        t={t}
+      />
+
+      {/* ── 新增预设弹窗 ── */}
+      {presetAddModalOpen && (
+        <div className="modal-overlay" onClick={() => setPresetAddModalOpen(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
+            <div className="modal-header">{t("sessionPresetAdd")}</div>
+            <div className="modal-body" style={{ padding: "16px 20px" }}>
+              <input
+                className="form-input"
+                type="text"
+                value={presetAddName}
+                onChange={(e) => setPresetAddName(e.target.value)}
+                placeholder={t("sessionPresetAddPlaceholder")}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && presetAddName.trim()) {
+                    setSessionNamePresets([...sessionNamePresets, presetAddName.trim()]);
+                    setRenameSessionName(presetAddName.trim());
+                    setPresetAddModalOpen(false);
+                  }
+                }}
+              />
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary btn-sm" onClick={() => setPresetAddModalOpen(false)}>{t("cancel")}</button>
+              <button className="btn btn-start btn-sm" onClick={() => {
+                if (presetAddName.trim()) {
+                  setSessionNamePresets([...sessionNamePresets, presetAddName.trim()]);
+                  setRenameSessionName(presetAddName.trim());
+                  setPresetAddModalOpen(false);
+                }
+              }}>{t("saveConfig")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 删除预设确认弹窗 ── */}
+      <ConfirmDialog
+        open={presetDeleteTarget !== null}
+        title={t("sessionPresetDelete")}
+        message={t("sessionPresetDeleteConfirm").replace("{name}", presetDeleteTarget ?? "")}
+        onCancel={() => setPresetDeleteTarget(null)}
+        onConfirm={() => {
+          if (presetDeleteTarget) {
+            setSessionNamePresets(sessionNamePresets.filter(p => p !== presetDeleteTarget));
+            setPresetDeleteTarget(null);
+          }
+        }}
+        t={t}
+      />
+
       {/* ── 删除确认弹窗 ── */}
       <ConfirmDialog
         open={deleteConfirm.open}
@@ -3742,7 +3757,6 @@ function App() {
         message={t("resetDefaultConfigMessage")}
         onCancel={cancelResetDefaultConfig}
         onConfirm={() => { void confirmResetDefaultConfig(); }}
-        confirmText={t("confirmResetDefaultConfig")}
         t={t}
       />
       <ConfirmDialog
@@ -3751,9 +3765,120 @@ function App() {
         message={t("resetSkillRulesMessage")}
         onCancel={cancelResetSkillRules}
         onConfirm={() => { void confirmResetSkillRules(); }}
-        confirmText={t("confirmResetSkillRules")}
         t={t}
       />
+      <ConfirmDialog
+        open={skillGroupDeleteConfirm.open}
+        title={t("confirmDeleteTitle")}
+        message={t("skillGroupDeleteConfirmMsg").replace("{name}", skillGroupDeleteConfirm.groupName || t("skillGroupDefault"))}
+        onCancel={cancelSkillGroupDelete}
+        onConfirm={confirmSkillGroupDelete}
+        t={t}
+      />
+
+      {showPlansModal && (
+        <div className="modal-overlay" onClick={() => setShowPlansModal(false)}>
+          <div className="modal-content plans-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">{t("planViewTitle")}</div>
+            <div className="modal-body plans-modal-body">
+              {plansLoading && activePlans.length === 0 && (
+                <div className="shell-env-empty">{t("planViewLoading")}</div>
+              )}
+              {!plansLoading && activePlans.length === 0 && (
+                <div className="shell-env-empty">{t("planViewEmpty")}</div>
+              )}
+              {activePlans.map((plan) => (
+                <div key={plan.planningId} className="plan-card">
+                  <div className="plan-card-header">
+                    <code className="plan-id">{plan.planningId}</code>
+                    <div className="plan-card-actions">
+                      <span className="plan-updated">{formatTime(plan.updatedAt)}</span>
+                      <span className="plan-delete-wrap">
+                        <button
+                          type="button"
+                          className={`plan-delete-btn${planDeleteConfirmId === plan.planningId ? " active" : ""}`}
+                          title={t("planDeleteTitle")}
+                          aria-label={t("planDeleteTitle")}
+                          aria-expanded={planDeleteConfirmId === plan.planningId}
+                          disabled={deletingPlanId === plan.planningId}
+                          onClick={() => togglePlanDeleteConfirm(plan.planningId)}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                        {planDeleteConfirmId === plan.planningId && (
+                          <span
+                            className="plan-delete-popover"
+                            role="dialog"
+                            aria-label={t("planDeleteTitle")}
+                          >
+                            <span className="plan-delete-popover-text">{t("planDeleteConfirm")}</span>
+                            {planDeleteError && (
+                              <span className="plan-delete-popover-error">{planDeleteError}</span>
+                            )}
+                            <span className="plan-delete-popover-actions">
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                onClick={cancelPlanDeleteConfirm}
+                                disabled={deletingPlanId === plan.planningId}
+                              >
+                                {t("cancel")}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-danger-sm"
+                                onClick={() => handleConfirmDeletePlan(plan.planningId)}
+                                disabled={deletingPlanId === plan.planningId}
+                              >
+                                {deletingPlanId === plan.planningId
+                                  ? t("planViewLoading")
+                                  : t("planDeleteConfirmBtn")}
+                              </button>
+                            </span>
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                  {plan.explanation && (
+                    <div className="plan-explanation">{plan.explanation}</div>
+                  )}
+                  <div className="plan-progress">
+                    <span className="plan-progress-text">{plan.completedSteps}/{plan.totalSteps}</span>
+                    <div className="plan-progress-bar">
+                      <div
+                        className="plan-progress-fill"
+                        style={{ width: `${plan.totalSteps > 0 ? (plan.completedSteps / plan.totalSteps) * 100 : 0}%` }}
+                      />
+                    </div>
+                    {plan.pendingCount > 0 && (
+                      <span className="plan-pending-pill">
+                        {t("planPendingLabel").replace("{n}", String(plan.pendingCount))}
+                      </span>
+                    )}
+                  </div>
+                  <ul className="plan-step-list">
+                    {plan.plan.map((item, i) => (
+                      <li key={i} className={`plan-step plan-step-${item.status}`}>
+                        <span className={`plan-step-dot plan-dot-${item.status}`} />
+                        <span className="plan-step-text">{item.step}</span>
+                        <span className={`plan-step-tag plan-tag-${item.status}`}>{t(`planStatus_${item.status}` as TKey) ?? item.status}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <div className="modal-footer plans-modal-footer">
+              <span className="plans-auto-refresh-hint">{t("planAutoRefresh")}</span>
+              <div className="plans-footer-actions">
+                <button className="btn btn-secondary" onClick={() => setShowPlansModal(false)}>{t("planViewClose")}</button>
+                <button className="btn btn-start" onClick={handleRefreshPlans} disabled={plansLoading}>{t("planViewRefresh")}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

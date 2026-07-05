@@ -60,6 +60,23 @@ pub enum StdioProtocol {
     Auto,
 }
 
+/// A disabled-tool entry that identifies a tool by its unique name.
+/// Matching on name is reliable across sessions, unlike description hashing
+/// which breaks when AI clients send slightly different description text.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisabledToolEntry {
+    /// The tool name (e.g. "read_file", "shell_command")
+    #[serde(default)]
+    pub name: String,
+}
+
+impl DisabledToolEntry {
+    pub fn matches(&self, tool_name: &str) -> bool {
+        self.name == tool_name
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayConfig {
@@ -83,6 +100,10 @@ pub struct GatewayConfig {
     pub servers: Vec<ServerConfig>,
     #[serde(default)]
     pub skills: SkillsConfig,
+    #[serde(default)]
+    pub ai_adapter: AiAdapterConfig,
+    #[serde(default)]
+    pub disabled_tools: Vec<DisabledToolEntry>,
 }
 
 impl Default for GatewayConfig {
@@ -98,8 +119,82 @@ impl Default for GatewayConfig {
             defaults: DefaultsConfig::default(),
             servers: Vec::new(),
             skills: SkillsConfig::default(),
+            ai_adapter: AiAdapterConfig::default(),
+            disabled_tools: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAdapterConfig {
+    #[serde(default = "default_ai_adapter_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_ai_adapter_base_path")]
+    pub base_path: String,
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    #[serde(default = "default_ai_adapter_auto_register")]
+    pub auto_register_skills: bool,
+    /// 是否启用系统提示词工具（暴露为 MCP 工具供 AI 读取）
+    #[serde(default = "default_system_prompt_enabled")]
+    pub system_prompt_enabled: bool,
+    /// 用户自定义的系统提示词文本
+    #[serde(default)]
+    pub system_prompt_text: String,
+    /// 会话名称预设列表
+    #[serde(default)]
+    pub session_name_presets: Vec<String>,
+}
+
+impl Default for AiAdapterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_path: default_ai_adapter_base_path(),
+            api_keys: Vec::new(),
+            auto_register_skills: true,
+            system_prompt_enabled: true,
+            system_prompt_text: String::new(),
+            session_name_presets: Vec::new(),
+        }
+    }
+}
+
+fn default_ai_adapter_base_path() -> String {
+    "/api/v2/ai".to_string()
+}
+
+fn default_ai_adapter_enabled() -> bool {
+    true
+}
+
+fn default_system_prompt_enabled() -> bool {
+    true
+}
+
+fn default_ai_adapter_auto_register() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRootEntry {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillGroupEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_entries: Vec<SkillRootEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -111,6 +206,10 @@ pub struct SkillsConfig {
     pub builtin_server_name: String,
     #[serde(default = "default_skills_roots")]
     pub roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_entries: Vec<SkillRootEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_groups: Vec<SkillGroupEntry>,
     #[serde(default)]
     pub policy: SkillsPolicyConfig,
     #[serde(default)]
@@ -125,6 +224,8 @@ impl Default for SkillsConfig {
             server_name: default_skills_server_name(),
             builtin_server_name: default_builtin_skills_server_name(),
             roots: default_skills_roots(),
+            root_entries: Vec::new(),
+            root_groups: Vec::new(),
             policy: SkillsPolicyConfig::default(),
             execution: SkillsExecutionConfig::default(),
             builtin_tools: BuiltinToolsConfig::default(),
@@ -241,6 +342,8 @@ pub struct BuiltinToolsConfig {
     pub chat_plus_adapter_debugger: bool,
     #[serde(default = "default_builtin_tool_disabled")]
     pub office_cli: bool,
+    #[serde(default = "default_builtin_tool_disabled")]
+    pub code_graph: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub office_cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -257,6 +360,7 @@ impl Default for BuiltinToolsConfig {
             chrome_cdp: default_builtin_tool_enabled(),
             chat_plus_adapter_debugger: default_builtin_tool_enabled(),
             office_cli: default_builtin_tool_disabled(),
+            code_graph: default_builtin_tool_disabled(),
             office_cli_path: None,
             shell_env: HashMap::new(),
         }
@@ -1509,7 +1613,7 @@ fn default_path_guard_violation_action() -> SkillPolicyAction {
 }
 
 fn default_skills_exec_timeout_ms() -> u64 {
-    60_000
+    180_000
 }
 
 fn default_skills_max_output_bytes() -> usize {
@@ -1817,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn default_skills_execution_timeout_is_one_minute() {
-        assert_eq!(SkillsExecutionConfig::default().timeout_ms, 60_000);
+    fn default_skills_execution_timeout_is_three_minutes() {
+        assert_eq!(SkillsExecutionConfig::default().timeout_ms, 180_000);
     }
 }

@@ -61,6 +61,12 @@ export interface SkillRootEntry {
   enabled: boolean;
 }
 
+export interface SkillGroupEntry {
+  name: string;
+  roots: string[];
+  rootEntries?: SkillRootEntry[];
+}
+
 export interface BuiltinToolsConfig {
   readFile: boolean;
   shellCommand: boolean;
@@ -69,6 +75,7 @@ export interface BuiltinToolsConfig {
   chromeCdp: boolean;
   chatPlusAdapterDebugger: boolean;
   officeCli: boolean;
+  codeGraph: boolean;
   officeCliPath?: string;
   shellEnv?: Record<string, string>;
 }
@@ -76,6 +83,7 @@ export interface BuiltinToolsConfig {
 export interface SkillsConfig {
   roots: string[];
   rootEntries?: SkillRootEntry[];
+  rootGroups?: SkillGroupEntry[];
   policy: SkillsPolicyConfig;
   execution: SkillsExecutionConfig;
   builtinTools: BuiltinToolsConfig;
@@ -93,6 +101,11 @@ export interface ServerConfig {
   enabled: boolean;
 }
 
+export interface DisabledToolEntry {
+  /** The tool name (e.g. "read_file", "shell_command") */
+  name: string;
+}
+
 export interface GatewayConfig {
   version: number;
   listen: string;
@@ -104,6 +117,8 @@ export interface GatewayConfig {
   defaults: DefaultsConfig;
   servers: ServerConfig[];
   skills: SkillsConfig;
+  aiAdapter: AiAdapterConfig;
+  disabledTools?: DisabledToolEntry[];
 }
 
 export interface HealthData {
@@ -251,4 +266,59 @@ export interface TerminalTaskSnapshot {
   exitCode: number | null;
   startedAt: string;
   endedAt: string | null;
+}
+
+export interface ActivePlanStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+export interface ActivePlan {
+  planningId: string;
+  explanation?: string;
+  updatedAt: string;
+  totalSteps: number;
+  completedSteps: number;
+  pendingCount: number;
+  inProgressStep?: ActivePlanStep;
+  plan: ActivePlanStep[];
+}
+
+export interface AiAdapterConfig {
+  enabled: boolean;
+  basePath: string;
+  apiKeys: string[];
+  autoRegisterSkills: boolean;
+  /** 是否启用系统提示词工具（暴露为 MCP 工具） */
+  systemPromptEnabled?: boolean;
+  /** 用户自定义系统提示词文本 */
+  systemPromptText?: string;
+  /** 会话名称预设列表 */
+  sessionNamePresets?: string[];
+}
+
+export interface AiToolDef {
+  name: string;
+  description: string;
+  inputSchema: JsonValue;
+  enabled?: boolean;
+}
+
+export type AiProtocol = "openai-chat" | "openai-responses" | "anthropic";
+
+export interface AiSession {
+  id: string;
+  name: string;
+  displayName: string;
+  source: string;
+  protocol: AiProtocol;
+  systemPrompt: string;
+  tools: AiToolDef[];
+  connectedAt: string;
+  toolCount: number;
+  hasSystemPrompt: boolean;
+  systemPromptToolEnabled: boolean;
+  toolPingEnabled: boolean;
+  systemPromptOverride?: string | null;
+  hasPendingCall: boolean;
 }

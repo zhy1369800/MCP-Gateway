@@ -22,6 +22,8 @@ const BUILTIN_CHAT_PLUS_ADAPTER_DEBUGGER_SKILL_MD: &str =
     include_str!("../../builtin-skills/chat-plus-adapter-debugger/SKILL.md");
 const BUILTIN_OFFICECLI_SKILL_MD: &str =
     include_str!("../../builtin-skills/officecli/SKILL.md");
+const BUILTIN_CODEGRAPH_SKILL_MD: &str =
+    include_str!("../../builtin-skills/codegraph/SKILL.md");
 const BUILTIN_CHROME_CDP_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "windows")]
@@ -224,6 +226,34 @@ pub struct SkillSummary {
     pub has_scripts: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivePlanStepDto {
+    pub step: String,
+    pub status: PlanItemStatusDto,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanItemStatusDto {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivePlanSummary {
+    pub planning_id: String,
+    pub explanation: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub total_steps: usize,
+    pub completed_steps: usize,
+    pub pending_count: usize,
+    pub in_progress_step: Option<ActivePlanStepDto>,
+    pub plan: Vec<ActivePlanStepDto>,
+}
+
 #[derive(Debug, Clone)]
 struct DiscoveredSkill {
     skill: String,
@@ -255,7 +285,7 @@ struct SkillCommandArgs {
 #[serde(rename_all = "camelCase")]
 struct ReadFileArgs {
     #[serde(alias = "filePath", alias = "file_path")]
-    path: String,
+    path: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
@@ -266,12 +296,14 @@ struct ReadFileArgs {
     skill_token: Option<String>,
     #[serde(default)]
     planning_id: Option<String>,
+    #[serde(default, alias = "read_skill")]
+    read_skill: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BuiltinShellArgs {
-    exec: String,
+    exec: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
@@ -287,6 +319,8 @@ struct BuiltinShellArgs {
     /// writes other paths in addition, only the listed paths are protected.
     #[serde(default, alias = "writesPaths", alias = "writes_paths")]
     writes: Vec<String>,
+    #[serde(default, alias = "read_skill")]
+    read_skill: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,6 +340,8 @@ struct MultiEditFileArgs {
     skill_token: Option<String>,
     #[serde(default)]
     planning_id: Option<String>,
+    #[serde(default, alias = "read_skill")]
+    read_skill: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -320,8 +356,6 @@ struct MultiEditFileSpec {
 #[serde(rename_all = "camelCase")]
 struct TaskPlanningArgs {
     #[serde(default)]
-    exec: Option<String>,
-    #[serde(default)]
     action: Option<TaskPlanningAction>,
     #[serde(default)]
     explanation: Option<String>,
@@ -335,6 +369,8 @@ struct TaskPlanningArgs {
     status: Option<PlanItemStatus>,
     #[serde(default)]
     skill_token: Option<String>,
+    #[serde(default, alias = "read_skill")]
+    read_skill: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -410,6 +446,7 @@ enum BuiltinTool {
     ChromeCdp,
     ChatPlusAdapterDebugger,
     OfficeCli,
+    CodeGraph,
 }
 
 #[derive(Debug, Clone)]
@@ -592,9 +629,8 @@ struct StreamCaptureState {
 
 #[derive(Debug)]
 struct SkillCommandExecution {
-    status: std::process::ExitStatus,
+    status: Option<std::process::ExitStatus>,
     stdout: StreamCapturedOutput,
     stderr: StreamCapturedOutput,
+    timed_out: bool,
 }
-
-

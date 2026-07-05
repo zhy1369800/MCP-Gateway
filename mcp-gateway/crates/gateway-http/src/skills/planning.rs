@@ -420,3 +420,66 @@ fn cdp_output_indicates_stuck(stdout: &str, stderr: &str) -> bool {
         || haystack.contains("websocket")
 }
 
+impl SkillsService {
+    pub async fn delete_plan(&self, planning_id: &str) -> bool {
+        let trimmed = planning_id.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let mut guard = self.planning.write().await;
+        let before = guard.len();
+        guard.retain(|_, state| state.planning_id != trimmed);
+        before != guard.len()
+    }
+
+    pub async fn list_active_plans(&self) -> Vec<ActivePlanSummary> {
+        let guard = self.planning.read().await;
+        let mut plans: Vec<ActivePlanSummary> = guard
+            .values()
+            .filter(|state| !plan_all_completed(&state.plan))
+            .map(plan_state_to_summary)
+            .collect();
+        plans.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+        plans
+    }
+}
+
+fn plan_state_to_summary(state: &PlanningState) -> ActivePlanSummary {
+    let pending_count = state
+        .plan
+        .iter()
+        .filter(|item| item.status == PlanItemStatus::Pending)
+        .count();
+    let completed_count = state
+        .plan
+        .iter()
+        .filter(|item| item.status == PlanItemStatus::Completed)
+        .count();
+    let in_progress_step = state
+        .plan
+        .iter()
+        .find(|item| item.status == PlanItemStatus::InProgress)
+        .map(plan_item_to_dto);
+    ActivePlanSummary {
+        planning_id: state.planning_id.clone(),
+        explanation: state.explanation.clone(),
+        updated_at: state.updated_at,
+        total_steps: state.plan.len(),
+        completed_steps: completed_count,
+        pending_count,
+        in_progress_step,
+        plan: state.plan.iter().map(plan_item_to_dto).collect(),
+    }
+}
+
+fn plan_item_to_dto(item: &PlanItem) -> ActivePlanStepDto {
+    ActivePlanStepDto {
+        step: item.step.clone(),
+        status: match item.status {
+            PlanItemStatus::Pending => PlanItemStatusDto::Pending,
+            PlanItemStatus::InProgress => PlanItemStatusDto::InProgress,
+            PlanItemStatus::Completed => PlanItemStatusDto::Completed,
+        },
+    }
+}
+

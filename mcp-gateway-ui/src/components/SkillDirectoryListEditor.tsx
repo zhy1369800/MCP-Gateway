@@ -47,7 +47,7 @@ export function SkillDirectoryListEditor({
       </div>
       <div className="skills-dir-list">
         {items.map((item) => (
-          <div className={`skills-dir-row ${showValidation ? "" : "no-validation"} ${enableToggle ? "with-toggle" : ""}`} key={item.id}>
+          <div className={`skills-dir-row ${showValidation ? "" : "no-validation has-browse"} ${enableToggle ? "with-toggle" : ""}`} key={item.id}>
             {enableToggle && (
               <button
                 className={`toggle-btn skills-dir-toggle ${item.enabled ? "toggle-on" : "toggle-off"}`}

@@ -6,6 +6,7 @@ use gateway_core::{ConfigService, ProcessManager};
 use tokio::sync::{broadcast, RwLock};
 
 use crate::{SkillsService, TerminalService};
+use crate::ai_adapter::AiSessionManager;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -15,6 +16,7 @@ pub struct AppState {
     pub sse_hub: SseHub,
     pub skills: SkillsService,
     pub terminal: TerminalService,
+    pub ai_sessions: AiSessionManager,
 }
 
 #[derive(Clone)]

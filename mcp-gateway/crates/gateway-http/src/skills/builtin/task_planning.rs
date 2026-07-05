@@ -7,9 +7,9 @@ fn task_planning_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
                 "additionalProperties": false,
                 "required": [],
                 "properties": {
-                    "exec": {
-                        "type": "string",
-                        "description": "Documentation read command. First call may read the complete builtin://task-planning/SKILL.md without skillToken."
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
                     },
                     "action": {
                         "type": "string",
@@ -56,7 +56,7 @@ fn task_planning_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) 
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for action=update, action=set_status, or action=clear. First read the complete builtin://task-planning/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Documentation reads do not require it."
+                        "description": "Required for action=update, action=set_status, or action=clear. First call task-planning with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Documentation reads do not require it."
                     }
                 }
             }
@@ -69,28 +69,12 @@ impl SkillsService {
         args: TaskPlanningArgs,
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
-        if let Some(exec) = args.exec.as_deref() {
-            let command_preview = exec.trim().to_string();
-            if command_preview.is_empty() {
-                return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-            }
-
-            if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-                return Ok(builtin_skill_doc_result(
-                    tool,
-                    &command_preview,
-                    matched_path,
-                    builtin_skill_token(tool),
-                    true,
-                ));
-            }
-
-            if args.action.is_none() {
-                return Err(AppError::BadRequest(
-                    "task-planning exec is only for reading SKILL.md; use action=\"update\", action=\"set_status\", or action=\"clear\" for plan state"
-                        .to_string(),
-                ));
-            }
+        if args.read_skill {
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::TaskPlanning,
+                builtin_skill_token(BuiltinTool::TaskPlanning),
+                true,
+            ));
         }
 
         if let Some(result) = validate_skill_token_result(
@@ -116,6 +100,7 @@ impl SkillsService {
                         json!({
                             "status": "completed",
                             "tool": BuiltinTool::TaskPlanning.name(),
+                            "planningId": planning_id,
                             "planning": {
                                 "active": false,
                                 "completed": true,
@@ -146,6 +131,7 @@ impl SkillsService {
                     json!({
                         "status": "completed",
                         "tool": BuiltinTool::TaskPlanning.name(),
+                        "planningId": planning_id,
                         "planning": {
                             "active": true,
                             "planningId": planning_id,
@@ -237,6 +223,7 @@ impl SkillsService {
                         json!({
                             "status": "completed",
                             "tool": BuiltinTool::TaskPlanning.name(),
+                            "planningId": planning_id,
                             "planning": {
                                 "active": false,
                                 "completed": true,
@@ -275,6 +262,7 @@ impl SkillsService {
                     json!({
                         "status": "completed",
                         "tool": BuiltinTool::TaskPlanning.name(),
+                        "planningId": planning_id,
                         "planning": {
                             "active": true,
                             "planningId": planning_id,
@@ -293,12 +281,12 @@ impl SkillsService {
             }
             TaskPlanningAction::Clear => {
                 let mut guard = self.planning.write().await;
-                let removed = if let Some(planning_id) = args
+                let trimmed_planning_id = args
                     .planning_id
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
+                    .filter(|value| !value.is_empty());
+                let removed = if let Some(planning_id) = trimmed_planning_id {
                     match resolve_planning_state_key(&guard, planning_scope, planning_id) {
                         Ok(key) => guard.remove(&key).is_some(),
                         Err(PlanningLookupError::Unknown) => false,
@@ -315,17 +303,25 @@ impl SkillsService {
                     guard.len() != before
                 };
 
+                let mut planning_payload = serde_json::Map::new();
+                planning_payload.insert("active".to_string(), json!(false));
+                planning_payload.insert("removed".to_string(), json!(removed));
+                let mut top_payload = serde_json::Map::new();
+                top_payload.insert("status".to_string(), json!("completed"));
+                top_payload.insert(
+                    "tool".to_string(),
+                    json!(BuiltinTool::TaskPlanning.name()),
+                );
+                if let Some(planning_id) = trimmed_planning_id {
+                    top_payload.insert("planningId".to_string(), json!(planning_id));
+                    planning_payload
+                        .insert("planningId".to_string(), json!(planning_id));
+                }
+                top_payload.insert("planning".to_string(), Value::Object(planning_payload));
+
                 Ok(tool_success(
                     "Plan cleared".to_string(),
-                    json!({
-                        "status": "completed",
-                        "tool": BuiltinTool::TaskPlanning.name(),
-                        "planning": {
-                            "active": false,
-                            "removed": removed,
-                            "planningId": args.planning_id
-                        }
-                    }),
+                    Value::Object(top_payload),
                 ))
             }
         }

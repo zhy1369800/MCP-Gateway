@@ -8,6 +8,9 @@ export interface EditableConfigSnapshot {
   transport: GatewayConfig["transport"];
   security: GatewayConfig["security"];
   skills: SkillsConfig;
+  aiAdapterEnabled: boolean;
+  aiAdapterKeys: string[];
+  sessionNamePresets: string[];
 }
 
 export type EndpointTransportType = "sse" | "streamable-http";
@@ -43,6 +46,9 @@ export function createEditableConfigSnapshot(input: {
   adminToken: string;
   mcpToken: string;
   skills: SkillsConfig;
+  aiAdapterEnabled: boolean;
+  aiAdapterKeys: string[];
+  sessionNamePresets: string[];
 }): EditableConfigSnapshot {
   return {
     servers: input.servers,
@@ -57,6 +63,9 @@ export function createEditableConfigSnapshot(input: {
       mcp: { enabled: input.mcpToken !== "", token: input.mcpToken },
     },
     skills: input.skills,
+    aiAdapterEnabled: input.aiAdapterEnabled,
+    aiAdapterKeys: input.aiAdapterKeys,
+    sessionNamePresets: input.sessionNamePresets,
   };
 }
 

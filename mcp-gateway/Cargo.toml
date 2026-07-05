@@ -9,10 +9,11 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.1.4"
+version = "0.1.9"
 license = "MIT"
 
 [workspace.dependencies]
+async-stream = "0.3"
 anyhow = "1.0"
 axum = { version = "0.7", features = ["macros"] }
 chrono = { version = "0.4", features = ["serde"] }

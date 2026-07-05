@@ -48,6 +48,11 @@ impl SkillsService {
                 self.handle_builtin_office_cli(config, args, planning_scope)
                     .await
             }
+            BuiltinTool::CodeGraph => {
+                let args = decode_tool_args::<BuiltinShellArgs>(&arguments)?;
+                self.handle_builtin_codegraph(config, args, planning_scope)
+                    .await
+            }
         }
     }
 }

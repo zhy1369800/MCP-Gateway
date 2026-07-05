@@ -21,5 +21,11 @@ utoipa.workspace = true
 multer = "3"
 utoipa-swagger-ui.workspace = true
 uuid.workspace = true
+percent-encoding = "2"
 
 gateway-core = { path = "../gateway-core" }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile.workspace = true
+tower = "0.5"

@@ -5,10 +5,9 @@ pub mod runtime;
 pub mod terminal;
 
 pub use config::{
-    
     apply_runtime_overrides, apply_token_env_overrides, default_config_path, generate_token,
     init_default_config, load_config_from_path, migrate_v1_to_v2_file, normalize_config_in_place,
-    rotate_token, save_config_atomic, validate_config, BuiltinToolsConfig, ConfigService, DefaultsConfig,
+    rotate_token, save_config_atomic, validate_config, AiAdapterConfig, BuiltinToolsConfig, ConfigService, DefaultsConfig,
     GatewayConfig, ADMIN_TOKEN_ENV, MCP_TOKEN_ENV,
     LifecycleMode, RunMode, ServerConfig, SkillCommandRule, SkillPolicyAction, SkillsConfig,
     SkillsExecutionConfig, SkillsPathGuardConfig, SkillsPolicyConfig, StdioProtocol, TokenConfig,

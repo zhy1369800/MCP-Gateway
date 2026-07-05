@@ -5,11 +5,15 @@ fn chrome_cdp_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> 
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["exec"],
+                "required": [],
                 "properties": {
+                    "readSkill": {
+                        "type": "boolean",
+                        "description": "Set true as the first call to read this tool's complete SKILL.md and receive its skillToken. This documentation call does not require skillToken."
+                    },
                     "exec": {
                         "type": "string",
-                        "description": "Chrome DevTools Protocol command. First call must read the complete builtin://chrome-cdp/SKILL.md. After reading it, use commands like `open <url>`, `list`, `snap`, `eval`, `netclear`, `net <filter>`, `netget <id>`, or `click <target> <selector>`."
+                        "description": "Chrome DevTools Protocol command. First call this tool with readSkill=true. After reading SKILL.md, use commands like `open <url>`, `list`, `snap`, `eval`, `netclear`, `net <filter>`, `netget <id>`, or `click <target> <selector>`."
                     },
                     "timeoutMs": {
                         "type": "integer",
@@ -18,7 +22,7 @@ fn chrome_cdp_tool_definition(os: &str, now: &str, cfg: &BuiltinToolsConfig) -> 
                     },
                     "skillToken": {
                         "type": "string",
-                        "description": "Required for every non-documentation call. First read the complete builtin://chrome-cdp/SKILL.md without skillToken, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
+                        "description": "Required for every non-documentation call. First call chrome-cdp with readSkill=true, then use the returned skillToken; do not use regex or partial reads to fetch only the token. Calls without the correct token fail and must be retried."
                     }
                 }
             }
@@ -32,19 +36,21 @@ impl SkillsService {
         args: BuiltinShellArgs,
         planning_scope: &str,
     ) -> Result<ToolResult, AppError> {
-        let command_preview = args.exec.trim().to_string();
-        if command_preview.is_empty() {
-            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
-        }
-
-        if let Some((tool, matched_path)) = builtin_skill_doc_read(&command_preview) {
-            return Ok(builtin_skill_doc_result(
-                tool,
-                &command_preview,
-                matched_path,
-                builtin_skill_token(tool),
+        if args.read_skill {
+            return Ok(builtin_skill_self_doc_result(
+                BuiltinTool::ChromeCdp,
+                builtin_skill_token(BuiltinTool::ChromeCdp),
                 Self::planning_enabled(config),
             ));
+        }
+        let command_preview = args
+            .exec
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| AppError::BadRequest("exec is required".to_string()))?
+            .to_string();
+        if command_preview.is_empty() {
+            return Err(AppError::BadRequest("exec cannot be empty".to_string()));
         }
 
         if let Some(result) = validate_skill_token_result(
@@ -141,7 +147,27 @@ impl SkillsService {
         let duration_ms = started.elapsed().as_millis() as u64;
         let stdout = output.stdout.text;
         let stderr = output.stderr.text;
-        let exit_code = output.status.code().unwrap_or(-1);
+        let exit_code = output.status.as_ref().and_then(|s| s.code()).unwrap_or(-1);
+
+        let timed_out = output.timed_out;
+        if timed_out {
+            let timeout_text = command_timeout_text(timeout_ms, &stdout, &stderr);
+            return Ok(tool_error(
+                timeout_text,
+                json!({
+                    "status": "timed_out",
+                    "tool": tool_name,
+                    "command": structured_command,
+                    "exitCode": exit_code,
+                    "durationMs": duration_ms,
+                    "stdoutTruncated": output.stdout.truncated,
+                    "stderrTruncated": output.stderr.truncated,
+                    "timeoutMs": timeout_ms
+                }),
+            ));
+        }
+
+        let status = output.status.as_ref().expect("status must be Some when not timed out");
         let structured_cdp_args = if tool_name == BuiltinTool::ChatPlusAdapterDebugger.name()
             && cdp_args.first().map(|arg| arg.as_str()) == Some("eval")
         {
@@ -151,7 +177,7 @@ impl SkillsService {
         };
 
         let mut structured = json!({
-            "status": if output.status.success() { "completed" } else { "failed" },
+            "status": if status.success() { "completed" } else { "failed" },
             "tool": tool_name,
             "command": structured_command,
             "runner": node_command(),
@@ -181,7 +207,7 @@ impl SkillsService {
         }
         let output_text = command_output_text(&stdout, &stderr);
 
-        if output.status.success() {
+        if status.success() {
             Ok(tool_success_with_planning_reminder(
                 output_text,
                 structured,
@@ -374,4 +400,3 @@ fn node_command() -> &'static str {
 fn node_command() -> &'static str {
     "node"
 }
-
