@@ -318,6 +318,23 @@ function App() {
   const [terminalCwd, setTerminalCwd] = useState("/app");
   const [terminalTask, setTerminalTask] = useState<TerminalTaskSnapshot | null>(null);
   const [terminalBusy, setTerminalBusy] = useState(false);
+  const [selectedHistoryTask, setSelectedHistoryTask] = useState<TerminalTaskSnapshot | null>(null);
+  const [recentTasks, setRecentTasks] = useState<TerminalTaskSnapshot[]>(() => {
+    try {
+      const saved = localStorage.getItem("mcp_gateway_terminal_history");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("mcp_gateway_terminal_history", JSON.stringify(recentTasks));
+    } catch (e) {
+      console.error("Failed to save terminal history:", e);
+    }
+  }, [recentTasks]);
   const skillUploadInputRef = useRef<HTMLInputElement | null>(null);
   const pendingSkillUploadItemIdRef = useRef<string | null>(null);
   const pendingSkillUploadGroupIdRef = useRef<string | null>(null);
@@ -1253,6 +1270,10 @@ function App() {
         const next = await apiClient.getTerminalTask(terminalTask.taskId);
         if (!cancelled) {
           setTerminalTask(next);
+          setRecentTasks((prev) =>
+            prev.map((t) => (t.taskId === next.taskId ? next : t))
+          );
+          setSelectedHistoryTask((prev) => (prev?.taskId === next.taskId ? next : prev));
           if (next.status !== "running") {
             setTerminalBusy(false);
           }
@@ -1277,9 +1298,15 @@ function App() {
     }
     setError(null);
     setTerminalBusy(true);
+    setSelectedHistoryTask(null);
     try {
       const task = await apiClient.executeTerminalCommand(terminalCommand, terminalCwd);
       setTerminalTask(task);
+      setRecentTasks((prev) => {
+        if (prev.some((t) => t.taskId === task.taskId)) return prev;
+        return [task, ...prev].slice(0, 30);
+      });
+      setTerminalCommand("");
       if (task.status !== "running") {
         setTerminalBusy(false);
       }
@@ -1294,6 +1321,10 @@ function App() {
     try {
       const next = await apiClient.killTerminalTask(terminalTask.taskId);
       setTerminalTask(next);
+      setRecentTasks((prev) =>
+        prev.map((t) => (t.taskId === next.taskId ? next : t))
+      );
+      setSelectedHistoryTask((prev) => (prev?.taskId === next.taskId ? next : prev));
     } catch (err) {
       setError(asErrorMessage(err));
     } finally {
@@ -3193,43 +3224,215 @@ function App() {
         )}
 
         {activeSection === "terminal" && (
-          <section className="config-section">
-            <div className="section-heading">{t("terminalTitle")}</div>
-            <div className="gateway-fields">
-              <div className="gw-field">
-                <label className="field-label">{t("terminalCwd")}</label>
-                <input className="form-input" value={terminalCwd} onChange={(e) => setTerminalCwd(e.target.value)} />
+          <div className="terminal-panel-layout">
+            {/* 左侧：主执行终端区域 */}
+            <div className="terminal-main-area">
+              {/* 终端顶部状态栏 */}
+              <div className="terminal-status-header">
+                <div className="terminal-status-left">
+                  <span className="section-heading" style={{ margin: 0, padding: 0, border: 'none' }}>{t("terminalTitle")}</span>
+                  {selectedHistoryTask ? (
+                    <span className="terminal-active-task-id">
+                      {t("terminalHistory")}: {selectedHistoryTask.taskId.slice(0, 8)}...
+                    </span>
+                  ) : (
+                    terminalTask && (
+                      <span className="terminal-active-task-id">
+                        Task: {terminalTask.taskId.slice(0, 8)}...
+                      </span>
+                    )
+                  )}
+                </div>
+                {/* 状态胶囊 */}
+                <div className="terminal-status-right">
+                  {selectedHistoryTask ? (
+                    <span className={`terminal-status-badge ${selectedHistoryTask.status}`}>
+                      {t(`planStatus_${selectedHistoryTask.status}` as TKey) || selectedHistoryTask.status}
+                    </span>
+                  ) : (
+                    <span className={`terminal-status-badge ${terminalTask ? terminalTask.status : "idle"}`}>
+                      {terminalTask ? (t(`planStatus_${terminalTask.status}` as TKey) || terminalTask.status) : "idle"}
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="gw-field" style={{ gridColumn: "1 / -1" }}>
-                <label className="field-label">{t("terminalCommand")}</label>
-                <input
-                  className="form-input"
-                  value={terminalCommand}
-                  onChange={(e) => setTerminalCommand(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !terminalBusy) {
-                      void runTerminalCommand();
+
+              {/* 终端控制输入域 */}
+              <div className="gateway-fields" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12 }}>
+                <div className="gw-field">
+                  <label className="field-label">{t("terminalCwd")}</label>
+                  <input className="form-input" value={terminalCwd} onChange={(e) => setTerminalCwd(e.target.value)} />
+                  <div className="cwd-reset-container">
+                    <button type="button" className="cwd-reset-btn" onClick={() => setTerminalCwd("/app")}>
+                      {t("terminalCwdResetApp")}
+                    </button>
+                    <button type="button" className="cwd-reset-btn" onClick={() => setTerminalCwd("/data/skills")}>
+                      {t("terminalCwdResetData")}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="gw-field">
+                  <label className="field-label">{t("terminalCommand")}</label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      className="form-input"
+                      value={terminalCommand}
+                      onChange={(e) => setTerminalCommand(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !terminalBusy) {
+                          void runTerminalCommand();
+                        }
+                      }}
+                      placeholder="pip install yt-dlp"
+                      style={{ flex: 1 }}
+                    />
+                    {/* 常用命令插入面板 */}
+                    <select
+                      className="form-select terminal-preset-select"
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setTerminalCommand(e.target.value);
+                          e.target.value = "";
+                        }
+                      }}
+                    >
+                      <option value="" disabled>{t("terminalPresetSelect")}</option>
+                      <option value="pip install --upgrade pip">upgrade pip</option>
+                      <option value="pip list">pip list</option>
+                      <option value="npm install">npm install</option>
+                      <option value="npm run build">npm build</option>
+                      <option value="git status">git status</option>
+                      <option value="git pull">git pull</option>
+                      <option value="python --version">python version</option>
+                      <option value="node -v">node version</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* 动作按钮条 */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, marginBottom: 12 }}>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn btn-start" onClick={() => { void runTerminalCommand(); }} disabled={terminalBusy || !terminalCommand.trim()}>
+                    <Play size={14} />
+                    {t("terminalRun")}
+                  </button>
+                  <button className="btn btn-stop" onClick={() => { void stopTerminalCommand(); }} disabled={!terminalTask || terminalTask.status !== "running"}>
+                    <Square size={14} />
+                    {t("terminalStop")}
+                  </button>
+                </div>
+
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => {
+                      const active = selectedHistoryTask || terminalTask;
+                      if (active) {
+                        const content = `$ ${active.command}\n\n${active.stdout}\n${active.stderr || ""}`;
+                        navigator.clipboard.writeText(content).catch(() => {});
+                      }
+                    }}
+                    disabled={!selectedHistoryTask && !terminalTask}
+                    title={t("terminalCopy")}
+                  >
+                    <Copy size={14} />
+                    {t("terminalCopy")}
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => {
+                      setTerminalTask(null);
+                      setSelectedHistoryTask(null);
+                    }}
+                    title={t("terminalClear")}
+                  >
+                    <Trash2 size={14} />
+                    {t("terminalClear")}
+                  </button>
+                </div>
+              </div>
+
+              {/* 大屏终端视窗 */}
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                <label className="field-label">{t("terminalOutput")}</label>
+                <div className="terminal-viewport">
+                  {(() => {
+                    const active = selectedHistoryTask || terminalTask;
+                    if (!active) {
+                      return <span className="terminal-system-text">{t("terminalIdle")}</span>;
                     }
-                  }}
-                  placeholder="pip install yt-dlp"
-                />
+                    return (
+                      <>
+                        <span className="terminal-system-text">
+                          [admin@mcp-gateway {active.cwd}]$ {active.command}
+                        </span>
+                        {"\n\n"}
+                        <span className="terminal-stdout-text">{active.stdout}</span>
+                        {active.stderr && (
+                          <>
+                            {"\n"}
+                            <span className="terminal-stderr-text">{active.stderr}</span>
+                          </>
+                        )}
+                        {"\n\n"}
+                        <span className="terminal-system-text">
+                          --- Task finished with status={active.status}
+                          {active.exitCode !== null ? ` exit=${active.exitCode}` : ""} ---
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button className="btn btn-start" onClick={() => { void runTerminalCommand(); }} disabled={terminalBusy || !terminalCommand.trim()}>
-                {t("terminalRun")}
-              </button>
-              <button className="btn btn-stop" onClick={() => { void stopTerminalCommand(); }} disabled={!terminalTask || terminalTask.status !== "running"}>
-                {t("terminalStop")}
-              </button>
+
+            {/* 右侧：历史命令抽屉栏 */}
+            <div className="terminal-history-panel">
+              <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ListChecks size={16} />
+                {t("terminalHistory")}
+              </div>
+              <div className="terminal-history-list">
+                {selectedHistoryTask && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    style={{ width: '100%', marginBottom: 8 }}
+                    onClick={() => setSelectedHistoryTask(null)}
+                  >
+                    回到活跃任务
+                  </button>
+                )}
+                {recentTasks.length === 0 ? (
+                  <div className="terminal-history-empty">{t("terminalHistoryEmpty")}</div>
+                ) : (
+                  recentTasks.map((task) => (
+                    <div
+                      key={task.taskId}
+                      className={`terminal-history-item ${(selectedHistoryTask?.taskId === task.taskId || (!selectedHistoryTask && terminalTask?.taskId === task.taskId)) ? "active" : ""}`}
+                      onClick={() => setSelectedHistoryTask(task)}
+                    >
+                      <div className="terminal-history-item-header">
+                        <span className={`status-dot ${task.status === "running" ? "connecting" : task.status === "completed" ? "running" : "stopped"}`} />
+                        <span className="terminal-history-time">
+                          {new Date(task.startedAt).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <div className="terminal-history-cmd" title={task.command}>
+                        {task.command}
+                      </div>
+                      <div className="terminal-history-cwd" title={task.cwd}>
+                        {task.cwd}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
-            <div className="gw-field" style={{ marginTop: 12 }}>
-              <label className="field-label">{t("terminalOutput")}</label>
-              <pre className="form-textarea" style={{ minHeight: 260, whiteSpace: "pre-wrap", overflow: "auto" }}>{terminalTask
-                ? `$ ${terminalTask.command}\n\n${terminalTask.stdout}${terminalTask.stderr ? `\n${terminalTask.stderr}` : ""}\n\nstatus=${terminalTask.status}${terminalTask.exitCode !== null ? ` exit=${terminalTask.exitCode}` : ""}`
-                : t("terminalIdle")}</pre>
-            </div>
-          </section>
+          </div>
         )}
       {/* ── AI 外接面板 ── */}
       {activeSection === "aiAdapter" && (

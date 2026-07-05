@@ -721,3 +721,252 @@ body {
   gap: 8px;
   margin-top: 16px;
 }
+
+/* ────────────────────────────────────────────────────────────────
+   高级终端模块（Terminal Console UI）
+   ──────────────────────────────────────────────────────────────── */
+.terminal-panel-layout {
+  display: flex;
+  gap: 20px;
+  width: 100%;
+  height: calc(100vh - 120px);
+  min-height: 550px;
+}
+
+.terminal-main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  overflow: hidden;
+}
+
+/* 终端头部状态条 */
+.terminal-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 16px;
+}
+
+.terminal-status-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.terminal-active-task-id {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  background-color: var(--bg-tertiary);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.terminal-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.terminal-status-badge.idle {
+  background-color: rgba(108, 112, 134, 0.15);
+  color: var(--text-secondary);
+}
+
+.terminal-status-badge.running {
+  background-color: rgba(137, 180, 250, 0.15);
+  color: var(--accent-blue);
+  animation: terminal-pulse 1.8s ease-in-out infinite;
+}
+
+.terminal-status-badge.success {
+  background-color: rgba(166, 227, 161, 0.15);
+  color: var(--accent-green);
+}
+
+.terminal-status-badge.failed {
+  background-color: rgba(243, 139, 168, 0.15);
+  color: var(--accent-red);
+}
+
+.terminal-status-badge.killed {
+  background-color: rgba(249, 226, 175, 0.15);
+  color: var(--accent-yellow);
+}
+
+@keyframes terminal-pulse {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 4px rgba(137, 180, 250, 0.2);
+  }
+  50% {
+    opacity: 0.6;
+    box-shadow: 0 0 10px rgba(137, 180, 250, 0.5);
+  }
+}
+
+/* CWD 复位按钮组 */
+.cwd-reset-container {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.cwd-reset-btn {
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cwd-reset-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+
+/* 常用命令插入面板 */
+.terminal-preset-select {
+  max-width: 250px;
+  font-size: 13px;
+  height: 38px;
+}
+
+/* 大视窗屏幕 */
+.terminal-viewport {
+  flex: 1;
+  background-color: #0b0f19;
+  border: 1px solid #111827;
+  border-radius: var(--radius);
+  padding: 16px;
+  font-family: 'SF Mono', 'Courier New', 'Consolas', monospace;
+  font-size: 13px;
+  color: #34d399; /* 荧光青绿 */
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.8);
+  position: relative;
+}
+
+/* CRT 扫描线背景效果 */
+.terminal-viewport::before {
+  content: " ";
+  display: block;
+  position: absolute;
+  top: 0; left: 0; bottom: 0; right: 0;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+  z-index: 2;
+  background-size: 100% 3px, 3px 100%;
+  pointer-events: none;
+}
+
+.terminal-stdout-text {
+  color: #34d399;
+}
+
+.terminal-stderr-text {
+  color: #f87171; /* 亮红 */
+}
+
+.terminal-system-text {
+  color: #60a5fa; /* 宝蓝 */
+}
+
+/* 历史任务抽屉 */
+.terminal-history-panel {
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  overflow: hidden;
+}
+
+.terminal-history-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.terminal-history-item {
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.terminal-history-item:hover {
+  border-color: var(--accent-blue);
+  background-color: var(--bg-hover);
+}
+
+.terminal-history-item.active {
+  border-color: var(--accent-blue);
+  background-color: rgba(137, 180, 250, 0.08);
+}
+
+.terminal-history-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.terminal-history-time {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.terminal-history-cmd {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-history-cwd {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-history-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
