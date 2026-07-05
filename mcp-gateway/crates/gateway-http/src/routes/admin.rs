@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocket};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use gateway_core::{AppError, GatewayConfig, ServerConfig};
-use crate::terminal::TerminalTaskSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
 use crate::ai_adapter::session::AiToolDef;
 
@@ -375,7 +376,6 @@ async fn handle_terminal_socket(
     _state: AppState,
     cwd: Option<String>,
 ) {
-    use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
     use futures_util::{SinkExt, StreamExt};
     use std::io::Read;
 
