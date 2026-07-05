@@ -252,6 +252,7 @@ export interface LocalRuntimeSummary {
   node: LocalRuntimeAvailability;
   uv: LocalRuntimeAvailability;
   terminal: TerminalEncodingStatus;
+  configPath?: string;
 }
 
 export type TerminalTaskStatus = "running" | "completed" | "failed" | "killed" | "timeout";

@@ -37,6 +37,10 @@ impl ConfigService {
         self.state.read().await.config.clone()
     }
 
+    pub fn get_path(&self) -> std::path::PathBuf {
+        self.path.as_ref().clone()
+    }
+
     pub async fn replace(&self, mut next: GatewayConfig) -> Result<GatewayConfig, AppError> {
         apply_token_env_overrides(&mut next);
         normalize_config_in_place(&mut next);

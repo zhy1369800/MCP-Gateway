@@ -14,6 +14,7 @@ import type {
   ServerConfig,
   ToolListResult,
   TerminalTaskSnapshot,
+  LocalRuntimeSummary,
 } from "./types";
 
 export function normalizeBaseUrl(baseUrl: string): string {
@@ -230,6 +231,10 @@ export class ApiClient {
       "/admin/skills/directory",
       toJsonValue({ path })
     );
+  }
+
+  async detectRuntimes(): Promise<LocalRuntimeSummary> {
+    return this.request<LocalRuntimeSummary>("GET", "/admin/runtimes");
   }
 
   async listSkillConfirmations(): Promise<SkillConfirmation[]> {

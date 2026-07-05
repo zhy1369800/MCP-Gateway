@@ -792,7 +792,23 @@ function App() {
     let cancelled = false;
 
     if (isRemoteMode) {
-      setLocalRuntimeDetectFailed(true);
+      apiClient.detectRuntimes()
+        .then((summary) => {
+          if (cancelled) {
+            return;
+          }
+          setLocalRuntimeSummary(summary);
+          setLocalRuntimeDetectFailed(false);
+          if (summary.configPath) {
+            setConfigPath(summary.configPath);
+          }
+        })
+        .catch(() => {
+          if (cancelled) {
+            return;
+          }
+          setLocalRuntimeDetectFailed(true);
+        });
       return () => {
         cancelled = true;
       };

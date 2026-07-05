@@ -57,6 +57,10 @@ pub fn router(state: AppState, api_prefix: &str) -> Router {
             &format!("{}/admin/terminal/tasks/:task_id/kill", prefix),
             post(kill_terminal_task),
         )
+        .route(
+            &format!("{}/admin/runtimes", prefix),
+            get(get_server_runtimes),
+        )
         .route(&format!("{}/admin/skills", prefix), get(get_skills))
         .route(
             &format!("{}/admin/skills/plans", prefix),
@@ -1044,4 +1048,154 @@ fn gateway_base_url(listen: &str) -> Result<String, AppError> {
     };
 
     Ok(format!("http://{host}:{}", addr.port()))
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSystemInfo {
+    pub os: String,
+    pub arch: String,
+    pub family: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRuntimeAvailability {
+    pub installed: bool,
+    pub version: Option<String>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTerminalEncodingStatus {
+    pub active_code_page: Option<u32>,
+    pub utf8_forced: bool,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRuntimeSummary {
+    pub system: RemoteSystemInfo,
+    pub python: RemoteRuntimeAvailability,
+    pub node: RemoteRuntimeAvailability,
+    pub uv: RemoteRuntimeAvailability,
+    pub terminal: RemoteTerminalEncodingStatus,
+    pub config_path: String,
+}
+
+fn run_version_probe_remote(executable: &str, args: &[&str], extract_version: fn(&str) -> Option<String>) -> Option<String> {
+    let mut command = Command::new(executable);
+    command.args(args);
+    
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let output = command.output().ok()?;
+    for source in [&output.stdout, &output.stderr] {
+        let text = String::from_utf8_lossy(source);
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if let Some(version) = extract_version(line) {
+                return Some(version);
+            }
+        }
+    }
+    None
+}
+
+fn extract_python_version_remote(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let version = trimmed.strip_prefix("Python ")?;
+    version
+        .chars()
+        .next()
+        .filter(|ch| ch.is_ascii_digit())
+        .map(|_| trimmed.to_string())
+}
+
+fn extract_node_version_remote(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let version = trimmed.strip_prefix('v')?;
+    version
+        .chars()
+        .next()
+        .filter(|ch| ch.is_ascii_digit())
+        .map(|_| trimmed.to_string())
+}
+
+fn extract_uv_version_remote(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let version = trimmed.strip_prefix("uv ")?;
+    version
+        .chars()
+        .next()
+        .filter(|ch| ch.is_ascii_digit())
+        .map(|_| trimmed.to_string())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/admin/runtimes",
+    responses((status = 200, description = "Get server runtime environments", body = RemoteRuntimeSummary))
+)]
+pub async fn get_server_runtimes(State(state): State<AppState>) -> ApiResult<RemoteRuntimeSummary> {
+    let system = RemoteSystemInfo {
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        family: std::env::consts::FAMILY.to_string(),
+    };
+
+    let python_version = if cfg!(target_os = "windows") {
+        run_version_probe_remote("py", &["-3", "--version"], extract_python_version_remote)
+            .or_else(|| run_version_probe_remote("python", &["--version"], extract_python_version_remote))
+            .or_else(|| run_version_probe_remote("python3", &["--version"], extract_python_version_remote))
+            .or_else(|| run_version_probe_remote("py", &["--version"], extract_python_version_remote))
+    } else {
+        run_version_probe_remote("python3", &["--version"], extract_python_version_remote)
+            .or_else(|| run_version_probe_remote("python", &["--version"], extract_python_version_remote))
+    };
+    let python = RemoteRuntimeAvailability {
+        installed: python_version.is_some(),
+        version: python_version,
+    };
+
+    let node_version = run_version_probe_remote("node", &["--version"], extract_node_version_remote);
+    let node = RemoteRuntimeAvailability {
+        installed: node_version.is_some(),
+        version: node_version,
+    };
+
+    let uv_version = run_version_probe_remote("uv", &["--version"], extract_uv_version_remote);
+    let uv = RemoteRuntimeAvailability {
+        installed: uv_version.is_some(),
+        version: uv_version,
+    };
+
+    let mut active_code_page = None;
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+        let cp = unsafe { GetConsoleOutputCP() };
+        if cp != 0 {
+            active_code_page = Some(cp);
+        }
+    }
+    
+    let terminal = RemoteTerminalEncodingStatus {
+        active_code_page,
+        utf8_forced: std::env::var("MCP_FORCE_UTF8").is_ok(),
+    };
+
+    let config_path = state.config_service.get_path().to_string_lossy().to_string();
+
+    Ok(response::ok(RemoteRuntimeSummary {
+        system,
+        python,
+        node,
+        uv,
+        terminal,
+        config_path,
+    }))
 }
