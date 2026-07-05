@@ -396,9 +396,11 @@ async fn handle_terminal_socket(
     #[cfg(target_os = "windows")]
     let shell = "powershell.exe";
     #[cfg(not(target_os = "windows"))]
-    let shell = "/bin/sh";
+    let shell = "/bin/bash";
 
     let mut cmd = CommandBuilder::new(shell);
+    // 设置带路径的提示符格式：[user@host cwd]#
+    cmd.env("PS1", r"\[\e[0;32m\][\u@\h \w]\$\[\e[0m\] ");
     if let Some(c) = cwd {
         cmd.cwd(c);
     }
