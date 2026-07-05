@@ -2404,6 +2404,14 @@ function App() {
               <span>{t("navAiAdapter")}</span>
               {aiSessions.length > 0 && <span className="sidebar-badge">{aiSessions.length}</span>}
             </button>
+            <button
+              type="button"
+              className={`sidebar-nav-item ${activeSection === "terminal" ? "active" : ""}`}
+              onClick={() => setActiveSection("terminal")}
+            >
+              <Terminal size={16} />
+              <span>{t("navTerminal")}</span>
+            </button>
           </nav>
 
           <div className="sidebar-status">
