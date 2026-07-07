@@ -74,6 +74,8 @@ fn build_cors_layer() -> CorsLayer {
             header::HeaderName::from_static("x-api-key"),
             header::HeaderName::from_static("anthropic-version"),
             header::HeaderName::from_static("x-session-id"),
+            header::HeaderName::from_static("mcp-token"),
+            header::HeaderName::from_static("mcp_token"),
         ])
         .expose_headers([
             header::HeaderName::from_static("mcp-session-id"),

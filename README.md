@@ -58,7 +58,13 @@ Health:       GET  /api/v2/ai/health
 
 For clients that automatically append another `/v1` to the copied Base URL, the backend also accepts the compatible `/api/v2/ai/v1/v1/...` paths, including models, chat completions, responses, Anthropic messages, and token counting. Claude Code users do not need to remove `/v1` from the Base URL copied from the UI.
 
-If `MCP Token` is configured, clients should send:
+If `MCP Token` is configured, clients should send the token. It is preferred to use the `Mcp-Token` header:
+
+```text
+Mcp-Token: <your_mcp_token>
+```
+
+Alternatively, the traditional `Authorization` header can be used as a fallback:
 
 ```text
 Authorization: Bearer <your_mcp_token>

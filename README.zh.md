@@ -58,7 +58,13 @@ Token 计数: POST /api/v2/ai/v1/messages/count_tokens
 
 如果客户端会在复制出来的 Base URL 后自动再拼一层 `/v1`，后端也接受兼容路径 `/api/v2/ai/v1/v1/...`，包括模型列表、对话、Responses、Anthropic Messages 和 Token 计数。Claude Code 用户不需要手动删除界面复制地址里的 `/v1`。
 
-如果配置了 `MCP Token`，客户端请求需要带上：
+如果配置了 `MCP Token`，客户端请求需要带上，优先支持使用 `Mcp-Token` 请求头：
+
+```text
+Mcp-Token: <你的_mcp_token>
+```
+
+也可以使用传统的 `Authorization` 头部作为备选：
 
 ```text
 Authorization: Bearer <你的_mcp_token>

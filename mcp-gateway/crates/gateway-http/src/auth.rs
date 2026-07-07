@@ -30,7 +30,7 @@ pub async fn require_mcp_auth(
     next: Next,
 ) -> Response {
     let cfg = state.config_service.get_config().await;
-    let token = extract_token(&request);
+    let token = extract_mcp_token(&request);
     if let Err(error) = enforce_bearer_token(
         token,
         cfg.security.mcp.enabled,
@@ -40,6 +40,33 @@ pub async fn require_mcp_auth(
     }
     next.run(request).await
 }
+
+fn extract_header_token_value(raw: &header::HeaderValue) -> Option<String> {
+    if let Ok(value) = raw.to_str() {
+        let value = value.trim();
+        if let Some(token) = value.strip_prefix("Bearer ") {
+            return Some(token.trim().to_string());
+        } else {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn extract_mcp_token(request: &Request<axum::body::Body>) -> Option<String> {
+    if let Some(raw) = request.headers().get("mcp-token") {
+        if let Some(token) = extract_header_token_value(raw) {
+            return Some(token);
+        }
+    }
+    if let Some(raw) = request.headers().get("mcp_token") {
+        if let Some(token) = extract_header_token_value(raw) {
+            return Some(token);
+        }
+    }
+    extract_token(request)
+}
+
 
 fn extract_token(request: &Request<axum::body::Body>) -> Option<String> {
     if let Some(raw) = request.headers().get(header::AUTHORIZATION) {

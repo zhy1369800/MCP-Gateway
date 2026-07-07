@@ -2673,7 +2673,7 @@ function App() {
                 <div className="gw-field">
                   <label className="field-label">
                     {t("mcpToken")}
-                    <span className="field-label-hint"> ({t("authHeaderHint")}，{t("mcpTokenUsageHint")})</span>
+                    <span className="field-label-hint"> ({t("mcpAuthHeaderHint")}，{t("mcpTokenUsageHint")})</span>
                   </label>
                   <input className="form-input" type="password" placeholder={t("tokenPlaceholder")}
                     value={mcpToken} onChange={(e) => setMcpToken(e.target.value)} />
