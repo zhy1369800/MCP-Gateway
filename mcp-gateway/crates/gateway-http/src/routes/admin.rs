@@ -394,11 +394,22 @@ async fn handle_terminal_socket(
     };
 
     #[cfg(target_os = "windows")]
-    let shell = "powershell.exe";
-    #[cfg(not(target_os = "windows"))]
-    let shell = "/bin/bash";
+    let mut cmd = CommandBuilder::new("powershell.exe");
 
-    let mut cmd = CommandBuilder::new(shell);
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let has_coder_user = std::path::Path::new("/home/coder").exists();
+        let is_root = std::env::var("USER").map(|u| u == "root").unwrap_or(false)
+            || std::path::Path::new("/root").exists();
+
+        if is_root && has_coder_user {
+            let mut c = CommandBuilder::new("/bin/su");
+            c.args(&["-s", "/bin/bash", "coder"]);
+            c
+        } else {
+            CommandBuilder::new("/bin/bash")
+        }
+    };
     // 设置带路径的提示符格式：[user@host cwd]#
     cmd.env("PS1", r"\[\e[0;32m\][\u@\h \w]\$\[\e[0m\] ");
     if let Some(c) = cwd {
