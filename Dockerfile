@@ -64,7 +64,10 @@ ENV XDG_CONFIG_HOME=/app
 ENV MCP_GATEWAY_CONFIG=/data/config/config.json
 ENV MCP_SKILLS_ROOT=/data/skills
 
-#����/dada
+# Install Antigravity CLI globally
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash && \
+    mv /app/.local/bin/agy /usr/local/bin/agy
+
 # Start the server
 # Use 'server' subcommand from gateway-cli
 CMD ["sh", "-c", "mkdir -p /data/config /data/skills && if [ ! -f \"$MCP_GATEWAY_CONFIG\" ]; then cp /opt/bootstrap/default-config.json \"$MCP_GATEWAY_CONFIG\"; fi && exec mcp-gateway run --config \"$MCP_GATEWAY_CONFIG\""]
