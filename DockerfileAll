@@ -43,6 +43,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     && rm -rf /var/lib/apt/lists/*
 
+# Create user coder with UID 1000 to match Hugging Face persistent storage permissions
+RUN useradd -u 1000 -m -s /bin/bash coder || true
+
 # Copy uv binaries
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
