@@ -26,8 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    htop \
+    lsof \
     nodejs \
     npm \
+    procps \
     python3 \
     python3-pip \
     python3-venv \
