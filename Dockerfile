@@ -41,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+ENV PATH="/app/.local/bin:/opt/venv/bin:$PATH"
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/gateway /usr/local/bin/mcp-gateway
