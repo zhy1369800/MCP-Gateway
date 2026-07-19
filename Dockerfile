@@ -68,6 +68,10 @@ ENV MCP_SKILLS_ROOT=/data/skills
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash && \
     mv /app/.local/bin/agy /usr/local/bin/agy
 
+# Install CodeGraph globally
+RUN curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh && \
+    mv /app/.local/bin/codegraph /usr/local/bin/codegraph
+
 # Start the server
 # Use 'server' subcommand from gateway-cli
 CMD ["sh", "-c", "mkdir -p /data/config /data/skills && if [ ! -f \"$MCP_GATEWAY_CONFIG\" ]; then cp /opt/bootstrap/default-config.json \"$MCP_GATEWAY_CONFIG\"; fi && exec mcp-gateway run --config \"$MCP_GATEWAY_CONFIG\""]
