@@ -30,19 +30,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    htop \
+    lsof \
     nginx \
     nodejs \
     npm \
+    procps \
     python3 \
     python3-pip \
     python3-venv \
+    sudo \
+    tmux \
     && rm -rf /var/lib/apt/lists/*
+
+# Create user coder with UID 1000 to match Hugging Face persistent storage permissions
+RUN useradd -u 1000 -m -s /bin/bash coder || true && \
+    echo "coder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Copy uv binaries
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+ENV PATH="/app/.local/bin:/opt/venv/bin:$PATH"
 
 COPY --from=rust-builder /app/target/release/gateway /usr/local/bin/mcp-gateway
 COPY --from=web-builder /app/ui/dist /usr/share/nginx/html
@@ -61,5 +70,13 @@ ENV RUST_LOG=info \
     MCP_GATEWAY_CONFIG=/data/config/config.json \
     MCP_SKILLS_ROOT=/data/skills \
     HF_SPACE_UI=1
+
+# Install Antigravity CLI globally
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash && \
+    mv /app/.local/bin/agy /usr/local/bin/agy
+
+# Install CodeGraph globally
+RUN curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh && \
+    mv /app/.local/bin/codegraph /usr/local/bin/codegraph
 
 CMD ["sh", "-c", "if [ ! -f \"$MCP_GATEWAY_CONFIG\" ]; then cp /opt/bootstrap/default-config.json \"$MCP_GATEWAY_CONFIG\"; fi && mcp-gateway run --config \"$MCP_GATEWAY_CONFIG\" > /tmp/mcp-gateway.log 2>&1 & exec nginx -g 'daemon off;'" ]

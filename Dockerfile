@@ -26,18 +26,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    htop \
+    lsof \
     nodejs \
     npm \
+    procps \
     python3 \
     python3-pip \
     python3-venv \
+    sudo \
+    tmux \
     && rm -rf /var/lib/apt/lists/*
+
+# Create user coder with UID 1000 to match Hugging Face persistent storage permissions
+RUN useradd -u 1000 -m -s /bin/bash coder || true && \
+    echo "coder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Copy uv binaries
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+ENV PATH="/app/.local/bin:/opt/venv/bin:$PATH"
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/gateway /usr/local/bin/mcp-gateway
@@ -59,6 +68,14 @@ ENV HOME=/app
 ENV XDG_CONFIG_HOME=/app
 ENV MCP_GATEWAY_CONFIG=/data/config/config.json
 ENV MCP_SKILLS_ROOT=/data/skills
+
+# Install Antigravity CLI globally
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash && \
+    mv /app/.local/bin/agy /usr/local/bin/agy
+
+# Install CodeGraph globally
+RUN curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh && \
+    mv /app/.local/bin/codegraph /usr/local/bin/codegraph
 
 # Copy agy_ask helper and source it in .bashrc
 COPY agy_ask_helper.sh /app/agy_ask_helper.sh
