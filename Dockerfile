@@ -77,9 +77,9 @@ RUN curl -fsSL https://antigravity.google/cli/install.sh | bash && \
 RUN curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh && \
     mv /app/.local/bin/codegraph /usr/local/bin/codegraph
 
-# Copy agy_ask helper and source it in .bashrc
+# Copy agy_ask helper and source it in system-wide bashrc
 COPY agy_ask_helper.sh /app/agy_ask_helper.sh
-RUN echo "source /app/agy_ask_helper.sh" >> /app/.bashrc
+RUN echo "source /app/agy_ask_helper.sh" >> /etc/bash.bashrc
 
 # Start the server
 # Use 'server' subcommand from gateway-cli
