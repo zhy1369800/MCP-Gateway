@@ -60,7 +60,10 @@ ENV XDG_CONFIG_HOME=/app
 ENV MCP_GATEWAY_CONFIG=/data/config/config.json
 ENV MCP_SKILLS_ROOT=/data/skills
 
-#����/dada
+# Copy agy_ask helper and source it in .bashrc
+COPY agy_ask_helper.sh /app/agy_ask_helper.sh
+RUN echo "source /app/agy_ask_helper.sh" >> /app/.bashrc
+
 # Start the server
 # Use 'server' subcommand from gateway-cli
 CMD ["sh", "-c", "mkdir -p /data/config /data/skills && if [ ! -f \"$MCP_GATEWAY_CONFIG\" ]; then cp /opt/bootstrap/default-config.json \"$MCP_GATEWAY_CONFIG\"; fi && exec mcp-gateway run --config \"$MCP_GATEWAY_CONFIG\""]
